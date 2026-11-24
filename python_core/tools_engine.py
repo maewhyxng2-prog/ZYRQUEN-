@@ -1263,7 +1263,50 @@ def invoke_tool_governed(
 
     allowlist = json.loads(tool_row["endpoint_allowlist_json"] or "[]")
     if tool_id == "web_search":
-        raw_out = _run_web_search(str(tool_input.get("query", "")), allowlist)
+        base_query = str(tool_input.get("query", ""))
+        sub_queries = [
+            str(sq).strip()
+            for sq in (tool_input.get("sub_queries") or [])
+            if str(sq).strip() and str(sq).strip().lower() != base_query.strip().lower()
+        ][:2]
+        raw_out = _run_web_search(base_query, allowlist)
+        if sub_queries:
+            merged_results: list[dict] = list(raw_out.get("results") or []) if raw_out.get("ok") else []
+            seen_urls = {str(r.get("url") or "").strip().lower() for r in merged_results if r.get("url")}
+            provs_q = list(raw_out.get("providers_queried") or [])
+            prov_errs = list(raw_out.get("provider_errors") or [])
+            if not raw_out.get("ok") and raw_out.get("error"):
+                prov_errs.append(str(raw_out["error"]))
+            executed_queries = [base_query]
+            for sq in sub_queries:
+                sub_res = _run_web_search(sq, allowlist)
+                executed_queries.append(sq)
+                if sub_res.get("ok"):
+                    for p in sub_res.get("providers_queried") or []:
+                        if p not in provs_q:
+                            provs_q.append(p)
+                    prov_errs.extend(sub_res.get("provider_errors") or [])
+                    for item in sub_res.get("results") or []:
+                        u_key = str(item.get("url") or "").strip().lower()
+                        if u_key and u_key in seen_urls:
+                            continue
+                        if u_key:
+                            seen_urls.add(u_key)
+                        merged_results.append(item)
+                elif sub_res.get("error"):
+                    prov_errs.append(f"{sq}: {sub_res['error']}")
+            if merged_results or raw_out.get("ok"):
+                raw_out = {
+                    "ok": True,
+                    "providers_queried": provs_q,
+                    "provider_errors": prov_errs[:4],
+                    "query": base_query,
+                    "sub_queries_executed": executed_queries,
+                    "retrieved_at": raw_out.get("retrieved_at") or _now_iso(),
+                    "results": merged_results[:10],
+                }
+            elif prov_errs:
+                raw_out = {"ok": False, "error": "; ".join(prov_errs[:2])}
     elif tool_id == "doc_fetch":
         raw_out = _run_doc_fetch(str(tool_input.get("url", "")), allowlist)
     elif tool_id == "workspace_file_read":

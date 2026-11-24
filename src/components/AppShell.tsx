@@ -16,6 +16,7 @@ interface AppShellProps {
   user: User;
   showBackOnMobile?: boolean;
   hideBottomBarOnMobile?: boolean;
+  isProcessing?: boolean;
   onNavigate: (screen: AppScreen) => void;
   onBack: () => void;
   onOpenProfile: () => void;
@@ -36,6 +37,7 @@ export function AppShell({
   user,
   showBackOnMobile = false,
   hideBottomBarOnMobile = false,
+  isProcessing = false,
   onNavigate,
   onBack,
   onOpenProfile,
@@ -65,7 +67,7 @@ export function AppShell({
                 aria-label="หน้าหลัก ZYRQUEN"
                 className="flex min-h-[44px] min-w-[44px] items-center justify-center"
               >
-                <ZyrquenEmblem size={28} />
+                <ZyrquenEmblem size={28} active={isProcessing} />
               </button>
             )}
           </div>
@@ -93,7 +95,7 @@ export function AppShell({
             onClick={() => onNavigate('home')}
             className="flex shrink-0 items-center gap-2.5 text-left whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-lg"
           >
-            <ZyrquenEmblem size={28} />
+            <ZyrquenEmblem size={28} active={isProcessing} />
             <span className="font-display text-base font-bold tracking-tight text-slate-50">
               ZYRQUEN Ω∞
             </span>

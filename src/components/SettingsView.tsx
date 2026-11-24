@@ -70,6 +70,9 @@ export function SettingsView({
   const [benchmarkModel, setBenchmarkModel] = useState<ModelVariantId>('zyrquen-omega-v1');
   const [runningBenchmark, setRunningBenchmark] = useState(false);
   const [benchmarkEval, setBenchmarkEval] = useState<NativeBenchmarkEvaluation | null>(null);
+  const [curatingCorpus, setCuratingCorpus] = useState(false);
+  const [runningExperiment, setRunningExperiment] = useState(false);
+  const [experimentMsg, setExperimentMsg] = useState<string | null>(null);
 
   const loadDeveloper = useCallback(async () => {
     setLoading(true);
@@ -238,6 +241,70 @@ export function SettingsView({
       await loadAdmin();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'ดำเนินการ Approval Gate ไม่สำเร็จ');
+    }
+  }
+
+  async function handleCurateCorpus() {
+    setCuratingCorpus(true);
+    setError(null);
+    setExperimentMsg(null);
+    try {
+      const res = await apiRequest<{
+        dataset: { name: string; total_records: number };
+      }>('/api/developer/curate-corpus', {
+        method: 'POST',
+        token,
+        body: { name: 'verified-knowledge-corpus' },
+      });
+      setExperimentMsg(
+        `คัดกรองชุดข้อมูล "${res.dataset.name}" จากความจำที่ยืนยันแล้ว (${res.dataset.total_records} รายการ)`
+      );
+      await loadDeveloper();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'คัดกรองชุดข้อมูลจากความจำไม่สำเร็จ');
+    } finally {
+      setCuratingCorpus(false);
+    }
+  }
+
+  async function handleRunNeuralExperiment() {
+    setRunningExperiment(true);
+    setError(null);
+    setExperimentMsg(null);
+    try {
+      const cleanDs = (devData?.datasets || []).find((d) => !d.leakage_detected);
+      const res = await apiRequest<{
+        improved: boolean;
+        experiment: { approval_status: string };
+      }>('/api/developer/experiments', {
+        method: 'POST',
+        token,
+        body: { datasetId: cleanDs?.id || null, epochs: 8 },
+      });
+      setExperimentMsg(
+        res.improved
+          ? 'การทดลอง Neural Transformer ลด Val Loss สำเร็จ — ส่งเข้าคิวอนุมัติผู้ดูแลระบบแล้ว'
+          : `การทดลองเสร็จสิ้น (สถานะ: ${res.experiment.approval_status})`
+      );
+      await loadDeveloper();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'รันการทดลอง Neural Transformer ไม่สำเร็จ');
+    } finally {
+      setRunningExperiment(false);
+    }
+  }
+
+  async function handleExperimentDecision(expId: string, decision: 'approve' | 'reject') {
+    setError(null);
+    try {
+      await apiRequest(`/api/admin/experiments/${expId}/decide`, {
+        method: 'POST',
+        token,
+        body: { decision },
+      });
+      await loadAdmin();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'ดำเนินการอนุมัติการทดลองไม่สำเร็จ');
     }
   }
 
@@ -851,6 +918,64 @@ export function SettingsView({
                       ))}
                     </div>
 
+                    {benchmarkEval.report.capability_ledger && (
+                      <div className="rounded-2xl border border-slate-800 bg-[#070C18] p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-semibold text-slate-100">
+                            Real Capability Ledger — Measured, Not Declared (6 Subsystems)
+                          </p>
+                          <span className="font-mono text-[11px] text-cyan-300">
+                            VERIFIED: {benchmarkEval.report.capability_ledger.summary.verified} · PARTIAL:{' '}
+                            {benchmarkEval.report.capability_ledger.summary.partial} · BLOCKED:{' '}
+                            {benchmarkEval.report.capability_ledger.summary.blocked} · REGRESSION:{' '}
+                            {benchmarkEval.report.capability_ledger.summary.regression_failed}
+                          </span>
+                        </div>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {Object.values(benchmarkEval.report.capability_ledger.domains).map((dom) => {
+                            const statusStyle =
+                              dom.status === 'VERIFIED'
+                                ? 'border-emerald-500/40 bg-emerald-950/20 text-emerald-300'
+                                : dom.status === 'PARTIAL' || dom.status === 'TESTED'
+                                ? 'border-amber-500/40 bg-amber-950/20 text-amber-200'
+                                : dom.status === 'REGRESSION_FAILED' || dom.status === 'BLOCKED'
+                                ? 'border-rose-500/40 bg-rose-950/20 text-rose-300'
+                                : 'border-slate-700 bg-slate-900/40 text-slate-300';
+                            return (
+                              <div
+                                key={dom.domain}
+                                className="rounded-xl border border-slate-800/90 bg-[#0B1222] p-3 text-xs"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-mono text-[11px] font-semibold text-slate-200">
+                                    {dom.domain}
+                                  </span>
+                                  <span
+                                    className={`rounded-md border px-2 py-0.5 font-mono text-[10px] font-semibold ${statusStyle}`}
+                                  >
+                                    {dom.status}
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-[11px] text-slate-400">{dom.label}</p>
+                                <p className="mt-1.5 font-mono text-[11px] text-slate-300 tabular-nums">
+                                  {dom.passed}/{dom.total} ({(dom.score * 100).toFixed(1)}%) · FP {dom.false_positives} · sha{' '}
+                                  {dom.evidence_hash.slice(0, 8)}
+                                </p>
+                                <p className="mt-1 text-[10px] text-slate-400">
+                                  Unseen:{dom.criteria.has_unseen_dataset ? '✓' : '✗'} · E2E:{dom.criteria.has_e2e_probe ? '✓' : '✗'} · Post:{dom.criteria.has_postcondition_check ? '✓' : '✗'}
+                                </p>
+                                {dom.disclosed_gaps.length > 0 && (
+                                  <p className="mt-1.5 text-[10px] text-amber-200/90">
+                                    {dom.disclosed_gaps[0]}
+                                  </p>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
                     {benchmarkEval.report.failures.length > 0 && (
                       <div className="rounded-2xl border border-amber-500/30 bg-amber-950/15 p-4">
                         <p className="text-xs font-semibold text-amber-200">
@@ -888,6 +1013,78 @@ export function SettingsView({
                     )}
                   </div>
                 )}
+              </section>
+
+              <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-base font-semibold text-slate-100">
+                      การเรียนรู้จากความจำ &amp; Neural Transformer (P2)
+                    </h3>
+                    <p className="mt-1 text-xs text-slate-400">
+                      คัดกรองข้อมูลจากความจำที่ยืนยันแล้ว และทดลองฝึก Native Transformer (Random Init + BPE) เพื่อขออนุมัติโปรโมต Checkpoint
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={curatingCorpus}
+                      onClick={() => void handleCurateCorpus()}
+                      className="min-h-[38px] rounded-xl border border-slate-700 bg-[#070C18] px-3.5 text-xs font-medium text-cyan-300 hover:border-cyan-500/60 disabled:opacity-50"
+                    >
+                      {curatingCorpus ? 'กำลังคัดกรอง...' : 'สร้างชุดข้อมูลจากความจำที่ยืนยันแล้ว'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={runningExperiment}
+                      onClick={() => void handleRunNeuralExperiment()}
+                      className="min-h-[38px] rounded-xl bg-blue-600 px-3.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                    >
+                      {runningExperiment ? 'กำลังฝึกทดลอง...' : 'รันการทดลอง Neural Transformer'}
+                    </button>
+                  </div>
+                </div>
+
+                {experimentMsg && (
+                  <p className="mt-3 text-xs text-cyan-300">{experimentMsg}</p>
+                )}
+
+                <div className="mt-4 divide-y divide-slate-800/80">
+                  {(devData?.experiments || []).length === 0 ? (
+                    <p className="py-3 text-xs text-slate-400">
+                      ยังไม่มีประวัติการทดลอง Neural Transformer
+                    </p>
+                  ) : (
+                    devData!.experiments!.map((exp) => {
+                      let baseVal = '-';
+                      let candVal = '-';
+                      let params = '-';
+                      try {
+                        const b = JSON.parse(exp.baseline_metrics_json) as { initial_val_loss?: number };
+                        const c = JSON.parse(exp.candidate_metrics_json) as {
+                          final_val_loss?: number;
+                          param_count?: number;
+                        };
+                        if (b.initial_val_loss !== undefined) baseVal = b.initial_val_loss.toFixed(4);
+                        if (c.final_val_loss !== undefined) candVal = c.final_val_loss.toFixed(4);
+                        if (c.param_count !== undefined) params = c.param_count.toLocaleString();
+                      } catch {
+                        /* ignore */
+                      }
+                      return (
+                        <div key={exp.id} className="py-3 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-semibold text-slate-100">{exp.hypothesis}</span>
+                            <span className="font-mono text-cyan-300">{exp.approval_status}</span>
+                          </div>
+                          <p className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
+                            val_loss: {baseVal} → {candVal} · params: {params}
+                          </p>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
               </section>
 
               <ToolRegistry
@@ -954,6 +1151,69 @@ export function SettingsView({
                         </div>
                       </div>
                     ))
+                  )}
+                </div>
+              </section>
+
+              <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
+                <h3 className="text-base font-semibold text-slate-100">
+                  คิวอนุมัติ Neural Experiment (Self-Improvement Gate)
+                </h3>
+                <p className="mt-1 text-xs text-slate-400">
+                  อนุมัติเพื่อโปรโมต Candidate Neural Checkpoint ที่ผ่านเกณฑ์ลด Val Loss
+                </p>
+                <div className="mt-4 divide-y divide-slate-800/80">
+                  {(adminData?.pending_experiments || []).length === 0 ? (
+                    <p className="py-3 text-sm text-slate-400">
+                      ไม่มีการทดลองที่รอการอนุมัติในขณะนี้
+                    </p>
+                  ) : (
+                    adminData!.pending_experiments!.map((exp) => {
+                      let metricsInfo = '';
+                      try {
+                        const b = JSON.parse(exp.baseline_metrics_json) as { initial_val_loss?: number };
+                        const c = JSON.parse(exp.candidate_metrics_json) as {
+                          final_val_loss?: number;
+                          val_perplexity?: number;
+                        };
+                        metricsInfo = `val_loss: ${b.initial_val_loss?.toFixed(4) ?? '-'} → ${c.final_val_loss?.toFixed(4) ?? '-'} (ppl ${c.val_perplexity?.toFixed(2) ?? '-'})`;
+                      } catch {
+                        // ignore malformed metrics JSON
+                      }
+                      return (
+                        <div
+                          key={exp.id}
+                          className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                        >
+                          <div>
+                            <p className="text-sm font-semibold text-slate-100">{exp.hypothesis}</p>
+                            {metricsInfo && (
+                              <p className="mt-0.5 font-mono text-xs text-slate-400 tabular-nums">
+                                {metricsInfo}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleExperimentDecision(exp.id, 'approve')}
+                              className="flex h-10 items-center gap-1.5 rounded-xl bg-blue-600 px-4 text-xs font-medium text-white hover:bg-blue-500"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              <span>อนุมัติโปรโมต Checkpoint</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleExperimentDecision(exp.id, 'reject')}
+                              className="flex h-10 items-center gap-1.5 rounded-xl border border-rose-500/40 px-4 text-xs font-medium text-rose-200 hover:bg-rose-950/40"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                              <span>ปฏิเสธ</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </section>

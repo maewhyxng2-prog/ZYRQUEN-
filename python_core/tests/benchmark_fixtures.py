@@ -90,6 +90,17 @@ HELD_OUT_NEGATIVE_PROMPTS: list[dict] = [
 ]
 
 
+# Strictly held-out unseen lines used exclusively to measure neural generalization & perplexity
+# without training exposure (contains overlapping ZYRQUEN domain vocabulary in unseen sequences).
+HELD_OUT_NEURAL_TEST_LINES: list[str] = [
+    "ระบบ zyrquen ตรวจสอบความถูกต้องผ่านกราฟความรู้และบันทึกผล",
+    "การวางแผนแบบ dag ต้องยืนยันหลักฐานก่อนอนุมัติงานทุกครั้ง",
+    "ชุดข้อมูลที่ดีช่วยป้องกันปัญหาการจำคำตอบในโมเดลภายใน",
+    "การตรวจสอบ allowlist ช่วยป้องกันการรั่วไหลสู่โมเดลภายนอก",
+    "audit log บันทึกสถานะการทำงานของระบบอย่างต่อเนื่อง",
+]
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
@@ -97,7 +108,7 @@ def _norm(text: str) -> str:
 def verify_fixture_isolation() -> dict:
     """
     Verify zero exact or substring contamination between TRAINING_CORPUS_LINES
-    and HELD_OUT_NEGATIVE_PROMPTS (plus math/logic evaluation prompts).
+    and HELD_OUT_NEGATIVE_PROMPTS + HELD_OUT_NEURAL_TEST_LINES.
     """
     train_norm = {_norm(line) for line in TRAINING_CORPUS_LINES}
     overlaps: list[dict] = []
@@ -111,9 +122,19 @@ def verify_fixture_isolation() -> dict:
             if len(p_norm) >= 8 and (p_norm in tr or tr in p_norm):
                 overlaps.append({"id": item["id"], "prompt": item["prompt"], "type": "substring", "matched_train": tr})
 
+    for idx, line in enumerate(HELD_OUT_NEURAL_TEST_LINES):
+        l_norm = _norm(line)
+        if l_norm in train_norm:
+            overlaps.append({"id": f"NEURAL-TEST-{idx+1}", "prompt": line, "type": "exact"})
+            continue
+        for tr in train_norm:
+            if len(l_norm) >= 8 and (l_norm in tr or tr in l_norm):
+                overlaps.append({"id": f"NEURAL-TEST-{idx+1}", "prompt": line, "type": "substring", "matched_train": tr})
+
     return {
         "isolated": len(overlaps) == 0,
         "training_records": len(TRAINING_CORPUS_LINES),
         "heldout_negative_cases": len(HELD_OUT_NEGATIVE_PROMPTS),
+        "heldout_neural_test_lines": len(HELD_OUT_NEURAL_TEST_LINES),
         "overlaps": overlaps,
     }

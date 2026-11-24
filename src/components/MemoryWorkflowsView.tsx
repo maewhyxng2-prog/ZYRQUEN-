@@ -5,8 +5,11 @@ import {
   BrainCircuit,
   CheckCircle2,
   Clock,
+  Cpu,
+  ExternalLink,
   Play,
   Plus,
+  RotateCw,
   Search,
   Trash2,
   Workflow,
@@ -15,7 +18,10 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
 import type {
+  AutonomousMissionItem,
   KnowledgeTriple,
+  MissionEvidenceItem,
+  MissionNodeItem,
   User,
   WorkflowGroup,
   WorkflowRun,
@@ -38,6 +44,9 @@ function renderStatusLabel(status: string) {
         </span>
       );
     case 'PENDING_APPROVAL':
+    case 'AWAITING_APPROVAL':
+    case 'AWAITING_EVIDENCE':
+    case 'RECOVERING':
     case 'WARN':
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-300">
@@ -48,6 +57,7 @@ function renderStatusLabel(status: string) {
     case 'FAILED':
     case 'REJECTED':
     case 'BLOCKED':
+    case 'CANCELLED':
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-rose-300">
           <XCircle className="h-3.5 w-3.5" />
@@ -64,7 +74,7 @@ function renderStatusLabel(status: string) {
 }
 
 export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
-  const [tab, setTab] = useState<'knowledge' | 'workflows'>('knowledge');
+  const [tab, setTab] = useState<'knowledge' | 'workflows' | 'missions'>('knowledge');
   const [triples, setTriples] = useState<KnowledgeTriple[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [subject, setSubject] = useState('');
@@ -74,6 +84,18 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
 
   const [groups, setGroups] = useState<WorkflowGroup[]>([]);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  const [missions, setMissions] = useState<AutonomousMissionItem[]>([]);
+  const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
+  const [selectedMissionDetail, setSelectedMissionDetail] = useState<{
+    mission: AutonomousMissionItem;
+    nodes: MissionNodeItem[];
+    evidence: MissionEvidenceItem[];
+  } | null>(null);
+  const [loadingMissionDetail, setLoadingMissionDetail] = useState(false);
+  const [missionActionId, setMissionActionId] = useState<string | null>(null);
+  const [newMissionGoal, setNewMissionGoal] = useState('');
+  const [launchingMission, setLaunchingMission] = useState(false);
+
   const [runningGroupId, setRunningGroupId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -131,15 +153,19 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
       setLoading(true);
       setError(null);
       try {
-        const [kRes, wRes] = await Promise.all([
+        const [kRes, wRes, mRes] = await Promise.all([
           apiRequest<{ triples: KnowledgeTriple[] }>('/api/knowledge', { token }),
           apiRequest<{ groups: WorkflowGroup[]; runs: WorkflowRun[] }>('/api/workflows', {
             token,
           }),
+          apiRequest<{ missions: AutonomousMissionItem[] }>('/api/autonomous/missions', {
+            token,
+          }).catch(() => ({ missions: [] as AutonomousMissionItem[] })),
         ]);
         setTriples(kRes.triples);
         setGroups(wRes.groups);
         setRuns(wRes.runs);
+        setMissions(mRes.missions || []);
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'ไม่สามารถโหลดข้อมูลความจำและเวิร์กโฟลว์ได้');
       } finally {
@@ -212,6 +238,97 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
     }
   }
 
+  async function handleSelectMission(missionId: string) {
+    setSelectedMissionId(missionId);
+    setLoadingMissionDetail(true);
+    setError(null);
+    try {
+      const detail = await apiRequest<{
+        mission: AutonomousMissionItem;
+        nodes: MissionNodeItem[];
+        evidence: MissionEvidenceItem[];
+      }>(`/api/autonomous/missions/${missionId}`, { token });
+      setSelectedMissionDetail(detail);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'ไม่สามารถโหลดรายละเอียดภารกิจได้');
+    } finally {
+      setLoadingMissionDetail(false);
+    }
+  }
+
+  async function handleLaunchMission(e: React.FormEvent) {
+    e.preventDefault();
+    const goal = newMissionGoal.trim();
+    if (!goal) return;
+    setLaunchingMission(true);
+    setError(null);
+    try {
+      const res = await apiRequest<{
+        mission: AutonomousMissionItem;
+        nodes?: MissionNodeItem[];
+        evidence?: MissionEvidenceItem[];
+      }>('/api/autonomous/missions', {
+        method: 'POST',
+        token,
+        body: { goal },
+      });
+      setMissions((prev) => [res.mission, ...prev]);
+      setNewMissionGoal('');
+      setSelectedMissionId(res.mission.id);
+      if (res.nodes) {
+        setSelectedMissionDetail({
+          mission: res.mission,
+          nodes: res.nodes,
+          evidence: res.evidence || [],
+        });
+      } else {
+        await handleSelectMission(res.mission.id);
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'เริ่มภารกิจอัตโนมัติไม่สำเร็จ');
+    } finally {
+      setLaunchingMission(false);
+    }
+  }
+
+  async function handleMissionAction(missionId: string, action: 'resume' | 'cancel') {
+    setMissionActionId(missionId);
+    setError(null);
+    try {
+      const res = await apiRequest<{
+        mission: AutonomousMissionItem;
+        nodes?: MissionNodeItem[];
+        evidence?: MissionEvidenceItem[];
+      }>(`/api/autonomous/missions/${missionId}/${action}`, {
+        method: 'POST',
+        token,
+        body: {},
+      });
+      setMissions((prev) => prev.map((m) => (m.id === missionId ? res.mission : m)));
+      if (selectedMissionId === missionId) {
+        if (res.nodes) {
+          setSelectedMissionDetail({
+            mission: res.mission,
+            nodes: res.nodes,
+            evidence: res.evidence || [],
+          });
+        } else {
+          await handleSelectMission(missionId);
+        }
+      }
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : action === 'resume'
+            ? 'ดำเนินภารกิจต่อไม่สำเร็จ'
+            : 'ยกเลิกภารกิจไม่สำเร็จ'
+      );
+    } finally {
+      setMissionActionId(null);
+    }
+  }
+
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:py-8">
       <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -220,15 +337,15 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
             ความจำและระบบเวิร์กโฟลว์ภายใน
           </h2>
           <p className="mt-1 text-sm text-slate-400">
-            จัดการกราฟความรู้ถาวรและสั่งงานเวิร์กโฟลว์กลางทั้ง 8 กลุ่มงานของ ZYRQUEN
+            จัดการกราฟความรู้ถาวร เวิร์กโฟลว์กลางทั้ง 8 กลุ่มงาน และภารกิจอัตโนมัติ (DAG Executor)
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-1 rounded-xl border border-slate-800 bg-[#0E172B] p-1 sm:w-auto">
+        <div className="grid grid-cols-3 gap-1 rounded-xl border border-slate-800 bg-[#0E172B] p-1 sm:w-auto">
           <button
             type="button"
             onClick={() => setTab('knowledge')}
-            className={`flex min-h-[40px] items-center justify-center gap-2 rounded-lg px-4 text-xs font-medium transition-colors whitespace-nowrap ${
+            className={`flex min-h-[40px] items-center justify-center gap-2 rounded-lg px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
               tab === 'knowledge'
                 ? 'bg-blue-600 text-white'
                 : 'text-slate-400 hover:text-slate-100'
@@ -240,7 +357,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
           <button
             type="button"
             onClick={() => setTab('workflows')}
-            className={`flex min-h-[40px] items-center justify-center gap-2 rounded-lg px-4 text-xs font-medium transition-colors whitespace-nowrap ${
+            className={`flex min-h-[40px] items-center justify-center gap-2 rounded-lg px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
               tab === 'workflows'
                 ? 'bg-blue-600 text-white'
                 : 'text-slate-400 hover:text-slate-100'
@@ -248,6 +365,18 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
           >
             <Workflow className="h-3.5 w-3.5" />
             <span>ระบบเวิร์กโฟลว์ ({fuzzyGroups.length})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('missions')}
+            className={`flex min-h-[40px] items-center justify-center gap-2 rounded-lg px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
+              tab === 'missions'
+                ? 'bg-blue-600 text-white'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            <Cpu className="h-3.5 w-3.5" />
+            <span>ภารกิจอัตโนมัติ ({missions.length})</span>
           </button>
         </div>
       </div>
@@ -493,7 +622,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
             </div>
           </section>
         </div>
-      ) : (
+      ) : tab === 'workflows' ? (
         <div className="space-y-8">
           {/* Filtered Workflow Groups */}
           <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -588,6 +717,210 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
               )}
             </div>
           </section>
+        </div>
+      ) : (
+        <div className="space-y-6">
+          <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5">
+            <h3 className="text-base font-semibold text-slate-100">
+              สั่งงานภารกิจอัตโนมัติ (DAG Cognitive-Action Loop)
+            </h3>
+            <p className="mt-1 text-xs text-slate-400">
+              ระบบจะแตกงานเป็นกราฟ DAG ตรวจสอบ pre/postconditions และพักรอที่ P5 Approval Gate อัตโนมัติเมื่อต้องสืบค้นเว็บ
+            </p>
+            <form onSubmit={handleLaunchMission} className="mt-4 flex flex-col gap-2 sm:flex-row">
+              <input
+                type="text"
+                required
+                value={newMissionGoal}
+                onChange={(e) => setNewMissionGoal(e.target.value)}
+                placeholder="ระบุเป้าหมายภารกิจ (เช่น คำนวณ 3x + 7 = 22 หรือ ค้นคว้าเรื่อง SQLite)..."
+                aria-label="เป้าหมายภารกิจอัตโนมัติ"
+                className="h-11 flex-1 rounded-xl border border-slate-800 bg-[#070C18] px-3.5 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={launchingMission}
+                className="flex h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 whitespace-nowrap"
+              >
+                <Play className="h-4 w-4" />
+                <span>{launchingMission ? 'กำลังเริ่มภารกิจ...' : 'เริ่มภารกิจอัตโนมัติ'}</span>
+              </button>
+            </form>
+          </section>
+
+          <div className="grid gap-6 lg:grid-cols-12">
+            <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] divide-y divide-slate-800/80 lg:col-span-5">
+              <div className="px-5 py-3.5">
+                <h3 className="text-sm font-semibold text-slate-100">
+                  รายการภารกิจถาวร ({missions.length})
+                </h3>
+              </div>
+              {missions.length === 0 ? (
+                <p className="p-5 text-sm text-slate-400">ยังไม่มีภารกิจอัตโนมัติในระบบ</p>
+              ) : (
+                missions.map((m) => {
+                  const isSelected = selectedMissionId === m.id;
+                  const canResume = !['COMPLETED', 'CANCELLED'].includes(m.status);
+                  const canCancel = ['AWAITING_APPROVAL', 'EXECUTING', 'PLAN_READY', 'RECOVERING', 'AWAITING_EVIDENCE'].includes(m.status);
+                  return (
+                    <div
+                      key={m.id}
+                      className={`p-4 transition-colors ${isSelected ? 'bg-[#131F38]/70' : 'hover:bg-[#131F38]/40'}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => void handleSelectMission(m.id)}
+                        className="w-full text-left"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          {renderStatusLabel(m.status)}
+                          <span className="text-[11px] text-slate-400 tabular-nums">
+                            {new Date(m.created_at).toLocaleString('th-TH')}
+                          </span>
+                        </div>
+                        <p className="mt-1.5 text-sm font-medium text-slate-100 line-clamp-2">
+                          {m.goal}
+                        </p>
+                      </button>
+                      {(canResume || canCancel) && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {canResume && (
+                            <button
+                              type="button"
+                              disabled={missionActionId === m.id}
+                              onClick={() => void handleMissionAction(m.id, 'resume')}
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-[#070C18] px-3 text-xs font-medium text-cyan-300 hover:bg-[#131F38] disabled:opacity-50"
+                            >
+                              <RotateCw className="h-3 w-3" />
+                              <span>ดำเนินต่อ (Resume)</span>
+                            </button>
+                          )}
+                          {canCancel && (
+                            <button
+                              type="button"
+                              disabled={missionActionId === m.id}
+                              onClick={() => void handleMissionAction(m.id, 'cancel')}
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-[#070C18] px-3 text-xs font-medium text-rose-300 hover:bg-rose-950/40 disabled:opacity-50"
+                            >
+                              <XCircle className="h-3 w-3" />
+                              <span>ยกเลิกภารกิจ</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </section>
+
+            <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 lg:col-span-7">
+              {loadingMissionDetail ? (
+                <p className="text-sm text-slate-400">กำลังโหลดโครงสร้าง DAG และหลักฐาน...</p>
+              ) : !selectedMissionDetail ? (
+                <p className="text-sm text-slate-400">
+                  เลือกภารกิจทางด้านซ้ายเพื่อดูโหนด DAG, จำนวนรอบ Retry, และหลักฐานจากอินเทอร์เน็ต
+                </p>
+              ) : (
+                <div className="space-y-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-100">
+                        {selectedMissionDetail.mission.goal}
+                      </p>
+                      <p className="mt-0.5 font-mono text-[11px] text-slate-400">
+                        ID: {selectedMissionDetail.mission.id}
+                      </p>
+                    </div>
+                    {renderStatusLabel(selectedMissionDetail.mission.status)}
+                  </div>
+
+                  <div>
+                    <h4 className="mb-2.5 text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                      DAG Nodes ({selectedMissionDetail.nodes.length})
+                    </h4>
+                    {selectedMissionDetail.nodes.length === 0 ? (
+                      <p className="text-xs text-slate-400">ไม่มีข้อมูลโหนดย่อยสำหรับภารกิจนี้</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {selectedMissionDetail.nodes.map((nd) => {
+                          let parsedTitle = nd.task_id;
+                          let deps: string[] = [];
+                          try {
+                            const obj = JSON.parse(nd.node_json) as { title?: string; dependencies?: string[] };
+                            if (obj.title) parsedTitle = obj.title;
+                            if (Array.isArray(obj.dependencies)) deps = obj.dependencies;
+                          } catch {
+                            /* keep task_id */
+                          }
+                          return (
+                            <div
+                              key={nd.id}
+                              className="rounded-xl border border-slate-800 bg-[#070C18] p-3"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="font-mono text-xs font-semibold text-slate-100">
+                                  {nd.task_id}
+                                </span>
+                                <div className="flex items-center gap-3">
+                                  <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+                                    attempts: {nd.attempt_count}
+                                  </span>
+                                  {renderStatusLabel(nd.execution_status)}
+                                </div>
+                              </div>
+                              <p className="mt-1 text-xs text-slate-300">{parsedTitle}</p>
+                              {deps.length > 0 && (
+                                <p className="mt-1 font-mono text-[11px] text-slate-500">
+                                  deps: {deps.join(', ')}
+                                </p>
+                              )}
+                              {nd.last_error && (
+                                <p className="mt-1.5 text-xs text-rose-300">
+                                  last_error: {nd.last_error}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <h4 className="mb-2.5 text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                      Mission Evidence ({selectedMissionDetail.evidence.length})
+                    </h4>
+                    {selectedMissionDetail.evidence.length === 0 ? (
+                      <p className="text-xs text-slate-400">
+                        ยังไม่มีหลักฐานภายนอกที่บันทึกไว้ในภารกิจนี้
+                      </p>
+                    ) : (
+                      <div className="space-y-2">
+                        {selectedMissionDetail.evidence.map((ev) => (
+                          <div
+                            key={ev.id}
+                            className="rounded-xl border border-slate-800 bg-[#070C18] p-3 text-xs"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-200">{ev.provider}</span>
+                              <span className="font-mono text-[11px] text-cyan-300">
+                                {ev.trust_grade}
+                              </span>
+                            </div>
+                            <p className="mt-1 flex items-center gap-1 break-all font-mono text-[11px] text-slate-400">
+                              <ExternalLink className="h-3 w-3 shrink-0" />
+                              <span>{ev.source_url}</span>
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
         </div>
       )}
     </div>

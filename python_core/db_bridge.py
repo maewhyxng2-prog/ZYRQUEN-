@@ -18,6 +18,7 @@ from zyrquen_core import (
     init_db,
     now_iso,
     query_knowledge_graph,
+    resume_autonomous_mission,
     summarize_conversation,
     tokenize,
 )
@@ -107,16 +108,25 @@ def handle_action(action: str, payload: dict) -> dict:
         datasets = conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
         pending_approvals = conn.execute("SELECT COUNT(*) FROM workflow_runs WHERE status='PENDING_APPROVAL'").fetchone()[0]
         evaluations = conn.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0]
+        missions_count = conn.execute("SELECT COUNT(*) FROM autonomous_missions").fetchone()[0]
+        recent_missions = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, goal, status, capabilities_json, stages_json, knowledge_developed_json, research_summary_json, report_markdown, external_models_used, created_by, created_at, updated_at FROM autonomous_missions ORDER BY created_at DESC LIMIT 4"
+            ).fetchall()
+        ]
         conn.close()
         return {
             "ok": True,
             "recent_conversations": recent,
+            "recent_missions": recent_missions,
             "counts": {
                 "triples": triples,
                 "checkpoints": ckpts,
                 "datasets": datasets,
                 "pending_approvals": pending_approvals,
                 "evaluations": evaluations,
+                "missions": missions_count,
             },
             "system": get_system_metrics(),
         }
@@ -374,6 +384,12 @@ def handle_action(action: str, payload: dict) -> dict:
                 "SELECT id, checkpoint_version, suite_name, overall_status, math_score, knowledge_score, planning_score, test_accuracy, perplexity, baseline_delta_json, created_at FROM evaluations ORDER BY created_at DESC LIMIT 10"
             ).fetchall()
         ]
+        experiments = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, hypothesis, dataset_id, baseline_ckpt_id, candidate_ckpt_id, baseline_metrics_json, candidate_metrics_json, improved, approval_status, approved_by, created_at FROM experiments ORDER BY created_at DESC LIMIT 12"
+            ).fetchall()
+        ]
         conn.close()
         return {
             "ok": True,
@@ -381,6 +397,7 @@ def handle_action(action: str, payload: dict) -> dict:
             "datasets": datasets,
             "checkpoints": checkpoints,
             "evaluations": evaluations,
+            "experiments": experiments,
             "usage": {
                 "total_requests": usage_total,
                 "avg_latency_ms": round(float(avg_lat), 1),
@@ -451,12 +468,19 @@ def handle_action(action: str, payload: dict) -> dict:
             dict(r)
             for r in conn.execute("SELECT * FROM external_tools ORDER BY id ASC").fetchall()
         ]
+        pending_experiments = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM experiments WHERE approval_status='PENDING_APPROVAL' ORDER BY created_at DESC"
+            ).fetchall()
+        ]
         conn.close()
         return {
             "ok": True,
             "users": users,
             "pending_runs": pending_runs,
             "pending_tool_invocations": pending_tool_invocations,
+            "pending_experiments": pending_experiments,
             "tools": tools,
             "audit_logs": audit_logs,
             "system": get_system_metrics(),
@@ -593,6 +617,10 @@ def handle_action(action: str, payload: dict) -> dict:
         if inv["status"] != "PENDING_APPROVAL":
             conn.close()
             return {"ok": False, "error": "Tool invocation is not pending approval"}
+
+        mission_id = inv["mission_id"] if "mission_id" in inv.keys() else None
+        mission_node_id = inv["mission_node_id"] if "mission_node_id" in inv.keys() else None
+
         if decision == "reject":
             with conn:
                 conn.execute(
@@ -605,7 +633,39 @@ def handle_action(action: str, payload: dict) -> dict:
                 )
             updated = row_to_dict(conn.execute("SELECT * FROM tool_invocations WHERE id=?", (inv_id,)).fetchone())
             conn.close()
-            return {"ok": True, "invocation": updated}
+            resumed = None
+            if mission_id:
+                resumed = resume_autonomous_mission(
+                    {
+                        "mission_id": mission_id,
+                        "invocation_id": inv_id,
+                        "node_id": mission_node_id,
+                        "decision": "reject",
+                        "approved_by": admin_email,
+                    }
+                )
+            return {"ok": True, "invocation": updated, "status": "REJECTED", "resumed_mission": resumed}
+
+        if mission_id:
+            conn.close()
+            resumed = resume_autonomous_mission(
+                {
+                    "mission_id": mission_id,
+                    "invocation_id": inv_id,
+                    "node_id": mission_node_id,
+                    "decision": "approve",
+                    "approved_by": admin_email,
+                }
+            )
+            c2 = get_db()
+            updated = row_to_dict(c2.execute("SELECT * FROM tool_invocations WHERE id=?", (inv_id,)).fetchone())
+            c2.close()
+            return {
+                "ok": bool(resumed.get("ok")),
+                "status": (updated or {}).get("status", "COMPLETED"),
+                "invocation": updated,
+                "resumed_mission": resumed,
+            }
 
         try:
             tool_input = json.loads(inv["input_json"] or "{}")
@@ -660,6 +720,27 @@ def handle_action(action: str, payload: dict) -> dict:
                 )
         conn.close()
         return res
+
+    if action == "missions_list":
+        rows = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM autonomous_missions ORDER BY created_at DESC LIMIT 25"
+            ).fetchall()
+        ]
+        conn.close()
+        return {"ok": True, "missions": rows}
+
+    if action == "mission_detail":
+        mid = str(payload.get("mission_id", "")).strip()
+        m_row = row_to_dict(conn.execute("SELECT * FROM autonomous_missions WHERE id=?", (mid,)).fetchone())
+        if not m_row:
+            conn.close()
+            return {"ok": False, "error": "Mission not found"}
+        nodes = [dict(r) for r in conn.execute("SELECT * FROM mission_nodes WHERE mission_id=? ORDER BY rowid ASC", (mid,)).fetchall()]
+        evidence = [dict(r) for r in conn.execute("SELECT * FROM mission_evidence WHERE mission_id=? ORDER BY rowid ASC", (mid,)).fetchall()]
+        conn.close()
+        return {"ok": True, "mission": m_row, "nodes": nodes, "evidence": evidence}
 
     conn.close()
     return {"ok": False, "error": f"Unknown bridge action '{action}'"}

@@ -34,9 +34,23 @@ from tools_engine import (
     init_tools_schema,
     invoke_tool_governed,
 )
+from dag_executor import (
+    MISSION_STATES,
+    build_mission_dag,
+    execute_dag_loop,
+)
+from native_neural import NativeTransformerLM
+from causal_logic import try_causal_logic_reasoning
+from memory_learning import (
+    curate_verified_training_corpus,
+    decide_experiment,
+    detect_capability_gaps,
+    record_episodic_experience,
+    run_controlled_neural_experiment,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = Path(os.environ.get("ZYRQUEN_DATA_DIR") or (BASE_DIR / "data"))
 CHECKPOINT_DIR = DATA_DIR / "checkpoints"
 DB_PATH = DATA_DIR / "zyrquen.db"
 
@@ -294,9 +308,99 @@ def init_db() -> None:
                 created_by TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS autonomous_missions (
+                id TEXT PRIMARY KEY,
+                goal TEXT NOT NULL,
+                status TEXT NOT NULL,
+                capabilities_json TEXT NOT NULL,
+                stages_json TEXT NOT NULL,
+                knowledge_developed_json TEXT NOT NULL,
+                research_summary_json TEXT NOT NULL,
+                report_markdown TEXT NOT NULL,
+                external_models_used INTEGER NOT NULL DEFAULT 0,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mission_nodes (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                node_json TEXT NOT NULL,
+                execution_status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                idempotency_key TEXT NOT NULL,
+                last_error TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(mission_id) REFERENCES autonomous_missions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS mission_evidence (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                node_id TEXT,
+                source_url TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                retrieved_at TEXT NOT NULL,
+                trust_grade TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                extracted_claims_json TEXT NOT NULL,
+                FOREIGN KEY(mission_id) REFERENCES autonomous_missions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS episodic_experiences (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT,
+                goal TEXT NOT NULL,
+                outcome_status TEXT NOT NULL,
+                gap_type TEXT,
+                hypothesis_json TEXT NOT NULL,
+                verified_delta REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS experiments (
+                id TEXT PRIMARY KEY,
+                hypothesis TEXT NOT NULL,
+                dataset_id TEXT NOT NULL,
+                baseline_ckpt_id TEXT,
+                candidate_ckpt_id TEXT,
+                baseline_metrics_json TEXT NOT NULL,
+                candidate_metrics_json TEXT NOT NULL,
+                improved INTEGER NOT NULL DEFAULT 0,
+                approval_status TEXT NOT NULL,
+                approved_by TEXT,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS capability_baselines (
+                id TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                benchmark_version TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                score REAL NOT NULL,
+                passed INTEGER NOT NULL,
+                total INTEGER NOT NULL,
+                false_positives INTEGER NOT NULL DEFAULT 0,
+                evidence_hash TEXT NOT NULL,
+                details_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         init_tools_schema(conn, DATA_DIR)
+        cols = {
+            r["name"]
+            for r in conn.execute("PRAGMA table_info(tool_invocations)").fetchall()
+        }
+        if "mission_id" not in cols:
+            conn.execute("ALTER TABLE tool_invocations ADD COLUMN mission_id TEXT")
+        if "mission_node_id" not in cols:
+            conn.execute("ALTER TABLE tool_invocations ADD COLUMN mission_node_id TEXT")
     conn.close()
 
 
@@ -1129,15 +1233,139 @@ def try_word_math_reasoning(prompt: str) -> dict | None:
         return None
 
     nums_raw = re.findall(r"(?<![a-zA-Z_])[-+]?\d+(?:\.\d+)?(?![a-zA-Z_])", cleaned)
-    if len(nums_raw) != 2:
+    if len(nums_raw) < 2 or len(nums_raw) > 3:
         return None
+
+    # 1. Percentage & Tax/Discount Reasoning (2 numbers with % / เปอร์เซ็นต์ / ร้อยละ)
+    has_pct_cue = bool(re.search(r"(?:%|เปอร์เซ็นต์|ร้อยละ|percent)", cleaned, re.IGNORECASE))
+    if has_pct_cue and len(nums_raw) == 2:
+        n0, n1 = float(nums_raw[0]), float(nums_raw[1])
+        m_pct_first = re.search(r"([-+]?\d+(?:\.\d+)?)\s*(?:%|เปอร์เซ็นต์|percent)", cleaned, re.IGNORECASE)
+        m_roila = re.search(r"ร้อยละ\s*([-+]?\d+(?:\.\d+)?)", cleaned)
+        pct_val = float(m_pct_first.group(1)) if m_pct_first else (float(m_roila.group(1)) if m_roila else n1)
+        base_val = n1 if abs(pct_val - n0) < 1e-12 else n0
+        b_fmt, p_fmt = _fmt_num(base_val), _fmt_num(pct_val)
+
+        is_discount = any(k in cleaned.lower() for k in ["ลดราคา", "ลดลง", "ส่วนลด", "discount", "off"])
+        is_increase = any(k in cleaned.lower() for k in ["เพิ่มขึ้น", "บวกเพิ่ม", "ขึ้นราคา", "vat", "ภาษี", "ดอกเบี้ย", "increase", "tax", "interest"])
+        asks_portion_only = any(k in cleaned.lower() for k in ["ส่วนลดกี่", "ลดไปกี่", "ภาษีกี่", "ดอกเบี้ยกี่", "คิดเป็นกี่"])
+
+        if is_discount and not asks_portion_only:
+            val = base_val * (1.0 - pct_val / 100.0)
+            op_name = "percentage_discount"
+            expr_str = f"{b_fmt} * (1 - {p_fmt}/100)"
+            steps = [
+                f"ระบุราคา/ปริมาณตั้งต้น {b_fmt} และส่วนลด {p_fmt}%",
+                f"คำนวณส่วนลด {b_fmt} * {p_fmt}% = {_fmt_num(base_val * pct_val / 100.0)}",
+                f"ราคาหลังหักส่วนลด: {b_fmt} - {_fmt_num(base_val * pct_val / 100.0)} = {_fmt_num(val)}",
+            ]
+        elif is_increase and not asks_portion_only:
+            val = base_val * (1.0 + pct_val / 100.0)
+            op_name = "percentage_increase"
+            expr_str = f"{b_fmt} * (1 + {p_fmt}/100)"
+            steps = [
+                f"ระบุฐานตั้งต้น {b_fmt} และอัตราเพิ่ม {p_fmt}%",
+                f"คำนวณส่วนเพิ่ม {b_fmt} * {p_fmt}% = {_fmt_num(base_val * pct_val / 100.0)}",
+                f"ยอดรวมหลังปรับเพิ่ม: {b_fmt} + {_fmt_num(base_val * pct_val / 100.0)} = {_fmt_num(val)}",
+            ]
+        else:
+            val = base_val * (pct_val / 100.0)
+            op_name = "percentage_of"
+            expr_str = f"{b_fmt} * ({p_fmt}/100)"
+            steps = [
+                f"คำนวณ {p_fmt}% ของ {b_fmt}",
+                f"{b_fmt} * {p_fmt} / 100 = {_fmt_num(val)}",
+            ]
+        return {
+            "engine": "word_math_native",
+            "operation": op_name,
+            "operands": [b_fmt, p_fmt],
+            "expression": expr_str,
+            "result": _fmt_num(val),
+            "steps": steps,
+        }
+
+    # 2. Multi-step 3-number word math
+    if len(nums_raw) == 3:
+        n0, n1, n2 = float(nums_raw[0]), float(nums_raw[1]), float(nums_raw[2])
+        f0, f1, f2 = _fmt_num(n0), _fmt_num(n1), _fmt_num(n2)
+        has_rate = bool(re.search(r"(?:เล่มละ|ชิ้นละ|กล่องละ|อันละ|ใบละ|ถุงละ|ขวดละ|คนละ|ต่อหน่วย|each|per)", cleaned, re.IGNORECASE))
+        has_change_cue = any(k in cleaned.lower() for k in ["ทอน", "เหลือ", "จ่าย", "change", "remain", "left"])
+        has_add_extra = any(k in cleaned.lower() for k in ["เพิ่ม", "ซื้อเพิ่ม", "อีก", "plus", "more"])
+
+        # Order A: "มี/จ่าย M บาท ซื้อ Q ชิ้น ชิ้นละ P บาท เหลือกี่บาท"
+        m_budget_first = re.match(r"^(?:มีเงิน|มี|จ่ายเงิน|จ่าย)\s*([-+]?\d+(?:\.\d+)?)", cleaned)
+        if has_rate and has_change_cue:
+            if m_budget_first:
+                paid, qty, unit_p = n0, n1, n2
+            else:
+                qty, unit_p, paid = n0, n1, n2
+            cost = qty * unit_p
+            val = paid - cost
+            q_s, u_s, p_s = _fmt_num(qty), _fmt_num(unit_p), _fmt_num(paid)
+            return {
+                "engine": "word_math_native",
+                "operation": "multistep_unit_change",
+                "operands": [q_s, u_s, p_s],
+                "expression": f"{p_s} - ({q_s} * {u_s})",
+                "result": _fmt_num(val),
+                "steps": [
+                    f"ขั้นที่ 1: คำนวณยอดรวมตามอัตราต่อหน่วย {q_s} * {u_s} = {_fmt_num(cost)}",
+                    f"ขั้นที่ 2: หักจากจำนวนเงินที่มี/จ่าย {p_s} - {_fmt_num(cost)} = {_fmt_num(val)}",
+                ],
+            }
+        if has_rate and has_add_extra:
+            total = (n0 * n1) + n2
+            return {
+                "engine": "word_math_native",
+                "operation": "multistep_unit_add",
+                "operands": [f0, f1, f2],
+                "expression": f"({f0} * {f1}) + {f2}",
+                "result": _fmt_num(total),
+                "steps": [
+                    f"ขั้นที่ 1: คำนวณส่วนอัตราคูณ {f0} * {f1} = {_fmt_num(n0 * n1)}",
+                    f"ขั้นที่ 2: บวกส่วนเพิ่มเติม {_fmt_num(n0 * n1)} + {f2} = {_fmt_num(total)}",
+                ],
+            }
+        if any(k in cleaned.lower() for k in ["เหลือ", "left", "remain"]) and not has_add_extra:
+            val = n0 - n1 - n2
+            return {
+                "engine": "word_math_native",
+                "operation": "multistep_subtraction",
+                "operands": [f0, f1, f2],
+                "expression": f"{f0} - {f1} - {f2}",
+                "result": _fmt_num(val),
+                "steps": [
+                    f"ระบุยอดตั้งต้น {f0} และรายการหักออก {f1}, {f2}",
+                    f"คำนวณต่อเนื่อง {f0} - {f1} - {f2} = {_fmt_num(val)}",
+                ],
+            }
+        if any(k in cleaned.lower() for k in ["รวม", "ทั้งหมด", "altogether", "in total"]) and not has_rate:
+            val = n0 + n1 + n2
+            return {
+                "engine": "word_math_native",
+                "operation": "multistep_addition",
+                "operands": [f0, f1, f2],
+                "expression": f"{f0} + {f1} + {f2}",
+                "result": _fmt_num(val),
+                "steps": [
+                    f"ระบุปริมาณทั้ง 3 ส่วน ({f0}, {f1}, {f2})",
+                    f"รวมทั้งหมด {f0} + {f1} + {f2} = {_fmt_num(val)}",
+                ],
+            }
+        return None
+
+    # 3. Single-step 2-number reasoning
     a, b = float(nums_raw[0]), float(nums_raw[1])
     a_fmt, b_fmt = _fmt_num(a), _fmt_num(b)
 
     has_div_cue = any(k in cleaned for k in ["แบ่ง", "หาร", "เฉลี่ย", "เท่าๆ กัน", "เท่ากัน", "divide", "share"]) or bool(
         re.search(r"(?:คนละ|กล่องละ|ใบละ|อันละ|กองละ|ชิ้นละ|กลุ่มละ|ถุงละ)\s*กี่", cleaned)
     )
-    has_mul_cue = (
+    has_rate_time_cue = any(k in cleaned for k in ["ความเร็ว", "อัตราเร็ว", "speed"]) and any(
+        k in cleaned for k in ["เวลา", "ชั่วโมง", "นาที", "ระยะทาง", "ได้ไกล", "distance"]
+    )
+    has_mul_cue = has_rate_time_cue or (
         any(k in cleaned for k in ["ทั้งหมด", "รวมทั้งหมด", "รวมเป็น", "ได้ระยะทาง", "คิดเป็น", "total"])
         and any(k in cleaned for k in ["ละ", "แต่ละ", "ทุก", "เป็นเวลา", "per", "each"])
     )
@@ -1164,7 +1392,7 @@ def try_word_math_reasoning(prompt: str) -> dict | None:
         op_name = "multiplication"
         expr_str = f"{a_fmt} * {b_fmt}"
         steps = [
-            f"ระบุจำนวนกลุ่ม {a_fmt} และอัตราต่อหน่วย {b_fmt}",
+            f"ระบุจำนวนกลุ่ม/อัตรา {a_fmt} และตัวคูณ {b_fmt}",
             f"คำนวณ {a_fmt} * {b_fmt} = {_fmt_num(val)}",
         ]
     elif has_sub_cue:
@@ -1464,6 +1692,49 @@ def _token_matches_field(tok: str, field_l: str, field_syllables: set[str]) -> b
     return tok in field_l or (len(field_l) >= 4 and field_l in tok)
 
 
+_REL_SYNONYM_GROUPS: dict[str, set[str]] = {
+    "creator": {"สร้าง", "ผู้สร้าง", "พัฒนา", "พัฒนาโดย", "ผู้พัฒนา", "ออกแบบ", "สร้างโดย", "created", "developed", "author"},
+    "location": {"ตั้งอยู่", "ตั้งอยู่ที่", "อยู่ที่", "อยู่ที่ไหน", "ที่ตั้ง", "สถานที่", "located", "location"},
+    "usage": {"ใช้", "ใช้งาน", "ใช้ฐานข้อมูล", "ใช้อะไร", "อาศัย", "uses", "using"},
+    "support": {"รองรับ", "สนับสนุน", "ช่วย", "supports", "enables"},
+    "identity": {"เป็น", "คือ", "จัดเป็น", "สังกัด", "is", "are"},
+    "cause": {"ทำให้เกิด", "ส่งผลให้", "ก่อให้เกิด", "นำไปสู่", "สาเหตุ", "causes", "leads"},
+}
+
+
+def _relation_family(text: str) -> set[str]:
+    low = text.lower()
+    matched: set[str] = set()
+    for fam, cues in _REL_SYNONYM_GROUPS.items():
+        if any(cue in low for cue in cues):
+            matched.add(fam)
+    return matched
+
+
+def _char_ngrams(text: str, n: int = 3) -> collections.Counter:
+    cleaned = re.sub(r"\s+", "", text.lower())
+    if len(cleaned) < n:
+        return collections.Counter([cleaned]) if cleaned else collections.Counter()
+    return collections.Counter(cleaned[i : i + n] for i in range(len(cleaned) - n + 1))
+
+
+def _cosine_counter(c1: collections.Counter, c2: collections.Counter, idf: dict[str, float] | None = None) -> float:
+    if not c1 or not c2:
+        return 0.0
+    common = set(c1.keys()) & set(c2.keys())
+    if not common:
+        return 0.0
+    dot = 0.0
+    for k in common:
+        w = idf.get(k, 1.0) if idf else 1.0
+        dot += float(c1[k]) * float(c2[k]) * (w * w)
+    n1 = math.sqrt(sum((float(v) * (idf.get(k, 1.0) if idf else 1.0)) ** 2 for k, v in c1.items()))
+    n2 = math.sqrt(sum((float(v) * (idf.get(k, 1.0) if idf else 1.0)) ** 2 for k, v in c2.items()))
+    if n1 <= 1e-12 or n2 <= 1e-12:
+        return 0.0
+    return dot / (n1 * n2)
+
+
 def query_knowledge_graph(conn: sqlite3.Connection, prompt: str) -> list[dict]:
     tokens = extract_query_terms(prompt)
     if not tokens:
@@ -1471,8 +1742,25 @@ def query_knowledge_graph(conn: sqlite3.Connection, prompt: str) -> list[dict]:
     rows = conn.execute(
         "SELECT id, subject, relation, object, source, confidence, created_at FROM knowledge_triples"
     ).fetchall()
-    scored = []
+    if not rows:
+        return []
+
+    # Build lightweight native TF-IDF weights over KG triple terms
+    doc_freq: collections.Counter = collections.Counter()
+    doc_tokens_list: list[list[str]] = []
     for row in rows:
+        dtoks = extract_query_terms(f"{row['subject']} {row['relation']} {row['object']}")
+        doc_tokens_list.append(dtoks)
+        for t in set(dtoks):
+            doc_freq[t] += 1
+    total_docs = len(rows)
+    idf = {t: (math.log((total_docs + 1) / (df + 1)) + 1.0) for t, df in doc_freq.items()}
+    q_counter = collections.Counter(tokens)
+    q_rel_families = _relation_family(prompt)
+    q_ngrams = _char_ngrams(" ".join(tokens), 3)
+
+    scored = []
+    for idx, row in enumerate(rows):
         subj_l = row["subject"].lower()
         rel_l = row["relation"].lower()
         obj_l = row["object"].lower()
@@ -1500,19 +1788,35 @@ def query_knowledge_graph(conn: sqlite3.Connection, prompt: str) -> list[dict]:
             if r_hit and not s_hit and not o_hit:
                 score += 1.0
 
-        # Require actual entity grounding (subject/object) to prevent relation-only or short-syllable false positives
-        if entity_hits >= 1 and (strong_entity_hits >= 1 or entity_hits >= 2) and score >= 2.5:
+        # Semantic paraphrase & TF-IDF cosine (strictly gated on entity grounding or high entity char-3gram similarity)
+        rel_fam_overlap = bool(q_rel_families & _relation_family(rel_l))
+        tfidf_sim = _cosine_counter(q_counter, collections.Counter(doc_tokens_list[idx]), idf=idf)
+        ent_char_sim = max(
+            _cosine_counter(q_ngrams, _char_ngrams(subj_l, 3)),
+            _cosine_counter(q_ngrams, _char_ngrams(obj_l, 3)),
+        )
+        semantic_score = round(0.65 * tfidf_sim + 0.35 * ent_char_sim, 4)
+
+        has_direct_grounding = entity_hits >= 1 and (strong_entity_hits >= 1 or entity_hits >= 2) and score >= 2.5
+        has_high_char_entity_match = ent_char_sim >= 0.52 and len("".join(tokens)) >= 4
+        if has_direct_grounding or has_high_char_entity_match:
+            total_score = score + (1.2 if rel_fam_overlap else 0.0) + (1.5 * semantic_score)
+            if has_high_char_entity_match and not has_direct_grounding:
+                total_score = max(total_score, 2.6 + (1.2 if rel_fam_overlap else 0.0))
             item = dict(row)
             item["hop"] = 1
             item["provenance"] = "direct"
-            item["match_score"] = round(score, 2)
-            scored.append((score, item))
+            item["match_score"] = round(total_score, 2)
+            item["semantic_score"] = semantic_score
+            scored.append((total_score, item))
+
     scored.sort(key=lambda x: x[0], reverse=True)
     results = [item[1] for item in scored[:5]]
     seen_ids = {item["id"] for item in results}
 
-    # 2-hop transitive expansion with explicit provenance
+    # Multi-hop transitive expansion (2-hop & 3-hop) with explicit provenance
     if results:
+        hop2_items: list[dict] = []
         for base in list(results):
             obj_l = base["object"].lower()
             for row in rows:
@@ -1527,20 +1831,41 @@ def query_knowledge_graph(conn: sqlite3.Connection, prompt: str) -> list[dict]:
                         f"-[{row['relation']}]-> {row['object']}"
                     )
                     results.append(hop2)
+                    hop2_items.append(hop2)
                     seen_ids.add(row["id"])
                     if len(results) >= 9:
-                        return results
+                        break
+            if len(results) >= 9:
+                break
+
+        if len(results) < 12:
+            for base2 in hop2_items:
+                obj2_l = base2["object"].lower()
+                for row in rows:
+                    if row["id"] in seen_ids:
+                        continue
+                    if row["subject"].lower() == obj2_l:
+                        hop3 = dict(row)
+                        hop3["hop"] = 3
+                        hop3["provenance"] = "inferred_3hop"
+                        hop3["inferred_chain"] = (
+                            f"{base2['inferred_chain']} -[{row['relation']}]-> {row['object']}"
+                        )
+                        results.append(hop3)
+                        seen_ids.add(row["id"])
+                        if len(results) >= 12:
+                            return results
     return results
 
 
 def run_ngram_continuation(conn: sqlite3.Connection, prompt: str, max_tokens: int = 18) -> dict | None:
     ckpt = conn.execute(
-        "SELECT * FROM checkpoints ORDER BY version DESC LIMIT 1"
+        "SELECT * FROM checkpoints WHERE eval_status NOT LIKE 'NEURAL%' AND ngram_order > 0 ORDER BY version DESC LIMIT 1"
     ).fetchone()
     if not ckpt:
         return None
     weights_path = Path(ckpt["weights_path"])
-    if not weights_path.exists():
+    if not weights_path.exists() or str(weights_path).endswith(".gz"):
         return None
     with open(weights_path, "r", encoding="utf-8") as f:
         weights = json.load(f)
@@ -1673,6 +1998,18 @@ def _build_domain_adaptive_plan(goal: str, goal_l: str, clean_datasets: list, ck
             "detail": "รันชุดทดสอบ Positive, Unseen Generalization, และ Negative Boundary ก่อนส่งมอบ",
         },
     ]
+
+    for st in steps:
+        st.setdefault("task_id", st["step_id"])
+        st.setdefault("dependencies", list(st.get("depends_on", [])))
+        st.setdefault("tool_id", st.get("workflow_group", "native_planner"))
+        st.setdefault("input_contract", {"required_keys": ["goal"], "goal": goal})
+        st.setdefault("output_contract", {"required_keys": ["status"], "disallow_statuses": ["FAILED", "BLOCKED"]})
+        st.setdefault("preconditions", [f"dependency_completed:{d}" for d in st.get("depends_on", [])])
+        st.setdefault("postconditions", ["stage_verified"])
+        st.setdefault("retry_policy", {"max_attempts": 1, "idempotent_required": True, "retry_on": []})
+        st.setdefault("approval_policy", "approval_required" if st.get("requires_approval") else "auto")
+        st.setdefault("execution_status", st.get("status", "READY"))
 
     return {
         "engine": "native_planner_domain_adaptive",
@@ -1855,6 +2192,18 @@ def try_native_planning(conn: sqlite3.Connection, prompt: str, force_plan: bool 
             }
         )
 
+    for st in steps:
+        st.setdefault("task_id", st["step_id"])
+        st.setdefault("dependencies", list(st.get("depends_on", [])))
+        st.setdefault("tool_id", st.get("workflow_group", "native_planner"))
+        st.setdefault("input_contract", {"required_keys": ["goal"], "goal": goal})
+        st.setdefault("output_contract", {"required_keys": ["status"], "disallow_statuses": ["FAILED", "BLOCKED"]})
+        st.setdefault("preconditions", [f"dependency_completed:{d}" for d in st.get("depends_on", [])])
+        st.setdefault("postconditions", ["stage_verified"])
+        st.setdefault("retry_policy", {"max_attempts": 1, "idempotent_required": True, "retry_on": []})
+        st.setdefault("approval_policy", "approval_required" if st.get("requires_approval") else "auto")
+        st.setdefault("execution_status", st.get("status", "READY"))
+
     blocked_count = sum(1 for s in steps if s["status"] == "BLOCKED")
     approval_count = sum(1 for s in steps if s["requires_approval"])
 
@@ -1927,10 +2276,22 @@ def evaluate_checkpoint_heldout(conn: sqlite3.Connection, ckpt_row: sqlite3.Row)
     ds = conn.execute("SELECT records_json FROM datasets WHERE id=?", (ckpt_row["dataset_id"],)).fetchone()
     if not weights_path.exists() or not ds:
         return None
-    with open(weights_path, "r", encoding="utf-8") as f:
-        weights = json.load(f)
     splits = json.loads(ds["records_json"])
     test_lines = splits.get("test", [])
+    if str(ckpt_row["eval_status"]).startswith("NEURAL") or str(weights_path).endswith(".gz"):
+        n_model, n_tok, _ = NativeTransformerLM.load_checkpoint(weights_path)
+        test_seqs = [n_tok.encode(ln, add_bos=True, add_eos=True) for ln in test_lines if ln.strip()]
+        n_eval = n_model.evaluate_sequences(test_seqs)
+        if n_eval["tokens"] == 0:
+            return {"test_records": len(test_lines), "test_accuracy": 0.0, "test_perplexity": ckpt_row["perplexity"]}
+        return {
+            "test_records": len(test_lines),
+            "test_tokens": n_eval["tokens"],
+            "test_accuracy": n_eval["accuracy"],
+            "test_perplexity": n_eval["perplexity"],
+        }
+    with open(weights_path, "r", encoding="utf-8") as f:
+        weights = json.load(f)
     bigrams = weights.get("bigrams", {})
     trigrams = weights.get("trigrams", {})
     unigrams = weights.get("unigrams", {})
@@ -2128,15 +2489,70 @@ def handle_infer(payload: dict) -> dict:
     else:
         prompt_with_ctx = prompt
 
+    model_policy_map = {
+        "zyrquen-omega-v1": "balanced_hybrid",
+        "zyrquen-ast-pro": "symbolic_ast_priority",
+        "zyrquen-kg-v2": "knowledge_graph_deep",
+        "zyrquen-ngram-ckpt": "ngram_checkpoint_priority",
+        "zyrquen-neural-v1": "neural_transformer_priority",
+    }
+    model_policy = model_policy_map.get(model_version, "balanced_hybrid")
+
     trace: dict = {
         "mode": mode,
         "model_version": model_version,
-        "metadata": {"modelVersion": model_version},
+        "model_policy": model_policy,
+        "metadata": {"modelVersion": model_version, "modelPolicy": model_policy},
         "engine_path": [],
         "latency_ms": 0.0,
         "python_version": platform.python_version(),
         "external_models_used": False,
     }
+
+    # 0. Autonomous Continuous Operation Trigger from Conversation Channel
+    if mode == "auto":
+        m_mission = re.match(
+            r"^(?:ภารกิจ|ปฏิบัติการ(?:อัตโนมัติ)?|mission|autonomous)\s*:?\s*(.+)$",
+            prompt,
+            re.IGNORECASE,
+        )
+        if m_mission:
+            goal_text = m_mission.group(1).strip()
+            conn.close()
+            mission_res = run_autonomous_mission(
+                {
+                    "goal": goal_text,
+                    "user_id": user_id,
+                    "conversation_id": str(conversation_id) if conversation_id else None,
+                    "enable_research": True,
+                    "enable_knowledge_dev": True,
+                    "enable_planning": True,
+                    "enable_execution": True,
+                }
+            )
+            mission = mission_res.get("mission", {})
+            trace["engine_path"] = ["autonomous_cognitive_loop", "dag_executor"]
+            trace["autonomous_mission"] = {
+                "mission_id": mission.get("id"),
+                "status": mission.get("status"),
+                "stages": json.loads(mission.get("stages_json") or "[]"),
+                "knowledge_developed": json.loads(mission.get("knowledge_developed_json") or "[]"),
+            }
+            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            m_stat = str(mission.get("status") or "")
+            if m_stat in {"PENDING_APPROVAL", "AWAITING_APPROVAL"}:
+                msg_status = "PENDING_APPROVAL"
+            elif m_stat in {"BLOCKED", "CANCELLED"}:
+                msg_status = "BLOCKED"
+            elif m_stat == "FAILED":
+                msg_status = "FAILED"
+            else:
+                msg_status = "VERIFIED"
+            return {
+                "content": mission.get("report_markdown") or "ดำเนินภารกิจอัตโนมัติแล้ว",
+                "status": msg_status,
+                "trace": trace,
+            }
 
     # 1. Native DAG Goal Decomposition & Planning
     if mode in ("auto", "plan"):
@@ -2370,6 +2786,35 @@ def handle_infer(payload: dict) -> dict:
             conn.close()
             return {"content": content, "status": "NOT_LEARNED", "trace": trace}
 
+        causal_res = try_causal_logic_reasoning(prompt, conn)
+        if causal_res:
+            trace["engine_path"].append("causal_logic_native")
+            trace["causal_logic"] = causal_res
+            steps_md = "\n".join(f"- {s}" for s in causal_res["steps"])
+            if causal_res.get("contradiction"):
+                content = (
+                    f"**ตรวจพบข้อขัดแย้งเชิงสาเหตุ/ตรรกศาสตร์ (Contradiction)**\n\n"
+                    f"ข้อตั้งมีความขัดแย้งกันเอง จึงไม่สามารถอนุมานผลลัพธ์อย่างปลอดภัย:\n{steps_md}"
+                )
+                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                conn.close()
+                return {"content": content, "status": "BLOCKED", "trace": trace}
+            if causal_res.get("determined") and causal_res.get("derived_conclusion"):
+                sub_t = causal_res.get("sub_type", "causal")
+                content = (
+                    f"**ข้อสรุปเชิงตรรกศาสตร์/เหตุ-ผล (`{sub_t}`):** `{causal_res['derived_conclusion']}`\n\n"
+                    f"**ลำดับการอนุมาน:**\n{steps_md}"
+                )
+                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                conn.close()
+                return {"content": content, "status": "VERIFIED", "trace": trace}
+            content = (
+                f"**ไม่สามารถสรุปผลจากเงื่อนไข/ข้อตั้งที่มี (Undetermined)**\n\n{steps_md}"
+            )
+            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            conn.close()
+            return {"content": content, "status": "NOT_LEARNED", "trace": trace}
+
     is_explicit_math_cmd = bool(
         re.match(
             r"^(?:แก้สมการ|สมการ|คำนวณ|หาค่า|คิดเลข|สถิติ|วิเคราะห์ตัวเลข|ค่าเฉลี่ย|มัธยฐาน|solve|equation|calculate|compute|eval|evaluate|stats|statistics)\b",
@@ -2378,17 +2823,27 @@ def handle_infer(payload: dict) -> dict:
         )
     )
 
-    # 5. Knowledge Graph Query (with 2-hop provenance)
+    # 5. Knowledge Graph Query (with 2-hop & 3-hop provenance)
     if mode in ("auto", "knowledge") and not is_explicit_math_cmd:
+        if model_policy == "knowledge_graph_deep":
+            all_triples = conn.execute("SELECT subject, relation, object FROM knowledge_triples").fetchall()
+            pair_objs: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
+            for tr in all_triples:
+                pair_objs[(tr["subject"].lower(), tr["relation"].lower())].add(tr["object"].lower())
+            trace["kg_audit"] = {
+                "total_triples": len(all_triples),
+                "contradiction_groups": sum(1 for objs in pair_objs.values() if len(objs) > 1),
+            }
         matches = query_knowledge_graph(conn, prompt)
         if matches:
             trace["engine_path"].append("knowledge_graph")
             trace["matched_triples"] = matches
             lines = []
             for m in matches:
-                if m.get("provenance") == "inferred_2hop" and m.get("inferred_chain"):
+                if m.get("provenance") in ("inferred_2hop", "inferred_3hop") and m.get("inferred_chain"):
+                    hop_n = m.get("hop", 2)
                     lines.append(
-                        f"- [อนุมาน 2 ช่วง] `{m['inferred_chain']}` (แหล่งที่มา: {m['source']})"
+                        f"- [อนุมาน {hop_n} ช่วง] `{m['inferred_chain']}` (แหล่งที่มา: {m['source']})"
                     )
                 else:
                     lines.append(
@@ -2402,8 +2857,40 @@ def handle_infer(payload: dict) -> dict:
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
 
-    # 6. Native N-Gram Sequence Checkpoint
-    if mode in ("auto", "model") and not is_explicit_math_cmd:
+    # 6. Native Neural Transformer & N-Gram Sequence Checkpoint
+    allow_generative_ckpt = (
+        model_policy != "symbolic_ast_priority"
+        and not (model_policy == "knowledge_graph_deep" and mode != "model")
+    )
+    if mode in ("auto", "model") and not is_explicit_math_cmd and allow_generative_ckpt:
+        neural_ckpt = conn.execute(
+            "SELECT * FROM checkpoints WHERE eval_status LIKE 'NEURAL%' ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if neural_ckpt and model_policy in ("neural_transformer_priority", "balanced_hybrid") and Path(neural_ckpt["weights_path"]).exists():
+            try:
+                n_model, n_tok, _ = NativeTransformerLM.load_checkpoint(Path(neural_ckpt["weights_path"]))
+                n_res = n_model.generate_continuation(n_tok, prompt)
+                if n_res.get("generated"):
+                    trace["engine_path"].append("neural_transformer_checkpoint")
+                    trace["checkpoint"] = {
+                        "engine": "neural_transformer",
+                        "checkpoint_version": neural_ckpt["version"],
+                        "perplexity": neural_ckpt["perplexity"],
+                        "param_count": n_model.parameter_count(),
+                        "generated": n_res["generated"],
+                        "mean_confidence": n_res.get("mean_confidence"),
+                    }
+                    content = (
+                        f"**ผลต่อข้อความจาก Neural Transformer Checkpoint v{neural_ckpt['version']}** "
+                        f"({n_model.parameter_count():,} params · ppl {neural_ckpt['perplexity']:.2f}):\n\n"
+                        f"{prompt} **{n_res['generated']}**"
+                    )
+                    trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                    conn.close()
+                    return {"content": content, "status": "VERIFIED", "trace": trace}
+            except Exception:
+                pass
+
         ngram_res = run_ngram_continuation(conn, prompt)
         if ngram_res and ngram_res.get("generated"):
             trace["engine_path"].append("ngram_checkpoint")
@@ -2839,6 +3326,448 @@ def handle_run_workflow(payload: dict) -> dict:
     return {"ok": True, "run": run}
 
 
+def _integrate_mission_knowledge(
+    conn: sqlite3.Connection,
+    goal: str,
+    user_id: str,
+    terms: list[str],
+    research_res: dict,
+) -> dict:
+    developed_triples: list[dict] = []
+    details: list[str] = []
+
+    explicit_teach = try_teach_knowledge(conn, goal, user_id)
+    if explicit_teach and explicit_teach.get("triple"):
+        tr = explicit_teach["triple"]
+        developed_triples.append(
+            {
+                "id": tr["id"],
+                "subject": tr["subject"],
+                "relation": tr["relation"],
+                "object": tr["object"],
+                "source": tr["source"],
+                "contradictions": explicit_teach.get("contradictions", []),
+            }
+        )
+        details.append(f"บันทึกความสัมพันธ์โดยตรง: {tr['subject']} -> {tr['relation']} -> {tr['object']}")
+
+    if research_res and research_res.get("status") == "COMPLETED":
+        analysis_obj = research_res.get("analysis") or {}
+        t_grade = str(research_res.get("trust_grade") or analysis_obj.get("trust_grade") or "")
+        ev_items = analysis_obj.get("evidence_items") or []
+        if t_grade in {"CORROBORATED_MULTI_SOURCE", "UNCORROBORATED_SINGLE_SOURCE"} and ev_items:
+            topic_subj = (terms[0] if terms else goal[:40]).strip()
+            shared = analysis_obj.get("cross_source_shared_terms") or analysis_obj.get("top_terms") or []
+            candidates: list[tuple[str, str, str]] = []
+            # Extract concrete factual triples from verified claims
+            for cl_obj in (research_res.get("claims") or [])[:6]:
+                c_txt = str(cl_obj.get("claim_text") or "").strip()
+                m_rel = re.search(
+                    r"\b([A-Za-z0-9_.-]{2,30})\s+(supports|enables|uses|provides|released in)\s+([A-Za-z0-9_., -]{2,48})",
+                    c_txt,
+                    re.IGNORECASE,
+                ) or re.search(
+                    r"([\u0E00-\u0E7FA-Za-z0-9_-]{2,30})\s+(รองรับ|ใช้|เปิดตัวเมื่อ|พัฒนาโดย|ทำให้เกิด)\s+([\u0E00-\u0E7FA-Za-z0-9_ -]{2,48})",
+                    c_txt,
+                )
+                if m_rel:
+                    s_c, r_c, o_c = m_rel.group(1).strip(), m_rel.group(2).strip(), m_rel.group(3).strip(" .,;")
+                    if s_c and r_c and o_c and len(candidates) < 2:
+                        candidates.append((s_c, r_c, o_c))
+            if shared:
+                candidates.append((topic_subj, "เชื่อมโยงแนวคิด", ", ".join(shared[:3])))
+            first_ev = ev_items[0]
+            if first_ev.get("title"):
+                candidates.append(
+                    (
+                        topic_subj,
+                        "มีเอกสารอ้างอิง",
+                        f"{first_ev['title'][:60]} ({first_ev.get('provider', 'web')})",
+                    )
+                )
+            conf_val = 0.9 if t_grade == "CORROBORATED_MULTI_SOURCE" else 0.65
+            src_tag = f"autonomous_research:{t_grade.lower()}"
+            for subj_c, rel_c, obj_c in candidates:
+                dup = conn.execute(
+                    "SELECT id FROM knowledge_triples WHERE lower(subject)=lower(?) AND lower(relation)=lower(?) AND lower(object)=lower(?)",
+                    (subj_c, rel_c, obj_c),
+                ).fetchone()
+                if dup:
+                    continue
+                existing_rel = conn.execute(
+                    "SELECT object FROM knowledge_triples WHERE lower(subject)=lower(?) AND lower(relation)=lower(?)",
+                    (subj_c, rel_c),
+                ).fetchall()
+                contradictions = [r["object"] for r in existing_rel if r["object"].lower() != obj_c.lower()]
+                tid = str(uuid.uuid4())
+                with conn:
+                    conn.execute(
+                        "INSERT INTO knowledge_triples (id, subject, relation, object, source, confidence, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (tid, subj_c, rel_c, obj_c, src_tag, conf_val, user_id, now_iso()),
+                    )
+                developed_triples.append(
+                    {
+                        "id": tid,
+                        "subject": subj_c,
+                        "relation": rel_c,
+                        "object": obj_c,
+                        "source": src_tag,
+                        "contradictions": contradictions,
+                    }
+                )
+            if developed_triples:
+                details.append(f"พัฒนาความรู้ใหม่เข้ากราฟถาวร {len(developed_triples)} รายการ ({t_grade})")
+            else:
+                details.append("หลักฐานตรงกับความรู้เดิม (ไม่สร้างซ้ำ)")
+        elif t_grade in {"CONFLICTING_SOURCES", "STALE", "BLOCKED", "INSUFFICIENT_EVIDENCE"}:
+            details.append(f"งดบันทึกความรู้ใหม่อัตโนมัติเนื่องจากหลักฐานอยู่ในระดับ {t_grade} (NOT_LEARNED)")
+    elif not details:
+        kg_hits = query_knowledge_graph(conn, goal)
+        details.append(f"ตรวจสอบความสอดคล้องกราฟความรู้ภายในแล้ว (พบฐานความรู้เดิม {len(kg_hits)} รายการ)")
+
+    return {
+        "triples": developed_triples,
+        "detail": " · ".join(details),
+    }
+
+
+def _mission_callbacks() -> dict:
+    return {
+        "tokenize": tokenize,
+        "extract_terms": extract_query_terms,
+        "query_kg": query_knowledge_graph,
+        "calc_any": _calc_any_for_tool,
+        "try_logic": try_transitive_logic_reasoning,
+        "try_causal_logic": try_causal_logic_reasoning,
+        "integrate_knowledge": _integrate_mission_knowledge,
+    }
+
+
+def _finalize_mission_record(
+    conn: sqlite3.Connection,
+    mission_id: str,
+    goal: str,
+    user_id: str,
+    caps_obj: dict,
+    dag_result: dict,
+    ctx: dict,
+    started_iso: str,
+) -> dict:
+    nodes = dag_result.get("nodes", [])
+    node_map = {n["task_id"]: n for n in nodes}
+    m_status = str(dag_result.get("mission_status") or "FAILED")
+    if m_status not in MISSION_STATES:
+        m_status = "FAILED"
+    recovery_events = list(dag_result.get("recovery_events") or [])
+    developed_triples = list(ctx.get("developed_triples") or [])
+
+    r_node = node_map.get("node_research_discover")
+    r_out = (r_node or {}).get("output_data") or {}
+    r_analysis = r_out.get("analysis") or {}
+    research_summary = {
+        "queried": bool(caps_obj.get("enable_research", True)),
+        "status": (r_node or {}).get("execution_status", "SKIPPED"),
+        "verdict": r_out.get("verdict"),
+        "trust_grade": r_out.get("trust_grade") or r_analysis.get("trust_grade"),
+        "invocation_id": r_out.get("invocation_id"),
+        "providers": r_analysis.get("distinct_providers", []),
+        "shared_terms": r_analysis.get("cross_source_shared_terms", []),
+        "claims_count": len(r_out.get("claims") or []),
+        "doc_fetch": r_out.get("doc_fetch"),
+        "injection_warnings": r_out.get("injection_warnings", []),
+        "limitations": r_analysis.get("limitations", []),
+    }
+
+    think_node = node_map.get("node_goal_analysis")
+    think_out = (think_node or {}).get("output_data") or {}
+    think_detail = (
+        f"สกัดคำสำคัญ {think_out.get('terms_count', 0)} หน่วย · เชื่อมโยงกราฟเดิม {think_out.get('kg_hits', 0)} รายการ"
+        if think_node
+        else "วิเคราะห์เป้าหมายผ่าน Native Core"
+    )
+
+    if r_node:
+        r_st = r_node["execution_status"]
+        disc_status = "PENDING_APPROVAL" if r_st == "AWAITING_APPROVAL" else ("PASS" if r_st == "COMPLETED" else r_st)
+        disc_detail = (
+            "ส่งคำขอ web_search เข้า P5 Approval Gate แล้ว (ภารกิจหยุดรอการอนุมัติและสามารถทำงานต่ออัตโนมัติ)"
+            if r_st == "AWAITING_APPROVAL"
+            else (r_out.get("error") or f"verdict={research_summary.get('verdict')} · claims={research_summary.get('claims_count', 0)}")
+        )
+    else:
+        disc_status = "SKIPPED"
+        disc_detail = "ปิดการค้นคว้าอินเทอร์เน็ตสำหรับภารกิจนี้"
+
+    k_node = node_map.get("node_knowledge_integrate")
+    k_out = (k_node or {}).get("output_data") or {}
+    learn_status = "PASS" if (k_node and k_node["execution_status"] == "COMPLETED") else ("WAITING" if m_status == "AWAITING_APPROVAL" else ("SKIPPED" if not k_node else k_node["execution_status"]))
+    learn_detail = str(k_out.get("detail") or ("รออนุมัติการค้นคว้าก่อนพัฒนาองค์ความรู้" if learn_status == "WAITING" else "ตรวจสอบกราฟความรู้"))
+
+    plan_status = "PASS" if nodes else "SKIPPED"
+    plan_detail = f"สร้าง DAG {len(nodes)} โหนดพร้อม pre/postconditions และ recovery policy"
+
+    act_nodes = [n for n in nodes if n["task_id"] not in {"node_goal_analysis", "node_research_discover", "node_knowledge_integrate"}]
+    if not act_nodes:
+        act_status = "WAITING" if m_status == "AWAITING_APPROVAL" else "SKIPPED"
+        act_detail = "รอดำเนินการหลังการค้นคว้าและการพัฒนาความรู้"
+    else:
+        act_done = [n for n in act_nodes if n["execution_status"] == "COMPLETED"]
+        act_fail = [n for n in act_nodes if n["execution_status"] in {"FAILED", "BLOCKED"}]
+        act_status = "PASS" if (len(act_done) == len(act_nodes)) else ("FAILED" if act_fail else "WAITING")
+        act_detail = " · ".join(f"{n['task_id']}:{n['execution_status']}" for n in act_nodes)
+
+    if m_status == "AWAITING_APPROVAL":
+        ver_status = "PENDING_APPROVAL"
+        ver_detail = "ภารกิจพักรอการอนุมัติใน P5 Gate — ระบบบันทึก DAG state ถาวรเพื่อ resume ต่อทันทีหลังอนุมัติ"
+    elif m_status == "COMPLETED":
+        ver_status = "PASS"
+        ver_detail = f"ยืนยัน postconditions ครบทุกโหนด ({len([n for n in nodes if n['execution_status']=='COMPLETED'])}/{len(nodes)}) · external_models_used=false"
+    else:
+        ver_status = "FAILED" if m_status == "FAILED" else "BLOCKED"
+        ver_detail = f"ภารกิจสิ้นสุดสถานะ {m_status} (ไม่รายงานสำเร็จเท็จ)"
+
+    gaps = detect_capability_gaps(conn)
+    gap_type = gaps[0]["gap_type"] if gaps else None
+    improve_detail = (
+        "; ".join(recovery_events)
+        if recovery_events
+        else (gaps[0]["detail"] if gaps else "บันทึกประสบการณ์ลง Episodic Memory แล้ว")
+    )
+    if m_status in {"COMPLETED", "FAILED", "BLOCKED"}:
+        record_episodic_experience(
+            conn,
+            mission_id=mission_id,
+            goal=goal,
+            outcome_status=m_status,
+            gap_type=gap_type if m_status != "COMPLETED" else None,
+            hypothesis={"recovery_events": recovery_events, "gaps": gaps[:2]},
+            verified_delta=float(len(developed_triples)),
+        )
+
+    stages = [
+        {"stage": "think", "label": "1. Think (Autonomous Cognition)", "status": "PASS", "detail": think_detail},
+        {"stage": "discover", "label": "2. Discover (Autonomous Research)", "status": disc_status, "detail": disc_detail},
+        {"stage": "learn", "label": "3. Learn (Knowledge Development)", "status": learn_status, "detail": learn_detail},
+        {"stage": "plan", "label": "4. Plan (DAG Decomposition)", "status": plan_status, "detail": plan_detail},
+        {"stage": "act", "label": "5. Act (DAG Execution & Recovery)", "status": act_status, "detail": act_detail},
+        {"stage": "verify", "label": "6. Verify (Postcondition Check)", "status": ver_status, "detail": ver_detail},
+        {"stage": "improve", "label": "7. Improve (Episodic Gap Loop)", "status": "PASS", "detail": improve_detail},
+    ]
+
+    stage_lines = "\n".join(f"- **{s['label']}** [`{s['status']}`]: {s['detail']}" for s in stages)
+    triple_lines = (
+        "\n".join(f"- `{t['subject']}` — *{t['relation']}* → `{t['object']}` (แหล่ง: `{t['source']}`)" for t in developed_triples)
+        if developed_triples
+        else "- ยังไม่มีการเพิ่ม Triple ใหม่ลงกราฟความรู้ในรอบนี้"
+    )
+    report_md = (
+        f"**ผลปฏิบัติการอัตโนมัติ ZYRQUEN Ω∞ (`{m_status}`)**\n"
+        f"เป้าหมาย: `{goal}`\n\n"
+        f"> วงจร Think → Discover → Learn → Plan → Act → Verify → Improve (DAG Executor · Native Cognitive Core)\n\n"
+        f"**ลำดับการปฏิบัติการจริง:**\n{stage_lines}\n\n"
+        f"**องค์ความรู้ที่พัฒนาในรอบนี้:**\n{triple_lines}"
+    )
+
+    now = now_iso()
+    with conn:
+        conn.execute(
+            """
+            UPDATE autonomous_missions
+            SET status=?, stages_json=?, knowledge_developed_json=?, research_summary_json=?, report_markdown=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                m_status,
+                json.dumps(stages, ensure_ascii=False),
+                json.dumps(developed_triples, ensure_ascii=False),
+                json.dumps(research_summary, ensure_ascii=False),
+                report_md,
+                now,
+                mission_id,
+            ),
+        )
+    mission = dict(conn.execute("SELECT * FROM autonomous_missions WHERE id=?", (mission_id,)).fetchone())
+    node_rows = [dict(r) for r in conn.execute("SELECT * FROM mission_nodes WHERE mission_id=? ORDER BY rowid ASC", (mission_id,)).fetchall()]
+    ev_rows = [dict(r) for r in conn.execute("SELECT * FROM mission_evidence WHERE mission_id=? ORDER BY rowid ASC", (mission_id,)).fetchall()]
+    return {"ok": True, "mission": mission, "nodes": node_rows, "evidence": ev_rows}
+
+
+def run_autonomous_mission(payload: dict) -> dict:
+    """
+    ZYRQUEN Autonomous Cognitive-Action Loop powered by real DAG Execution State Machine.
+    Persists mission states (MISSION_CREATED -> GOAL_ANALYZED -> PLAN_READY -> EXECUTING ->
+    AWAITING_APPROVAL/COMPLETED/BLOCKED/FAILED) and supports safe resumption.
+    """
+    goal = str(payload.get("goal", "")).strip()
+    if not goal:
+        return {"ok": False, "error": "กรุณาระบุเป้าหมายของปฏิบัติการอัตโนมัติ"}
+
+    user_id = str(payload.get("user_id", "") or "system")
+    conversation_id = payload.get("conversation_id")
+    enable_research = bool(payload.get("enable_research", True))
+    enable_knowledge_dev = bool(payload.get("enable_knowledge_dev", True))
+    enable_planning = bool(payload.get("enable_planning", True))
+    enable_execution = bool(payload.get("enable_execution", True))
+
+    conn = get_db()
+    mission_id = str(uuid.uuid4())
+    started_iso = now_iso()
+    caps_obj = {
+        "enable_research": enable_research,
+        "enable_knowledge_dev": enable_knowledge_dev,
+        "enable_planning": enable_planning,
+        "enable_execution": enable_execution,
+    }
+
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO autonomous_missions (
+                id, goal, status, capabilities_json, stages_json,
+                knowledge_developed_json, research_summary_json, report_markdown,
+                external_models_used, created_by, created_at, updated_at
+            )
+            VALUES (?, ?, 'MISSION_CREATED', ?, '[]', '[]', '{}', '', 0, ?, ?, ?)
+            """,
+            (mission_id, goal, json.dumps(caps_obj, ensure_ascii=False), user_id, started_iso, started_iso),
+        )
+
+    math_hit = _calc_any_for_tool(goal)
+    logic_hit = try_transitive_logic_reasoning(goal)
+    causal_hit = try_causal_logic_reasoning(goal, conn)
+    nodes = build_mission_dag(
+        mission_id,
+        goal,
+        has_math=bool(math_hit),
+        has_logic=bool(logic_hit or causal_hit),
+        enable_research=enable_research,
+        enable_knowledge_dev=enable_knowledge_dev,
+        enable_execution=enable_execution,
+    )
+
+    with conn:
+        conn.execute(
+            "UPDATE autonomous_missions SET status='PLAN_READY', updated_at=? WHERE id=?",
+            (now_iso(), mission_id),
+        )
+
+    ctx = {
+        "goal": goal,
+        "user_id": user_id,
+        "conversation_id": str(conversation_id) if conversation_id else None,
+        "math_hit": math_hit,
+        "logic_hit": logic_hit,
+        "causal_hit": causal_hit,
+    }
+    dag_result = execute_dag_loop(
+        conn,
+        DATA_DIR,
+        mission_id,
+        nodes,
+        ctx,
+        callbacks=_mission_callbacks(),
+    )
+    out = _finalize_mission_record(conn, mission_id, goal, user_id, caps_obj, dag_result, ctx, started_iso)
+    conn.close()
+    return out
+
+
+def resume_autonomous_mission(payload: dict) -> dict:
+    """Resume a paused/recoverable mission from its persisted DAG state in SQLite."""
+    mission_id = str(payload.get("mission_id", "")).strip()
+    if not mission_id:
+        return {"ok": False, "error": "mission_id is required"}
+    approved_by = payload.get("approved_by")
+    decision = payload.get("decision")
+    invocation_id = payload.get("invocation_id")
+    node_id = payload.get("node_id")
+
+    conn = get_db()
+    m_row = conn.execute("SELECT * FROM autonomous_missions WHERE id=?", (mission_id,)).fetchone()
+    if not m_row:
+        conn.close()
+        return {"ok": False, "error": "Mission not found"}
+    if m_row["status"] == "CANCELLED":
+        conn.close()
+        return {"ok": False, "error": "Mission was cancelled"}
+
+    node_rows = conn.execute(
+        "SELECT * FROM mission_nodes WHERE mission_id=? ORDER BY rowid ASC",
+        (mission_id,),
+    ).fetchall()
+    if not node_rows:
+        conn.close()
+        return {"ok": False, "error": "Mission has no persisted DAG nodes"}
+
+    nodes = [json.loads(r["node_json"]) for r in node_rows]
+    if not node_id:
+        pending_n = next((n for n in nodes if n.get("execution_status") == "AWAITING_APPROVAL"), None)
+        node_id = pending_n["task_id"] if pending_n else None
+
+    caps_obj = json.loads(m_row["capabilities_json"] or "{}")
+    ctx: dict = {
+        "goal": m_row["goal"],
+        "user_id": m_row["created_by"],
+        "conversation_id": None,
+        "terms": extract_query_terms(m_row["goal"]),
+    }
+    # Hydrate research output from completed or pending research node if available
+    for n in nodes:
+        if n.get("tool_id") == "research_pipeline" and isinstance(n.get("output_data"), dict) and n["output_data"]:
+            ctx["research_result"] = n["output_data"]
+
+    with conn:
+        conn.execute(
+            "UPDATE autonomous_missions SET status='EXECUTING', updated_at=? WHERE id=?",
+            (now_iso(), mission_id),
+        )
+
+    dag_result = execute_dag_loop(
+        conn,
+        DATA_DIR,
+        mission_id,
+        nodes,
+        ctx,
+        callbacks=_mission_callbacks(),
+        resume_node_id=node_id,
+        approved_by=approved_by,
+        approval_decision=decision,
+        existing_invocation_id=invocation_id,
+    )
+    out = _finalize_mission_record(
+        conn,
+        mission_id,
+        m_row["goal"],
+        m_row["created_by"],
+        caps_obj,
+        dag_result,
+        ctx,
+        m_row["created_at"],
+    )
+    conn.close()
+    return out
+
+
+def cancel_autonomous_mission(payload: dict) -> dict:
+    mission_id = str(payload.get("mission_id", "")).strip()
+    if not mission_id:
+        return {"ok": False, "error": "mission_id is required"}
+    conn = get_db()
+    m_row = conn.execute("SELECT * FROM autonomous_missions WHERE id=?", (mission_id,)).fetchone()
+    if not m_row:
+        conn.close()
+        return {"ok": False, "error": "Mission not found"}
+    with conn:
+        conn.execute(
+            "UPDATE autonomous_missions SET status='CANCELLED', updated_at=? WHERE id=?",
+            (now_iso(), mission_id),
+        )
+    mission = dict(conn.execute("SELECT * FROM autonomous_missions WHERE id=?", (mission_id,)).fetchone())
+    conn.close()
+    return {"ok": True, "mission": mission}
+
+
+
 def summarize_conversation(messages: list[dict]) -> dict:
     """
     Deterministic Native Conversation Summarizer (no external LLM).
@@ -2941,6 +3870,13 @@ def summarize_conversation(messages: list[dict]) -> dict:
                 f"{sm.get('total_steps', 0)} ขั้นตอน (ถูกบล็อก {sm.get('blocked_steps', 0)}, รออนุมัติ {sm.get('approval_gated_steps', 0)})"
             )
 
+        if "causal_logic" in trace and isinstance(trace["causal_logic"], dict):
+            cl = trace["causal_logic"]
+            if cl.get("determined") and cl.get("derived_conclusion"):
+                add_bullet(f"อนุมานเหตุ-ผล/ตรรกศาสตร์ (`{cl.get('sub_type')}`): `{cl.get('derived_conclusion')}`")
+            elif cl.get("contradiction"):
+                add_bullet("ตรวจพบข้อขัดแย้งเชิงสาเหตุ/ตรรกศาสตร์ (BLOCKED)")
+
         if "checkpoint" in trace and isinstance(trace["checkpoint"], dict):
             ck = trace["checkpoint"]
             if ck.get("generated"):
@@ -3018,6 +3954,46 @@ def main() -> None:
         rows = [dict(r) for r in conn.execute("SELECT * FROM evaluations ORDER BY created_at DESC LIMIT 15").fetchall()]
         conn.close()
         print(json.dumps({"ok": True, "evaluations": rows}))
+    elif cmd == "run_mission":
+        print(json.dumps(run_autonomous_mission(payload)))
+    elif cmd == "resume_mission":
+        print(json.dumps(resume_autonomous_mission(payload)))
+    elif cmd == "cancel_mission":
+        print(json.dumps(cancel_autonomous_mission(payload)))
+    elif cmd == "run_experiment":
+        conn = get_db()
+        res = run_controlled_neural_experiment(
+            conn,
+            CHECKPOINT_DIR,
+            str(payload.get("user_id", "system")),
+            dataset_id=payload.get("dataset_id"),
+            epochs=int(payload.get("epochs", 8)),
+            seed=int(payload.get("seed", 42)),
+        )
+        conn.close()
+        print(json.dumps(res))
+    elif cmd == "decide_experiment":
+        conn = get_db()
+        res = decide_experiment(
+            conn,
+            CHECKPOINT_DIR,
+            experiment_id=str(payload.get("experiment_id", "")),
+            decision=str(payload.get("decision", "approve")),
+            admin_email=str(payload.get("admin_email", "admin")),
+            admin_id=str(payload.get("admin_id", "admin")),
+        )
+        conn.close()
+        print(json.dumps(res))
+    elif cmd == "curate_corpus":
+        conn = get_db()
+        res = curate_verified_training_corpus(
+            conn,
+            str(payload.get("user_id", "system")),
+            handle_ingest_dataset,
+            name=str(payload.get("name", "verified-knowledge-corpus")),
+        )
+        conn.close()
+        print(json.dumps(res))
     elif cmd == "workflow_groups":
         print(json.dumps({"ok": True, "groups": WORKFLOW_GROUPS}))
     else:

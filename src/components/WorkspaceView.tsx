@@ -420,7 +420,7 @@ export function WorkspaceView({
           ) : messages.length === 0 ? (
             <div className="my-6 flex flex-col items-start gap-5 rounded-3xl border border-slate-800/80 bg-[#0E172B] p-6 sm:p-8">
               <div className="flex items-center gap-3">
-                <ZyrquenEmblem size={36} />
+                <ZyrquenEmblem size={36} active={sending || streamingContent !== null} />
                 <div>
                   <h2 className="text-lg font-bold text-slate-50">เวิร์กสเปซ ZYRQUEN Ω∞</h2>
                   <p className="text-xs text-slate-400">

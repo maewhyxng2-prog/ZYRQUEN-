@@ -766,6 +766,21 @@ export default function App() {
     void bootstrapAuthAndHealth();
   }
 
+  const isCoreProcessing = Boolean(sending || streamingContent !== null || loadingThread || homeLoading);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.documentElement.dataset.zyrquenProcessing = isCoreProcessing ? 'true' : 'false';
+    const logos = document.querySelectorAll<SVGElement>('svg.zyrq-emblem-root');
+    logos.forEach((logo) => {
+      logo.dataset.processing = isCoreProcessing ? 'true' : 'false';
+      logo.classList.toggle('zyrq-emblem-active', isCoreProcessing);
+    });
+    return () => {
+      document.documentElement.dataset.zyrquenProcessing = 'false';
+    };
+  }, [isCoreProcessing, screen]);
+
   if (!isOnline) {
     return (
       <div
@@ -860,6 +875,7 @@ export default function App() {
       user={user}
       showBackOnMobile={screen === 'workspace' || (screen === 'settings' && settingsTab !== 'account')}
       hideBottomBarOnMobile={screen === 'workspace'}
+      isProcessing={isCoreProcessing}
       onNavigate={(next) => {
         if (next === 'settings') {
           pushRoute('settings', null, 'account');

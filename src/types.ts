@@ -5,7 +5,8 @@ export type ModelVariantId =
   | 'zyrquen-omega-v1'
   | 'zyrquen-ast-pro'
   | 'zyrquen-kg-v2'
-  | 'zyrquen-ngram-ckpt';
+  | 'zyrquen-ngram-ckpt'
+  | 'zyrquen-neural-v1';
 
 export const MODEL_VARIANTS: ReadonlyArray<{
   id: ModelVariantId;
@@ -17,25 +18,31 @@ export const MODEL_VARIANTS: ReadonlyArray<{
     id: 'zyrquen-omega-v1',
     label: 'ZYRQUEN Ω∞ Core v1',
     shortLabel: 'Ω∞ Core v1',
-    description: 'แกนสมองผสมผสานมาตรฐาน (AST + Graph + N-Gram)',
+    description: 'แกนสมองผสมผสานมาตรฐาน (AST + Graph + Neural/N-Gram)',
   },
   {
     id: 'zyrquen-ast-pro',
     label: 'ZYRQUEN AST Pro v1.2',
     shortLabel: 'AST Pro v1.2',
-    description: 'เน้นการคำนวณเชิงสัญลักษณ์และสมการเชิงเส้น',
+    description: 'เน้นการคำนวณเชิงสัญลักษณ์และสมการเชิงเส้น (งดเดาข้อความ)',
   },
   {
     id: 'zyrquen-kg-v2',
     label: 'ZYRQUEN Graph v2.0',
     shortLabel: 'Graph v2.0',
-    description: 'เน้นกราฟความรู้หลายช่วงและตรวจความสอดคล้อง',
+    description: 'เน้นกราฟความรู้หลายช่วงและตรวจความขัดแย้ง',
   },
   {
     id: 'zyrquen-ngram-ckpt',
     label: 'ZYRQUEN Checkpoint N-Gram',
     shortLabel: 'N-Gram Ckpt',
-    description: 'เน้นการต่อข้อความจาก Checkpoint ล่าสุด',
+    description: 'เน้นการต่อข้อความจากสถิติ N-Gram Checkpoint ล่าสุด',
+  },
+  {
+    id: 'zyrquen-neural-v1',
+    label: 'ZYRQUEN Neural Transformer v1',
+    shortLabel: 'Neural v1',
+    description: 'โมเดล Native Transformer (Random-Init) + Subword BPE',
   },
 ];
 
@@ -141,14 +148,77 @@ export interface SystemMetrics {
   sqlite_db_kb: number;
 }
 
+export interface AutonomousMissionStage {
+  stage: 'think' | 'discover' | 'learn' | 'plan' | 'act' | 'verify' | 'improve' | string;
+  label: string;
+  status: string;
+  detail: string;
+}
+
+export interface AutonomousMissionItem {
+  id: string;
+  goal: string;
+  status: string;
+  capabilities_json: string;
+  stages_json: string;
+  knowledge_developed_json: string;
+  research_summary_json: string;
+  report_markdown: string;
+  external_models_used: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MissionNodeItem {
+  id: string;
+  mission_id: string;
+  task_id: string;
+  node_json: string;
+  execution_status: string;
+  attempt_count: number;
+  idempotency_key: string;
+  last_error: string | null;
+  updated_at: string;
+}
+
+export interface MissionEvidenceItem {
+  id: string;
+  mission_id: string;
+  node_id: string | null;
+  source_url: string;
+  provider: string;
+  retrieved_at: string;
+  trust_grade: string;
+  content_sha256: string;
+  extracted_claims_json: string;
+}
+
+export interface ExperimentItem {
+  id: string;
+  hypothesis: string;
+  dataset_id: string | null;
+  baseline_ckpt_id: string | null;
+  candidate_ckpt_id: string | null;
+  baseline_metrics_json: string;
+  candidate_metrics_json: string;
+  improved: number;
+  approval_status: string;
+  approved_by: string | null;
+  created_by: string;
+  created_at: string;
+}
+
 export interface HomeSummary {
   recent_conversations: ConversationSummary[];
+  recent_missions?: AutonomousMissionItem[];
   counts: {
     triples: number;
     checkpoints: number;
     datasets: number;
     pending_approvals: number;
     evaluations?: number;
+    missions?: number;
   };
   system: SystemMetrics;
 }
@@ -249,6 +319,7 @@ export interface DeveloperOverview {
   datasets: DatasetItem[];
   checkpoints: CheckpointItem[];
   evaluations?: EvaluationItem[];
+  experiments?: ExperimentItem[];
   usage: {
     total_requests: number;
     avg_latency_ms: number;
@@ -317,6 +388,7 @@ export interface AdminOverview {
   users: User[];
   pending_runs: WorkflowRun[];
   pending_tool_invocations?: ToolInvocationItem[];
+  pending_experiments?: ExperimentItem[];
   tools?: ExternalToolItem[];
   audit_logs: AuditLogItem[];
   system: SystemMetrics;
@@ -344,6 +416,61 @@ export interface BenchmarkCategoryStats {
   score: number;
 }
 
+export type CapabilityStatus =
+  | 'NOT_IMPLEMENTED'
+  | 'IMPLEMENTED'
+  | 'TESTED'
+  | 'PARTIAL'
+  | 'VERIFIED'
+  | 'BLOCKED'
+  | 'REGRESSION_FAILED';
+
+export interface CapabilityDomainEntry {
+  domain: string;
+  label: string;
+  status: CapabilityStatus;
+  implemented: boolean;
+  measured: boolean;
+  passed: number;
+  total: number;
+  failed: number;
+  false_positives: number;
+  score: number;
+  criteria: {
+    has_benchmark: boolean;
+    has_unseen_dataset: boolean;
+    has_e2e_probe: boolean;
+    has_postcondition_check: boolean;
+    zero_blocked_dependencies: boolean;
+    zero_regression: boolean;
+    threshold_met: boolean;
+  };
+  self_assessment_blocked: boolean;
+  blocked_dependencies: string[];
+  disclosed_gaps: string[];
+  case_ids: string[];
+  evidence_hash: string;
+  evaluated_at: string;
+}
+
+export interface CapabilityLedger {
+  policy: string;
+  self_assessment_blocked: boolean;
+  allowed_statuses: CapabilityStatus[];
+  domains: Record<string, CapabilityDomainEntry>;
+  summary: {
+    total_domains: number;
+    verified: number;
+    tested: number;
+    partial: number;
+    implemented: number;
+    blocked: number;
+    regression_failed: number;
+    not_implemented: number;
+    counts_by_status: Record<string, number>;
+  };
+}
+
 export interface NativeBenchmarkReport {
   benchmark_version: string;
   environment: {
@@ -366,6 +493,7 @@ export interface NativeBenchmarkReport {
     positive_cases_total: number;
     false_negative_rate: number;
   };
+  capability_ledger?: CapabilityLedger;
   category_scores: Record<string, BenchmarkCategoryStats>;
   leakage_detection: {
     fixture_isolation: {

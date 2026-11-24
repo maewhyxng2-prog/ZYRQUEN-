@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App, {
@@ -6,6 +8,9 @@ import App, {
   type MemorySnapshot,
   type ThreadLoadEntry,
 } from '../App';
+import { MemoryWorkflowsView } from '../components/MemoryWorkflowsView';
+import { SettingsView } from '../components/SettingsView';
+import { ZyrquenEmblem } from '../components/ZyrquenEmblem';
 import { streamConversationMessage } from '../lib/api';
 
 function mockFetch(handlers: Record<string, (init?: RequestInit) => Response | Promise<Response>>) {
@@ -1143,5 +1148,364 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(cancelSpy).toHaveBeenCalled();
 
     view.unmount();
+  });
+
+  it('P0: ปราศจากแพ็กเกจหรือการนำเข้า External LLM SDK (@google/genai, OpenAI, Anthropic) ในระบบจริง', () => {
+    const rootDir = process.cwd();
+    const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    expect(allDeps['@google/genai']).toBeUndefined();
+    expect(allDeps['openai']).toBeUndefined();
+    expect(allDeps['@anthropic-ai/sdk']).toBeUndefined();
+
+    const sdkOrEndpointPattern =
+      /@google\/genai|GoogleGenAI|@anthropic-ai\/sdk|from\s+['"]openai['"]|import\s+openai\b|import\s+anthropic\b|google\.generativeai|https:\/\/(?:api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com)/;
+
+    const serverSource = fs.readFileSync(path.join(rootDir, 'server.ts'), 'utf8');
+    expect(serverSource).not.toMatch(sdkOrEndpointPattern);
+
+    const srcFiles = fs
+      .readdirSync(path.join(rootDir, 'src'), { recursive: true })
+      .map((f) => String(f))
+      .filter((f) => /\.(ts|tsx)$/.test(f) && !f.startsWith('test/'));
+    for (const rel of srcFiles) {
+      const content = fs.readFileSync(path.join(rootDir, 'src', rel), 'utf8');
+      expect(content, `External LLM reference in src/${rel}`).not.toMatch(sdkOrEndpointPattern);
+    }
+
+    const pyFiles = fs
+      .readdirSync(path.join(rootDir, 'python_core'))
+      .filter((f) => f.endsWith('.py'));
+    for (const pyFile of pyFiles) {
+      const content = fs.readFileSync(path.join(rootDir, 'python_core', pyFile), 'utf8');
+      expect(content, `External LLM reference in python_core/${pyFile}`).not.toMatch(sdkOrEndpointPattern);
+    }
+  });
+
+  it('P1: จัดการภารกิจอัตโนมัติ (DAG Nodes, Evidence, Resume, Cancel) ใน MemoryWorkflowsView', async () => {
+    const initialMission = {
+      id: 'm-101',
+      goal: 'ค้นคว้าเรื่อง SQLite WAL',
+      status: 'AWAITING_APPROVAL',
+      capabilities_json: '{}',
+      stages_json: '[]',
+      knowledge_developed_json: '[]',
+      research_summary_json: '{}',
+      report_markdown: 'รอการอนุมัติ',
+      external_models_used: 0,
+      created_by: 'u1',
+      created_at: '2026-11-24T00:00:00Z',
+      updated_at: '2026-11-24T00:00:00Z',
+    };
+    const resumedMission = { ...initialMission, status: 'COMPLETED' };
+    const cancelledMission = { ...initialMission, status: 'CANCELLED' };
+
+    const calledUrls: string[] = [];
+    mockFetch({
+      'GET /api/knowledge': () => new Response(JSON.stringify({ triples: [] }), { status: 200 }),
+      'GET /api/workflows': () => new Response(JSON.stringify({ groups: [], runs: [] }), { status: 200 }),
+      'GET /api/autonomous/missions': () =>
+        new Response(JSON.stringify({ missions: [initialMission] }), { status: 200 }),
+      'GET /api/autonomous/missions/m-101': () => {
+        calledUrls.push('GET /api/autonomous/missions/m-101');
+        return new Response(
+          JSON.stringify({
+            mission: initialMission,
+            nodes: [
+              {
+                id: 'nd-1',
+                mission_id: 'm-101',
+                task_id: 'node_goal_analysis',
+                node_json: JSON.stringify({ title: 'วิเคราะห์เป้าหมาย', dependencies: [] }),
+                execution_status: 'COMPLETED',
+                attempt_count: 1,
+                idempotency_key: 'k1',
+                last_error: null,
+                updated_at: '2026-11-24T00:00:00Z',
+              },
+              {
+                id: 'nd-2',
+                mission_id: 'm-101',
+                task_id: 'node_research_discover',
+                node_json: JSON.stringify({
+                  title: 'ค้นคว้าข้ามแหล่ง',
+                  dependencies: ['node_goal_analysis'],
+                }),
+                execution_status: 'AWAITING_APPROVAL',
+                attempt_count: 1,
+                idempotency_key: 'k2',
+                last_error: null,
+                updated_at: '2026-11-24T00:00:00Z',
+              },
+            ],
+            evidence: [
+              {
+                id: 'ev-1',
+                mission_id: 'm-101',
+                node_id: 'node_research_discover',
+                source_url: 'https://en.wikipedia.org/wiki/SQLite',
+                provider: 'en.wikipedia.org',
+                retrieved_at: '2026-11-24T00:00:00Z',
+                trust_grade: 'CORROBORATED_MULTI_SOURCE',
+                content_sha256: 'abc',
+                extracted_claims_json: '[]',
+              },
+            ],
+          }),
+          { status: 200 }
+        );
+      },
+      'POST /api/autonomous/missions/m-101/resume': () => {
+        calledUrls.push('POST /api/autonomous/missions/m-101/resume');
+        return new Response(
+          JSON.stringify({ ok: true, mission: resumedMission, nodes: [], evidence: [] }),
+          { status: 200 }
+        );
+      },
+      'POST /api/autonomous/missions/m-102/cancel': () => {
+        calledUrls.push('POST /api/autonomous/missions/m-102/cancel');
+        return new Response(
+          JSON.stringify({ ok: true, mission: { ...cancelledMission, id: 'm-102' } }),
+          { status: 200 }
+        );
+      },
+      'POST /api/autonomous/missions': () => {
+        calledUrls.push('POST /api/autonomous/missions');
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            mission: { ...initialMission, id: 'm-102', goal: 'คำนวณ 2 + 2', status: 'EXECUTING' },
+            nodes: [],
+            evidence: [],
+          }),
+          { status: 200 }
+        );
+      },
+    });
+
+    render(
+      <MemoryWorkflowsView
+        token="t-admin"
+        user={{
+          id: 'u1',
+          email: 'admin@zyrquen.local',
+          display_name: 'Admin',
+          role: 'admin',
+          created_at: '2026-11-24T00:00:00Z',
+        }}
+      />
+    );
+
+    const missionsTab = await screen.findByRole('button', { name: /ภารกิจอัตโนมัติ \(1\)/ });
+    fireEvent.click(missionsTab);
+
+    fireEvent.click(await screen.findByText('ค้นคว้าเรื่อง SQLite WAL'));
+    expect(await screen.findByText('node_research_discover')).toBeInTheDocument();
+    expect(screen.getByText('https://en.wikipedia.org/wiki/SQLite')).toBeInTheDocument();
+    expect(screen.getByText('CORROBORATED_MULTI_SOURCE')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /ดำเนินต่อ \(Resume\)/ }));
+    await waitFor(() => {
+      expect(calledUrls).toContain('POST /api/autonomous/missions/m-101/resume');
+    });
+
+    // Launch a new mission and cancel it
+    const goalInput = screen.getByLabelText('เป้าหมายภารกิจอัตโนมัติ');
+    fireEvent.change(goalInput, { target: { value: 'คำนวณ 2 + 2' } });
+    fireEvent.click(screen.getByRole('button', { name: /เริ่มภารกิจอัตโนมัติ/ }));
+    await waitFor(() => {
+      expect(calledUrls).toContain('POST /api/autonomous/missions');
+    });
+
+    const cancelBtn = await screen.findByRole('button', { name: /ยกเลิกภารกิจ/ });
+    fireEvent.click(cancelBtn);
+    await waitFor(() => {
+      expect(calledUrls).toContain('POST /api/autonomous/missions/m-102/cancel');
+    });
+  });
+
+  it('P2: คัดกรองความจำ รันการทดลอง Neural Transformer และอนุมัติโปรโมต Checkpoint ใน SettingsView', async () => {
+    const called: string[] = [];
+    const expPending = {
+      id: 'exp-1',
+      hypothesis: 'ฝึก Native Transformer จาก Random Init (14,200 params)',
+      dataset_id: 'ds-1',
+      baseline_ckpt_id: null,
+      candidate_ckpt_id: null,
+      baseline_metrics_json: JSON.stringify({ initial_val_loss: 5.812 }),
+      candidate_metrics_json: JSON.stringify({
+        final_val_loss: 4.105,
+        val_perplexity: 60.6,
+        param_count: 14200,
+      }),
+      improved: 1,
+      approval_status: 'PENDING_APPROVAL',
+      approved_by: null,
+      created_at: '2026-11-24T00:00:00Z',
+    };
+
+    mockFetch({
+      'GET /api/developer/overview': () =>
+        new Response(
+          JSON.stringify({
+            keys: [],
+            datasets: [],
+            checkpoints: [],
+            evaluations: [],
+            experiments: [expPending],
+            usage: { total_requests: 0, avg_latency_ms: 0, daily_quota: 1000, recent: [] },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/developer/tools': () =>
+        new Response(JSON.stringify({ tools: [], invocations: [], workspace_files: [] }), {
+          status: 200,
+        }),
+      'POST /api/developer/curate-corpus': () => {
+        called.push('POST /api/developer/curate-corpus');
+        return new Response(
+          JSON.stringify({ ok: true, dataset: { id: 'ds-1', total_records: 8 } }),
+          { status: 201 }
+        );
+      },
+      'POST /api/developer/experiments': () => {
+        called.push('POST /api/developer/experiments');
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            experiment: expPending,
+            improved: true,
+            metrics: { final_val_loss: 4.105 },
+          }),
+          { status: 201 }
+        );
+      },
+      'GET /api/admin/overview': () =>
+        new Response(
+          JSON.stringify({
+            users: [],
+            pending_runs: [],
+            pending_tool_invocations: [],
+            pending_experiments: [expPending],
+            tools: [],
+            audit_logs: [],
+            system: {
+              python_version: '3.11.2',
+              platform: 'Linux',
+              cpu_count: 4,
+              load_1m: 0.1,
+              mem_total_mb: 4096,
+              mem_available_mb: 2048,
+              disk_free_gb: 20,
+              disk_total_gb: 50,
+              sqlite_db_kb: 16,
+            },
+          }),
+          { status: 200 }
+        ),
+      'POST /api/admin/experiments/exp-1/decide': () => {
+        called.push('POST /api/admin/experiments/exp-1/decide');
+        return new Response(
+          JSON.stringify({ ok: true, experiment: { ...expPending, approval_status: 'APPROVED' } }),
+          { status: 200 }
+        );
+      },
+    });
+
+    const devView = render(
+      <SettingsView
+        token="t-admin"
+        user={{
+          id: 'u-admin',
+          email: 'admin@zyrquen.local',
+          display_name: 'Admin',
+          role: 'admin',
+          created_at: '2026-11-24T00:00:00Z',
+        }}
+        activeTab="developer"
+        autoExpandTrace={false}
+        defaultMode="auto"
+        onChangeTab={vi.fn()}
+        onUpdatePreferences={vi.fn()}
+        onLogout={vi.fn()}
+      />
+    );
+
+    expect(
+      await screen.findByText(/การเรียนรู้จากความจำ & Neural Transformer \(P2\)/i)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/val_loss: 5\.8120 → 4\.1050/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'สร้างชุดข้อมูลจากความจำที่ยืนยันแล้ว' }));
+    await waitFor(() => {
+      expect(called).toContain('POST /api/developer/curate-corpus');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'รันการทดลอง Neural Transformer' }));
+    await waitFor(() => {
+      expect(called).toContain('POST /api/developer/experiments');
+    });
+
+    devView.unmount();
+
+    render(
+      <SettingsView
+        token="t-admin"
+        user={{
+          id: 'u-admin',
+          email: 'admin@zyrquen.local',
+          display_name: 'Admin',
+          role: 'admin',
+          created_at: '2026-11-24T00:00:00Z',
+        }}
+        activeTab="admin"
+        autoExpandTrace={false}
+        defaultMode="auto"
+        onChangeTab={vi.fn()}
+        onUpdatePreferences={vi.fn()}
+        onLogout={vi.fn()}
+      />
+    );
+
+    expect(
+      await screen.findByText(/คิวอนุมัติ Neural Experiment \(Self-Improvement Gate\)/i)
+    ).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'อนุมัติโปรโมต Checkpoint' }));
+    await waitFor(() => {
+      expect(called).toContain('POST /api/admin/experiments/exp-1/decide');
+    });
+  });
+
+  it('ZyrquenEmblem & zyrquen-logo.svg: แสดงโลโก้เรขาคณิตแบบเคลื่อนไหวและเร่งความเร็วเมื่อกำลังประมวลผล', () => {
+    const svgFile = fs.readFileSync(path.join(process.cwd(), 'public', 'zyrquen-logo.svg'), 'utf8');
+    expect(svgFile).toContain('<polygon');
+    expect(svgFile).toContain('<animateTransform');
+    expect(svgFile).toContain('<animateMotion');
+
+    const { container } = render(
+      <div>
+        <ZyrquenEmblem size={28} />
+        <ZyrquenEmblem size={44} active />
+      </div>
+    );
+
+    const svgs = container.querySelectorAll('svg.zyrq-emblem-root');
+    expect(svgs).toHaveLength(2);
+    expect(svgs[0].getAttribute('data-animated')).toBe('true');
+    expect(svgs[0].getAttribute('data-processing')).toBe('false');
+    expect(svgs[1].getAttribute('data-processing')).toBe('true');
+    expect(svgs[1].classList.contains('zyrq-emblem-active')).toBe(true);
+    expect(container.querySelectorAll('.zyrq-emblem-trace')).toHaveLength(2);
+    expect(container.querySelectorAll('.zyrq-emblem-orbit')).toHaveLength(2);
+    expect(container.querySelectorAll('.zyrq-emblem-orbit-rev')).toHaveLength(2);
+    expect(container.querySelectorAll('.zyrq-emblem-nucleus')).toHaveLength(2);
+    expect(container.querySelectorAll('.zyrq-emblem-node-a')).toHaveLength(2);
+    expect(container.querySelectorAll('.zyrq-emblem-node-b')).toHaveLength(2);
+
+    const gradientIds = Array.from(container.querySelectorAll('linearGradient')).map((el) => el.id);
+    expect(new Set(gradientIds).size).toBe(gradientIds.length);
   });
 });

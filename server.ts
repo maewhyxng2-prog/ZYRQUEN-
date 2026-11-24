@@ -215,7 +215,7 @@ function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction) {
   next();
 }
 
-async function startServer() {
+export async function createApp(options: { attachVite?: boolean } = {}) {
   await runPythonScript('zyrquen_core.py', { cmd: 'init', payload: {} });
 
   const app = express();
@@ -802,6 +802,176 @@ async function startServer() {
     res.status(201).json(result);
   });
 
+  app.get('/api/autonomous/missions', requireAuth, async (_req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'missions_list',
+      payload: {},
+    });
+    res.json(data);
+  });
+
+  app.post('/api/autonomous/missions', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const goal = String(req.body?.goal || '').trim().slice(0, 400);
+    if (!goal) {
+      res.status(400).json({ error: 'Mission goal is required.' });
+      return;
+    }
+    const enableResearch = (req.body?.enableResearch ?? req.body?.enable_research) !== false;
+    const enableKnowledgeDev =
+      (req.body?.enableKnowledgeDev ?? req.body?.enable_knowledge_dev) !== false;
+    const enablePlanning = (req.body?.enablePlanning ?? req.body?.enable_planning) !== false;
+    const enableExecution = (req.body?.enableExecution ?? req.body?.enable_execution) !== false;
+
+    const result = await runPythonScript<{
+      ok: boolean;
+      error?: string;
+      mission?: Record<string, unknown>;
+    }>('zyrquen_core.py', {
+      cmd: 'run_mission',
+      payload: {
+        goal,
+        user_id: req.user!.id,
+        enable_research: enableResearch,
+        enable_knowledge_dev: enableKnowledgeDev,
+        enable_planning: enablePlanning,
+        enable_execution: enableExecution,
+      },
+    });
+    if (!result.ok || !result.mission) {
+      res.status(400).json({ error: result.error || 'Autonomous mission failed' });
+      return;
+    }
+    if (Number(result.mission.external_models_used ?? 0) !== 0) {
+      res.status(500).json({ error: 'Native integrity violation: external_models_used must be 0' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'AUTONOMOUS_MISSION',
+        target: String(result.mission.id || 'mission'),
+        outcome: String(result.mission.status || 'UNKNOWN'),
+      },
+    });
+    res.status(201).json(result);
+  });
+
+  app.get('/api/autonomous/missions/:id', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const missionId = String(req.params.id || '').trim().slice(0, 64);
+    if (!missionId) {
+      res.status(400).json({ error: 'Mission id is required.' });
+      return;
+    }
+    const data = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
+      action: 'mission_detail',
+      payload: { mission_id: missionId },
+    });
+    if (!data.ok) {
+      res.status(404).json({ error: data.error || 'Mission not found' });
+      return;
+    }
+    res.json(data);
+  });
+
+  app.post('/api/autonomous/missions/:id/resume', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const missionId = String(req.params.id || '').trim().slice(0, 64);
+    if (!missionId) {
+      res.status(400).json({ error: 'Mission id is required.' });
+      return;
+    }
+    const detail = await runPythonScript<{
+      ok: boolean;
+      mission?: { created_by?: string };
+      error?: string;
+    }>('db_bridge.py', {
+      action: 'mission_detail',
+      payload: { mission_id: missionId },
+    });
+    if (!detail.ok || !detail.mission) {
+      res.status(404).json({ error: detail.error || 'Mission not found' });
+      return;
+    }
+    if (detail.mission.created_by !== req.user!.id && req.user!.role !== 'admin') {
+      res.status(403).json({ error: 'Insufficient permission to resume this mission' });
+      return;
+    }
+    const result = await runPythonScript<{
+      ok: boolean;
+      error?: string;
+      mission?: Record<string, unknown>;
+    }>('zyrquen_core.py', {
+      cmd: 'resume_mission',
+      payload: {
+        mission_id: missionId,
+        approved_by: null,
+      },
+    });
+    if (!result.ok || !result.mission) {
+      res.status(400).json({ error: result.error || 'Unable to resume mission' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'AUTONOMOUS_MISSION_RESUME',
+        target: missionId,
+        outcome: String(result.mission.status || 'UNKNOWN'),
+      },
+    });
+    res.json(result);
+  });
+
+  app.post('/api/autonomous/missions/:id/cancel', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const missionId = String(req.params.id || '').trim().slice(0, 64);
+    if (!missionId) {
+      res.status(400).json({ error: 'Mission id is required.' });
+      return;
+    }
+    const detail = await runPythonScript<{
+      ok: boolean;
+      mission?: { created_by?: string };
+      error?: string;
+    }>('db_bridge.py', {
+      action: 'mission_detail',
+      payload: { mission_id: missionId },
+    });
+    if (!detail.ok || !detail.mission) {
+      res.status(404).json({ error: detail.error || 'Mission not found' });
+      return;
+    }
+    if (detail.mission.created_by !== req.user!.id && req.user!.role !== 'admin') {
+      res.status(403).json({ error: 'Insufficient permission to cancel this mission' });
+      return;
+    }
+    const result = await runPythonScript<{
+      ok: boolean;
+      error?: string;
+      mission?: Record<string, unknown>;
+    }>('zyrquen_core.py', {
+      cmd: 'cancel_mission',
+      payload: { mission_id: missionId },
+    });
+    if (!result.ok || !result.mission) {
+      res.status(400).json({ error: result.error || 'Unable to cancel mission' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'AUTONOMOUS_MISSION_CANCEL',
+        target: missionId,
+        outcome: String(result.mission.status || 'CANCELLED'),
+      },
+    });
+    res.json(result);
+  });
+
   app.post(
     '/api/workflows/runs/:runId/decide',
     requireAuth,
@@ -929,11 +1099,70 @@ async function startServer() {
     res.status(201).json(result);
   });
 
+  app.post('/api/developer/curate-corpus', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const name = String(req.body?.name || 'verified-knowledge-corpus').trim().slice(0, 80) || 'verified-knowledge-corpus';
+    const result = await runPythonScript<{ ok: boolean; error?: string; dataset?: Record<string, unknown> }>(
+      'zyrquen_core.py',
+      {
+        cmd: 'curate_corpus',
+        payload: { user_id: req.user!.id, name },
+      }
+    );
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Corpus curation failed' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'CORPUS_CURATED',
+        target: String(result.dataset?.id || name),
+        outcome: 'READY',
+      },
+    });
+    res.status(201).json(result);
+  });
+
+  app.post('/api/developer/experiments', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const datasetId = req.body?.datasetId ? String(req.body.datasetId).trim().slice(0, 64) : null;
+    const rawEpochs = Number(req.body?.epochs ?? 8);
+    const epochs = Number.isFinite(rawEpochs) ? Math.max(2, Math.min(20, Math.round(rawEpochs))) : 8;
+    const rawSeed = Number(req.body?.seed ?? 42);
+    const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
+    const result = await runPythonScript<{
+      ok: boolean;
+      error?: string;
+      experiment?: Record<string, unknown>;
+      improved?: boolean;
+    }>('zyrquen_core.py', {
+      cmd: 'run_experiment',
+      payload: { user_id: req.user!.id, dataset_id: datasetId, epochs, seed },
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Neural experiment failed' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'NEURAL_EXPERIMENT_RUN',
+        target: String(result.experiment?.id || 'experiment'),
+        outcome: String(result.experiment?.approval_status || 'RECORDED'),
+      },
+    });
+    res.status(201).json(result);
+  });
+
   const ALLOWED_BENCHMARK_MODELS = new Set([
     'zyrquen-omega-v1',
     'zyrquen-ast-pro',
     'zyrquen-kg-v2',
     'zyrquen-ngram-ckpt',
+    'zyrquen-neural-v1',
   ]);
 
   app.post('/api/developer/benchmark', requireAuth, async (req: AuthedRequest, res: Response) => {
@@ -948,7 +1177,7 @@ async function startServer() {
         const pyCode = [
           'import json, sys',
           'from tests.benchmark_suite import run_capability_benchmark',
-          'print(json.dumps(run_capability_benchmark(model_version=sys.argv[1]), ensure_ascii=False))',
+          'print(json.dumps(run_capability_benchmark(model_version=sys.argv[1], persist_baseline=True), ensure_ascii=False))',
         ].join('; ');
         const child = spawn('python3', ['-c', pyCode, requestedModel], {
           cwd: __dirname,
@@ -1202,15 +1431,53 @@ async function startServer() {
     }
   );
 
-  // Vite dev middleware or production static assets
-  if (process.env.NODE_ENV !== 'production') {
+  app.post(
+    '/api/admin/experiments/:id/decide',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const expId = String(req.params.id || '').trim().slice(0, 64);
+      const decision = req.body?.decision === 'reject' ? 'reject' : 'approve';
+      const result = await runPythonScript<{
+        ok: boolean;
+        error?: string;
+        experiment?: Record<string, unknown>;
+      }>('zyrquen_core.py', {
+        cmd: 'decide_experiment',
+        payload: {
+          experiment_id: expId,
+          decision,
+          admin_email: req.user!.email,
+          admin_id: req.user!.id,
+        },
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error || 'Experiment decision failed' });
+        return;
+      }
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user!.id,
+          actor_email: req.user!.email,
+          action: `EXPERIMENT_GATE_${decision.toUpperCase()}`,
+          target: expId,
+          outcome: String(result.experiment?.approval_status || decision.toUpperCase()),
+        },
+      });
+      res.json(result);
+    }
+  );
+
+  const shouldAttachVite = options.attachVite ?? process.env.NODE_ENV !== 'production';
+  if (shouldAttachVite) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
@@ -1223,12 +1490,24 @@ async function startServer() {
     });
   }
 
+  return app;
+}
+
+async function startServer() {
+  const app = await createApp();
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`ZYRQUEN server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start ZYRQUEN server:', err);
-  process.exit(1);
-});
+const isDirectEntry =
+  Boolean(process.argv[1]) &&
+  path.resolve(process.argv[1]) === __filename &&
+  process.env.ZYRQUEN_NO_AUTOSTART !== '1';
+
+if (isDirectEntry) {
+  startServer().catch((err) => {
+    console.error('Failed to start ZYRQUEN server:', err);
+    process.exit(1);
+  });
+}

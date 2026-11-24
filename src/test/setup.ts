@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest';
 import { vi } from 'vitest';
 
-if (!HTMLElement.prototype.scrollIntoView) {
+if (typeof HTMLElement !== 'undefined' && !HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = vi.fn();
 }
