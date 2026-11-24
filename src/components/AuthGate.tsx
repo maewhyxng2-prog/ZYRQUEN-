@@ -78,19 +78,28 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
     <div className="flex min-h-[100dvh] flex-col justify-center bg-[#060A14] px-4 py-8 sm:px-6">
       <div className="mx-auto w-full max-w-md">
         <div className="mb-8 flex flex-col items-start gap-4">
-          <div className="flex items-center gap-3">
-            <ZyrquenEmblem size={40} />
+          <div className="flex items-center gap-3.5">
+            <ZyrquenEmblem size={44} />
             <div>
-              <h1 className="text-2xl font-bold tracking-tight text-slate-50">ZYRQUEN Ω∞</h1>
-              <p className="text-xs text-slate-400">แอปพลิเคชันปัญญาประดิษฐ์แกนสมองอิสระ</p>
+              <h1 className="text-2xl font-bold tracking-tight text-slate-50">ZYRQUEN</h1>
+              <p className="text-sm font-medium text-slate-200">ปัญญาประดิษฐ์พื้นฐานแบบอัตโนมัติ</p>
+              <p className="text-xs font-semibold tracking-wide text-cyan-300">
+                Autonomous Foundational Intelligence
+              </p>
             </div>
           </div>
           <p className="text-sm leading-relaxed text-slate-300">
+            สถาปัตยกรรมปัญญาประดิษฐ์ที่มุ่งพัฒนาความสามารถด้านการรับรู้ การเรียนรู้ การสร้างและวิวัฒนาการขององค์ความรู้ การให้เหตุผล และการพัฒนาความสามารถของตนเอง
+          </p>
+          <p className="text-xs font-semibold tracking-wide text-slate-200">
+            การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง
+          </p>
+          <p className="text-xs leading-relaxed text-slate-400">
             {mode === 'claim'
-              ? 'ยังไม่มีบัญชีผู้ดูแลระบบในฐานข้อมูล สามารถตั้งค่าผู้ดูแลระบบเริ่มต้น หรือเลือกสมัครสมาชิกเพื่อเข้าใช้งานได้ทันที'
+              ? 'ตั้งค่าผู้ดูแลระบบเริ่มต้น หรือสมัครสมาชิกเพื่อเข้าถึงแกนปัญญาและกลไกการพัฒนาความสามารถของ ZYRQUEN'
               : mode === 'register'
-                ? 'สมัครสมาชิกใหม่เพื่อใช้งานบทสนทนาที่บันทึกไว้ กราฟความรู้ส่วนตัว และระบบเวิร์กโฟลว์ภายใน'
-                : 'เข้าสู่ระบบเพื่อใช้งานบทสนทนาที่บันทึกไว้ กราฟความรู้ภายใน และระบบเวิร์กโฟลว์'}
+                ? 'สมัครสมาชิกเพื่อเข้าถึงแกนปัญญาและกลไกการพัฒนาความสามารถของ ZYRQUEN'
+                : 'เข้าสู่ระบบเพื่อเข้าถึงแกนปัญญาและกลไกการพัฒนาความสามารถของ ZYRQUEN'}
           </p>
         </div>
 
@@ -323,9 +332,6 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
           </form>
         </div>
 
-        <p className="mt-5 text-center text-xs text-slate-500">
-          แกนสมอง Python 3.11 ภายใน · ไม่เชื่อมต่อ LLM ภายนอก · เซสชันปลอดภัยในหน่วยความจำ
-        </p>
       </div>
     </div>
   );

@@ -164,7 +164,11 @@ export function SettingsView({
       );
       setDsName('');
       setDsContent('');
-      await loadDeveloper();
+      if (activeTab === 'admin' && user.role === 'admin') {
+        await loadAdmin();
+      } else {
+        await loadDeveloper();
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'นำเข้าชุดข้อมูลไม่สำเร็จ');
     }
@@ -222,7 +226,11 @@ export function SettingsView({
           ? `ส่งคำขอฝึกชุดข้อมูล "${datasetName}" เข้า Approval Gate แล้ว (รอผู้ดูแลระบบอนุมัติ)`
           : res.run.summary
       );
-      await loadDeveloper();
+      if (activeTab === 'admin' && user.role === 'admin') {
+        await loadAdmin();
+      } else {
+        await loadDeveloper();
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'ส่งคำขอฝึกโมเดลไม่สำเร็จ');
     } finally {
@@ -272,7 +280,10 @@ export function SettingsView({
     setError(null);
     setExperimentMsg(null);
     try {
-      const cleanDs = (devData?.datasets || []).find((d) => !d.leakage_detected);
+      const cleanDs =
+        (activeTab === 'admin'
+          ? (adminData?.training_readiness?.datasets || []).find((d) => !d.leakage_detected)
+          : (devData?.datasets || []).find((d) => !d.leakage_detected)) || null;
       const res = await apiRequest<{
         improved: boolean;
         experiment: { approval_status: string };
@@ -286,7 +297,11 @@ export function SettingsView({
           ? 'การทดลอง Neural Transformer ลด Val Loss สำเร็จ — ส่งเข้าคิวอนุมัติผู้ดูแลระบบแล้ว'
           : `การทดลองเสร็จสิ้น (สถานะ: ${res.experiment.approval_status})`
       );
-      await loadDeveloper();
+      if (activeTab === 'admin' && user.role === 'admin') {
+        await loadAdmin();
+      } else {
+        await loadDeveloper();
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'รันการทดลอง Neural Transformer ไม่สำเร็จ');
     } finally {
@@ -1109,132 +1124,343 @@ export function SettingsView({
             </div>
           ) : (
             <>
-              <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
-                <h3 className="text-base font-semibold text-slate-100">
-                  คิวรออนุมัติเวิร์กโฟลว์ (Approval Gate)
-                </h3>
-                <p className="mt-1 text-xs text-slate-400">
-                  อนุมัติหรือปฏิเสธงานที่มีผลต่อการฝึกโมเดลหรือการปรับแต่งระบบ
-                </p>
-                <div className="mt-4 divide-y divide-slate-800/80">
-                  {(adminData?.pending_runs || []).length === 0 ? (
-                    <p className="py-3 text-sm text-slate-400">
-                      ไม่มีรายการเวิร์กโฟลว์ที่รออนุมัติในขณะนี้
-                    </p>
-                  ) : (
-                    adminData!.pending_runs.map((run) => (
-                      <div
-                        key={run.id}
-                        className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
-                      >
-                        <div>
-                          <p className="text-sm font-semibold text-slate-100">{run.group_id}</p>
-                          <p className="text-xs text-slate-400">{run.summary}</p>
+              {(() => {
+                const tr = adminData?.training_readiness;
+                const cleanDatasets = tr?.clean_datasets ?? 0;
+                const datasetsTotal = tr?.datasets_total ?? 0;
+                const verifiedTriples = tr?.verified_triples ?? 0;
+                const experimentsTotal = tr?.experiments_total ?? 0;
+                const pendingApprovals =
+                  (tr?.pending_experiments ?? adminData?.pending_experiments?.length ?? 0) +
+                  (tr?.pending_training_runs ??
+                    (adminData?.pending_runs || []).filter((r) => r.group_id === 'native_training')
+                      .length);
+                const checkpointsTotal = tr?.checkpoints_total ?? 0;
+                const neuralCheckpoints = tr?.neural_checkpoints ?? 0;
+                const gateStatus = tr?.gate_status || (cleanDatasets === 0 ? 'BLOCKED' : 'READY_FOR_TRAINING_GATE');
+                const sys = adminData?.system;
+
+                return (
+                  <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="text-base font-semibold text-slate-100">
+                            ความพร้อมก่อนเริ่มฝึก Native Model (Training Readiness Gate)
+                          </h3>
+                          <span
+                            className={`rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold ${
+                              gateStatus === 'VERIFIED'
+                                ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300'
+                                : gateStatus === 'BLOCKED'
+                                  ? 'border-rose-500/40 bg-rose-950/40 text-rose-200'
+                                  : 'border-amber-500/40 bg-amber-950/40 text-amber-200'
+                            }`}
+                          >
+                            {gateStatus}
+                          </span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void handleApprovalDecision(run.id, 'approve')}
-                            className="flex h-10 items-center gap-1.5 rounded-xl bg-blue-600 px-4 text-xs font-medium text-white hover:bg-blue-500"
-                          >
-                            <Check className="h-3.5 w-3.5" />
-                            <span>อนุมัติ</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void handleApprovalDecision(run.id, 'reject')}
-                            className="flex h-10 items-center gap-1.5 rounded-xl border border-rose-500/40 px-4 text-xs font-medium text-rose-200 hover:bg-rose-950/40"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                            <span>ปฏิเสธ</span>
-                          </button>
+                        <p className="mt-1 text-xs text-slate-400">
+                          ZYRQUEN — ปัญญาประดิษฐ์พื้นฐานแบบอัตโนมัติ (Autonomous Foundational Intelligence) · แยกสถานะทรัพยากรเครื่องออกจากความพร้อมในการฝึกจริง
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onChangeTab('developer')}
+                        className="min-h-[36px] shrink-0 rounded-xl border border-slate-700 bg-[#070C18] px-3 text-xs font-medium text-cyan-300 hover:border-cyan-500/60 whitespace-nowrap"
+                      >
+                        เปิดหน้านักพัฒนา
+                      </button>
+                    </div>
+
+                    {sys && (
+                      <div className="mt-4 grid gap-2 sm:grid-cols-3 text-xs tabular-nums">
+                        <div className="rounded-xl border border-slate-800 bg-[#070C18] px-3 py-2">
+                          <p className="text-[11px] text-slate-400">CPU ภายใน (ไม่ถือว่าพร้อมฝึก)</p>
+                          <p className="mt-0.5 font-mono text-slate-100">{sys.cpu_count} คอร์ · load {sys.load_1m}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-800 bg-[#070C18] px-3 py-2">
+                          <p className="text-[11px] text-slate-400">RAM ว่าง / ทั้งหมด</p>
+                          <p className="mt-0.5 font-mono text-slate-100">
+                            {Math.round(sys.mem_available_mb).toLocaleString()} / {Math.round(sys.mem_total_mb).toLocaleString()} MB
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-slate-800 bg-[#070C18] px-3 py-2">
+                          <p className="text-[11px] text-slate-400">พื้นที่จัดเก็บว่าง</p>
+                          <p className="mt-0.5 font-mono text-slate-100">
+                            {sys.disk_free_gb} / {sys.disk_total_gb} GB
+                          </p>
                         </div>
                       </div>
-                    ))
-                  )}
-                </div>
-              </section>
+                    )}
 
-              <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
-                <h3 className="text-base font-semibold text-slate-100">
-                  คิวอนุมัติ Neural Experiment (Self-Improvement Gate)
-                </h3>
-                <p className="mt-1 text-xs text-slate-400">
-                  อนุมัติเพื่อโปรโมต Candidate Neural Checkpoint ที่ผ่านเกณฑ์ลด Val Loss
-                </p>
-                <div className="mt-4 divide-y divide-slate-800/80">
-                  {(adminData?.pending_experiments || []).length === 0 ? (
-                    <p className="py-3 text-sm text-slate-400">
-                      ไม่มีการทดลองที่รอการอนุมัติในขณะนี้
-                    </p>
-                  ) : (
-                    adminData!.pending_experiments!.map((exp) => {
-                      let metricsInfo = '';
-                      try {
-                        const b = JSON.parse(exp.baseline_metrics_json) as { initial_val_loss?: number };
-                        const c = JSON.parse(exp.candidate_metrics_json) as {
-                          final_val_loss?: number;
-                          val_perplexity?: number;
-                        };
-                        metricsInfo = `val_loss: ${b.initial_val_loss?.toFixed(4) ?? '-'} → ${c.final_val_loss?.toFixed(4) ?? '-'} (ppl ${c.val_perplexity?.toFixed(2) ?? '-'})`;
-                      } catch {
-                        // ignore malformed metrics JSON
-                      }
-                      return (
+                    <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 text-xs">
+                      <div className="rounded-xl border border-slate-800 bg-[#070C18] p-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-300">1. ชุดข้อมูลจริง (≥5 รายการ, ไร้ Leakage)</span>
+                          <span className={`font-mono font-semibold ${cleanDatasets > 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                            {cleanDatasets > 0 ? 'PASS' : 'BLOCKED'}
+                          </span>
+                        </div>
+                        <p className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
+                          ผ่านเกณฑ์ {cleanDatasets} / {datasetsTotal} ชุด
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-[#070C18] p-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-300">2. ความรู้ที่ยืนยันแล้ว (KG ≥ 5)</span>
+                          <span className={`font-mono font-semibold ${verifiedTriples >= 5 ? 'text-emerald-300' : 'text-amber-300'}`}>
+                            {verifiedTriples >= 5 ? 'PASS' : 'PARTIAL'}
+                          </span>
+                        </div>
+                        <p className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
+                          ยืนยันแล้ว {verifiedTriples} / {tr?.triples_total ?? 0} รายการ
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-[#070C18] p-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-300">3. Random-Init + Approval Gate</span>
+                          <span className={`font-mono font-semibold ${checkpointsTotal > 0 ? 'text-emerald-300' : pendingApprovals > 0 ? 'text-amber-300' : 'text-slate-400'}`}>
+                            {checkpointsTotal > 0 ? 'VERIFIED' : pendingApprovals > 0 ? 'PENDING' : 'NOT_RUN'}
+                          </span>
+                        </div>
+                        <p className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
+                          ทดลอง {experimentsTotal} · รออนุมัติ {pendingApprovals} · Ckpt {checkpointsTotal} (Neural {neuralCheckpoints})
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 grid gap-5 lg:grid-cols-2 border-t border-slate-800/80 pt-5">
+                      <form onSubmit={handleIngestDataset} className="space-y-3">
+                        <p className="text-xs font-semibold text-slate-100">
+                          ขั้นตอนที่ 1: นำเข้าชุดข้อมูลจริง (อย่างน้อย 5 รายการ ไม่ซ้ำกัน)
+                        </p>
+                        <input
+                          type="text"
+                          required
+                          aria-label="ชื่อชุดข้อมูล Admin"
+                          value={dsName}
+                          onChange={(e) => setDsName(e.target.value)}
+                          placeholder="ชื่อชุดข้อมูล (เช่น zyrquen-corpus-v1)"
+                          className="h-10 w-full rounded-xl border border-slate-800 bg-[#070C18] px-3 text-xs text-slate-100 focus:border-cyan-400 focus:outline-none"
+                        />
+                        <textarea
+                          rows={4}
+                          required
+                          aria-label="เนื้อหาชุดข้อมูล Admin"
+                          value={dsContent}
+                          onChange={(e) => setDsContent(e.target.value)}
+                          placeholder="วางข้อมูลจริงบรรทัดละ 1 รายการ (อย่างน้อย 5 บรรทัดเพื่อแบ่ง Train / Val / Test)..."
+                          className="w-full resize-none rounded-xl border border-slate-800 bg-[#070C18] p-3 font-mono text-xs text-slate-100 focus:border-cyan-400 focus:outline-none"
+                        />
+                        {dsMessage && <p className="text-xs text-cyan-300">{dsMessage}</p>}
+                        <button
+                          type="submit"
+                          className="h-10 w-full rounded-xl bg-blue-600 text-xs font-medium text-white hover:bg-blue-500"
+                        >
+                          นำเข้าชุดข้อมูลและตรวจ Data Leakage
+                        </button>
+                      </form>
+
+                      <div className="space-y-3">
+                        <p className="text-xs font-semibold text-slate-100">
+                          ขั้นตอนถัดไป: ทดลอง Random-Init Neural Transformer &amp; ส่ง Gate
+                        </p>
+                        {(tr?.datasets || []).length === 0 ? (
+                          <div className="rounded-xl border border-dashed border-slate-800 bg-[#070C18]/70 p-4 text-xs text-slate-400">
+                            ยังไม่มีชุดข้อมูลจริงในระบบ — นำเข้าชุดข้อมูลอย่างน้อย 5 บรรทัดทางด้านซ้ายก่อน จึงจะรันการทดลองและส่งคำขอ Approval Gate ได้
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {tr!.datasets.slice(0, 4).map((ds) => (
+                              <div
+                                key={ds.id}
+                                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-[#070C18] p-3 text-xs"
+                              >
+                                <div className="min-w-0">
+                                  <p className="truncate font-semibold text-slate-100">{ds.name}</p>
+                                  <p className="font-mono text-[11px] text-slate-400 tabular-nums">
+                                    T:{ds.train_count}/V:{ds.val_count}/T:{ds.test_count} ·{' '}
+                                    {ds.leakage_detected ? 'พบ Leakage' : 'Leakage ผ่าน'}
+                                  </p>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(ds.leakage_detected) || requestingTrainId === ds.id}
+                                  onClick={() => void handleRequestTrainingGate(ds.id, ds.name)}
+                                  className="min-h-[34px] rounded-lg border border-slate-700 px-2.5 text-[11px] font-medium text-cyan-300 hover:border-cyan-500/60 disabled:opacity-40"
+                                >
+                                  {requestingTrainId === ds.id ? 'กำลังส่ง...' : 'ส่ง Training Gate'}
+                                </button>
+                              </div>
+                            ))}
+                            <button
+                              type="button"
+                              disabled={cleanDatasets === 0 || runningExperiment}
+                              onClick={() => void handleRunNeuralExperiment()}
+                              className="h-10 w-full rounded-xl border border-cyan-500/40 bg-cyan-950/30 text-xs font-medium text-cyan-200 hover:bg-cyan-900/40 disabled:opacity-40"
+                            >
+                              {runningExperiment
+                                ? 'กำลังทดลอง Random-Init Neural Transformer...'
+                                : 'ทดลอง Neural Transformer (Random Init + BPE)'}
+                            </button>
+                            {experimentMsg && (
+                              <p className="text-xs text-cyan-300">{experimentMsg}</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+                );
+              })()}
+
+              <div className="grid gap-5 lg:grid-cols-2">
+                <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
+                  <h3 className="text-base font-semibold text-slate-100">
+                    คิวรออนุมัติเวิร์กโฟลว์ (Approval Gate)
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-400">
+                    อนุมัติหรือปฏิเสธงานที่มีผลต่อการฝึกโมเดลหรือการปรับแต่งระบบ
+                  </p>
+                  <div className="mt-4 divide-y divide-slate-800/80">
+                    {(adminData?.pending_runs || []).length === 0 ? (
+                      <p className="py-3 text-sm text-slate-400">
+                        ไม่มีรายการเวิร์กโฟลว์ที่รออนุมัติในขณะนี้
+                      </p>
+                    ) : (
+                      adminData!.pending_runs.map((run) => (
                         <div
-                          key={exp.id}
-                          className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                          key={run.id}
+                          className="flex flex-col gap-3 py-3"
                         >
                           <div>
-                            <p className="text-sm font-semibold text-slate-100">{exp.hypothesis}</p>
-                            {metricsInfo && (
-                              <p className="mt-0.5 font-mono text-xs text-slate-400 tabular-nums">
-                                {metricsInfo}
-                              </p>
-                            )}
+                            <p className="text-sm font-semibold text-slate-100">{run.group_id}</p>
+                            <p className="text-xs text-slate-400">{run.summary}</p>
                           </div>
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => void handleExperimentDecision(exp.id, 'approve')}
-                              className="flex h-10 items-center gap-1.5 rounded-xl bg-blue-600 px-4 text-xs font-medium text-white hover:bg-blue-500"
+                              onClick={() => void handleApprovalDecision(run.id, 'approve')}
+                              className="flex h-9 items-center gap-1.5 rounded-xl bg-blue-600 px-3.5 text-xs font-medium text-white hover:bg-blue-500"
                             >
                               <Check className="h-3.5 w-3.5" />
-                              <span>อนุมัติโปรโมต Checkpoint</span>
+                              <span>อนุมัติ</span>
                             </button>
                             <button
                               type="button"
-                              onClick={() => void handleExperimentDecision(exp.id, 'reject')}
-                              className="flex h-10 items-center gap-1.5 rounded-xl border border-rose-500/40 px-4 text-xs font-medium text-rose-200 hover:bg-rose-950/40"
+                              onClick={() => void handleApprovalDecision(run.id, 'reject')}
+                              className="flex h-9 items-center gap-1.5 rounded-xl border border-rose-500/40 px-3.5 text-xs font-medium text-rose-200 hover:bg-rose-950/40"
                             >
                               <X className="h-3.5 w-3.5" />
                               <span>ปฏิเสธ</span>
                             </button>
                           </div>
                         </div>
-                      );
-                    })
-                  )}
+                      ))
+                    )}
+                  </div>
+                </section>
+
+                <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
+                  <h3 className="text-base font-semibold text-slate-100">
+                    คิวอนุมัติ Neural Experiment (Self-Improvement Gate)
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-400">
+                    อนุมัติเพื่อโปรโมต Candidate Neural Checkpoint ที่ผ่านเกณฑ์ลด Val Loss
+                  </p>
+                  <div className="mt-4 divide-y divide-slate-800/80">
+                    {(adminData?.pending_experiments || []).length === 0 ? (
+                      <p className="py-3 text-sm text-slate-400">
+                        ไม่มีการทดลองที่รอการอนุมัติในขณะนี้
+                      </p>
+                    ) : (
+                      adminData!.pending_experiments!.map((exp) => {
+                        let metricsInfo = '';
+                        try {
+                          const b = JSON.parse(exp.baseline_metrics_json) as { initial_val_loss?: number };
+                          const c = JSON.parse(exp.candidate_metrics_json) as {
+                            final_val_loss?: number;
+                            val_perplexity?: number;
+                          };
+                          metricsInfo = `val_loss: ${b.initial_val_loss?.toFixed(4) ?? '-'} → ${c.final_val_loss?.toFixed(4) ?? '-'} (ppl ${c.val_perplexity?.toFixed(2) ?? '-'})`;
+                        } catch {
+                          // ignore malformed metrics JSON
+                        }
+                        return (
+                          <div
+                            key={exp.id}
+                            className="flex flex-col gap-3 py-3"
+                          >
+                            <div>
+                              <p className="text-sm font-semibold text-slate-100">{exp.hypothesis}</p>
+                              {metricsInfo && (
+                                <p className="mt-0.5 font-mono text-xs text-slate-400 tabular-nums">
+                                  {metricsInfo}
+                                </p>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => void handleExperimentDecision(exp.id, 'approve')}
+                                className="flex h-9 items-center gap-1.5 rounded-xl bg-blue-600 px-3.5 text-xs font-medium text-white hover:bg-blue-500"
+                              >
+                                <Check className="h-3.5 w-3.5" />
+                                <span>อนุมัติโปรโมต Checkpoint</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleExperimentDecision(exp.id, 'reject')}
+                                className="flex h-9 items-center gap-1.5 rounded-xl border border-rose-500/40 px-3.5 text-xs font-medium text-rose-200 hover:bg-rose-950/40"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                                <span>ปฏิเสธ</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </section>
+              </div>
+
+              <details
+                open={(adminData?.pending_tool_invocations || []).length > 0}
+                className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6"
+              >
+                <summary className="cursor-pointer list-none flex items-center justify-between text-sm font-semibold text-slate-100">
+                  <span>ควบคุมเครื่องมือภายนอก (Tool Registry Gate)</span>
+                  <span className="font-mono text-xs text-slate-400">
+                    รออนุมัติ {adminData?.pending_tool_invocations?.length ?? 0} · ทั้งหมด {adminData?.tools?.length ?? 0}
+                  </span>
+                </summary>
+                <div className="mt-4">
+                  <ToolRegistry
+                    token={token}
+                    userRole={user.role}
+                    mode="admin"
+                    pendingInvocations={adminData?.pending_tool_invocations || []}
+                    adminTools={adminData?.tools || []}
+                    onRefresh={loadAdmin}
+                    onError={setError}
+                  />
                 </div>
-              </section>
+              </details>
 
-              <ToolRegistry
-                token={token}
-                userRole={user.role}
-                mode="admin"
-                pendingInvocations={adminData?.pending_tool_invocations || []}
-                adminTools={adminData?.tools || []}
-                onRefresh={loadAdmin}
-                onError={setError}
-              />
-
-              <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
-                <h3 className="text-base font-semibold text-slate-100">จัดการสิทธิ์ผู้ใช้งาน</h3>
+              <details className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
+                <summary className="cursor-pointer list-none flex items-center justify-between text-sm font-semibold text-slate-100">
+                  <span>จัดการสิทธิ์ผู้ใช้งาน</span>
+                  <span className="font-mono text-xs text-slate-400">
+                    {adminData?.users?.length ?? 0} บัญชี
+                  </span>
+                </summary>
                 <div className="mt-4 divide-y divide-slate-800/80">
                   {(adminData?.users || []).map((u) => (
                     <div
                       key={u.id}
-                      className="flex min-h-[56px] items-center justify-between gap-3 py-3"
+                      className="flex min-h-[52px] items-center justify-between gap-3 py-2.5"
                     >
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium text-slate-100">
@@ -1250,7 +1476,7 @@ export function SettingsView({
                           onClick={() =>
                             void handleRoleChange(u.id, u.role === 'admin' ? 'user' : 'admin')
                           }
-                          className="min-h-[40px] shrink-0 rounded-xl border border-slate-700 px-3 text-xs font-medium text-slate-200 hover:border-cyan-400"
+                          className="min-h-[38px] shrink-0 rounded-xl border border-slate-700 px-3 text-xs font-medium text-slate-200 hover:border-cyan-400"
                         >
                           {u.role === 'admin' ? 'ลดสิทธิ์เป็น User' : 'ตั้งเป็นผู้ดูแล'}
                         </button>
@@ -1258,10 +1484,15 @@ export function SettingsView({
                     </div>
                   ))}
                 </div>
-              </section>
+              </details>
 
-              <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
-                <h3 className="text-base font-semibold text-slate-100">บันทึกการตรวจสอบความปลอดภัย</h3>
+              <details className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
+                <summary className="cursor-pointer list-none flex items-center justify-between text-sm font-semibold text-slate-100">
+                  <span>บันทึกการตรวจสอบความปลอดภัย (Audit Logs)</span>
+                  <span className="font-mono text-xs text-slate-400">
+                    {adminData?.audit_logs?.length ?? 0} รายการ
+                  </span>
+                </summary>
                 <div className="mt-4 overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead>
@@ -1286,7 +1517,7 @@ export function SettingsView({
                     </tbody>
                   </table>
                 </div>
-              </section>
+              </details>
             </>
           )}
         </div>

@@ -4,13 +4,16 @@ import {
   AlertTriangle,
   BrainCircuit,
   CheckCircle2,
+  ChevronDown,
   Clock,
   Cpu,
   ExternalLink,
+  GitBranch,
   Play,
   Plus,
   RotateCw,
   Search,
+  ShieldCheck,
   Trash2,
   Workflow,
   X,
@@ -22,6 +25,8 @@ import type {
   KnowledgeTriple,
   MissionEvidenceItem,
   MissionNodeItem,
+  NativeTrace,
+  ReasoningTraceRecord,
   User,
   WorkflowGroup,
   WorkflowRun,
@@ -37,6 +42,7 @@ function renderStatusLabel(status: string) {
   switch (status) {
     case 'COMPLETED':
     case 'PASS':
+    case 'VERIFIED':
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-cyan-300">
           <CheckCircle2 className="h-3.5 w-3.5" />
@@ -48,6 +54,7 @@ function renderStatusLabel(status: string) {
     case 'AWAITING_EVIDENCE':
     case 'RECOVERING':
     case 'WARN':
+    case 'NOT_LEARNED':
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-300">
           <Clock className="h-3.5 w-3.5" />
@@ -73,6 +80,182 @@ function renderStatusLabel(status: string) {
   }
 }
 
+function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
+  let enginePath: string[];
+  try {
+    const parsedPath = JSON.parse(item.engine_path_json);
+    enginePath = Array.isArray(parsedPath) ? parsedPath.map(String) : [];
+  } catch {
+    enginePath = [];
+  }
+
+  let trace: NativeTrace;
+  try {
+    trace = JSON.parse(item.trace_json) as NativeTrace;
+  } catch {
+    trace = {};
+  }
+
+  const orderedSteps: string[] = [];
+  if (trace.math?.steps?.length) orderedSteps.push(...trace.math.steps);
+  if (trace.word_math?.steps?.length) orderedSteps.push(...trace.word_math.steps);
+  if (trace.algebra?.steps?.length) orderedSteps.push(...trace.algebra.steps);
+  if (trace.logic?.steps?.length) orderedSteps.push(...trace.logic.steps);
+  if (trace.causal_logic?.steps?.length) orderedSteps.push(...trace.causal_logic.steps);
+  if (trace.statistics) {
+    orderedSteps.push(
+      `สถิติ ${trace.statistics.count} ค่า: mean=${trace.statistics.mean}, median=${trace.statistics.median}, stdev=${trace.statistics.stdev}`
+    );
+  }
+  if (trace.graph_path?.path?.edges?.length) {
+    trace.graph_path.path.edges.forEach((edge, i) => {
+      orderedSteps.push(`BFS Hop ${i + 1}: ${edge.from} -[${edge.relation}]-> ${edge.to} (${edge.source})`);
+    });
+  }
+  if (trace.plan?.steps?.length) {
+    trace.plan.steps.forEach((s) => {
+      orderedSteps.push(`${s.step_id} · ${s.title} [${s.status}]: ${s.detail}`);
+    });
+  }
+  if (trace.autonomous_mission?.stages?.length) {
+    trace.autonomous_mission.stages.forEach((s) => {
+      orderedSteps.push(`Mission ${s.stage}: ${s.status}${s.detail ? ` — ${s.detail}` : ''}`);
+    });
+  }
+  if (trace.checkpoint) {
+    orderedSteps.push(
+      `Checkpoint v${trace.checkpoint.checkpoint_version} (${trace.checkpoint.engine || 'ngram'}) · ppl=${trace.checkpoint.perplexity.toFixed(2)}${
+        trace.checkpoint.generated ? ` → "${trace.checkpoint.generated}"` : ''
+      }`
+    );
+  }
+  if (trace.external_tool) {
+    orderedSteps.push(
+      `Tool ${trace.external_tool.tool_id} [${trace.external_tool.status}]${
+        trace.external_tool.trust_grade ? ` · trust=${trace.external_tool.trust_grade}` : ''
+      }${trace.external_tool.analysis_summary ? ` — ${trace.external_tool.analysis_summary}` : ''}`
+    );
+  }
+  if (trace.teach) {
+    const t = trace.teach.triple;
+    orderedSteps.push(
+      `บันทึกความรู้: ${t.subject} -> ${t.relation} -> ${t.object}${
+        trace.teach.contradictions.length
+          ? ` (พบข้อขัดแย้ง: ${trace.teach.contradictions.join(', ')})`
+          : trace.teach.duplicate
+            ? ' (มีอยู่เดิม)'
+            : ''
+      }`
+    );
+  }
+  if (enginePath.includes('unlearned_boundary') && orderedSteps.length === 0) {
+    orderedSteps.push(
+      'งดตอบเดาอัตโนมัติ (Honest Abstention): ไม่ตรงกับ AST คณิตศาสตร์, กราฟความรู้, หรือคำศัพท์ใน Checkpoint และไม่ส่งต่อ LLM ภายนอก'
+    );
+  }
+
+  return (
+    <details className="group border-b border-slate-800/80 last:border-b-0">
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-3.5 transition-colors hover:bg-[#131F38]/50 sm:px-5">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            {renderStatusLabel(item.status)}
+            <span className="rounded-md border border-slate-700/80 bg-[#070C18] px-2 py-0.5 font-mono text-[11px] text-slate-300">
+              {item.model_version}
+            </span>
+            <span className="font-mono text-[11px] text-cyan-300/90">
+              {enginePath.length > 0 ? enginePath.join(' → ') : item.mode}
+            </span>
+          </div>
+          <p className="mt-1.5 text-sm font-medium text-slate-100 line-clamp-1">
+            {item.prompt}
+          </p>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-3 pt-0.5 text-right">
+          <div className="hidden sm:block">
+            <p className="font-mono text-xs text-slate-300 tabular-nums">{item.latency_ms} ms</p>
+            <p className="text-[11px] text-slate-500 tabular-nums">
+              {new Date(item.created_at).toLocaleString('th-TH')}
+            </p>
+          </div>
+          <ChevronDown className="h-4 w-4 text-slate-400 transition-transform group-open:rotate-180" />
+        </div>
+      </summary>
+
+      <div className="border-t border-slate-800/70 bg-[#070C18]/70 px-4 py-4 space-y-3 sm:px-5">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span className="inline-flex items-center gap-1.5 font-medium text-emerald-300">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            <span>
+              {item.external_models_used === 0
+                ? 'Native-Only Verified (ไม่ใช้ LLM ภายนอก)'
+                : 'ตรวจพบการอ้างอิงภายนอก'}
+            </span>
+          </span>
+          <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+            mode: {item.mode} · {item.latency_ms} ms ·{' '}
+            {new Date(item.created_at).toLocaleString('th-TH')}
+          </span>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="rounded-xl border border-slate-800 bg-[#0E172B] p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              คำถามตั้งต้น (Prompt)
+            </p>
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-100">
+              {item.prompt}
+            </p>
+          </div>
+          <div className="rounded-xl border border-slate-800 bg-[#0E172B] p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              คำตอบที่ได้ (Response Preview)
+            </p>
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-300">
+              {item.response_preview || '—'}
+            </p>
+          </div>
+        </div>
+
+        {orderedSteps.length > 0 && (
+          <div className="rounded-xl border border-slate-800 bg-[#0E172B] p-3">
+            <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-cyan-300">
+              <GitBranch className="h-3.5 w-3.5" />
+              <span>ลำดับขั้นตอนการตัดสินใจ ({orderedSteps.length} ขั้น)</span>
+            </p>
+            <ol className="space-y-1.5 pl-4 list-decimal text-xs text-slate-200">
+              {orderedSteps.map((step, idx) => (
+                <li key={idx} className="leading-relaxed">
+                  {step}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {trace.matched_triples && trace.matched_triples.length > 0 && (
+          <div className="rounded-xl border border-slate-800 bg-[#0E172B] p-3">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-cyan-300">
+              หลักฐานจากกราฟความรู้ที่ใช้อ้างอิง ({trace.matched_triples.length} รายการ)
+            </p>
+            <ul className="space-y-1 text-xs text-slate-300">
+              {trace.matched_triples.map((m) => (
+                <li key={m.id} className="font-mono text-[11px]">
+                  {m.inferred_chain
+                    ? `[${m.hop || 2}-hop] ${m.inferred_chain}`
+                    : `${m.subject} -[${m.relation}]-> ${m.object}`}{' '}
+                  <span className="text-slate-500">({m.source})</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
   const [tab, setTab] = useState<'knowledge' | 'workflows' | 'missions'>('knowledge');
   const [triples, setTriples] = useState<KnowledgeTriple[]>([]);
@@ -84,6 +267,9 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
 
   const [groups, setGroups] = useState<WorkflowGroup[]>([]);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  const [reasoningTraces, setReasoningTraces] = useState<ReasoningTraceRecord[]>([]);
+  const [traceStatusFilter, setTraceStatusFilter] = useState<string>('ALL');
+  const [refreshingTraces, setRefreshingTraces] = useState(false);
   const [missions, setMissions] = useState<AutonomousMissionItem[]>([]);
   const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
   const [selectedMissionDetail, setSelectedMissionDetail] = useState<{
@@ -130,6 +316,16 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
     [runs]
   );
 
+  const traceFuse = useMemo(
+    () =>
+      new Fuse(reasoningTraces, {
+        keys: ['prompt', 'response_preview', 'status', 'model_version', 'engine_path_json', 'mode'],
+        threshold: 0.4,
+        ignoreLocation: true,
+      }),
+    [reasoningTraces]
+  );
+
   const trimmedQuery = searchQuery.trim();
 
   const fuzzyTriples = useMemo(
@@ -147,6 +343,12 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
     [trimmedQuery, runFuse, runs]
   );
 
+  const fuzzyTraces = useMemo(() => {
+    const base = trimmedQuery ? traceFuse.search(trimmedQuery).map((r) => r.item) : reasoningTraces;
+    if (traceStatusFilter === 'ALL') return base;
+    return base.filter((t) => t.status === traceStatusFilter);
+  }, [trimmedQuery, traceFuse, reasoningTraces, traceStatusFilter]);
+
   const loadData = useCallback(
     async () => {
       await Promise.resolve();
@@ -155,7 +357,11 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
       try {
         const [kRes, wRes, mRes] = await Promise.all([
           apiRequest<{ triples: KnowledgeTriple[] }>('/api/knowledge', { token }),
-          apiRequest<{ groups: WorkflowGroup[]; runs: WorkflowRun[] }>('/api/workflows', {
+          apiRequest<{
+            groups: WorkflowGroup[];
+            runs: WorkflowRun[];
+            reasoning_traces?: ReasoningTraceRecord[];
+          }>('/api/workflows', {
             token,
           }),
           apiRequest<{ missions: AutonomousMissionItem[] }>('/api/autonomous/missions', {
@@ -165,6 +371,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
         setTriples(kRes.triples);
         setGroups(wRes.groups);
         setRuns(wRes.runs);
+        setReasoningTraces(wRes.reasoning_traces || []);
         setMissions(mRes.missions || []);
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'ไม่สามารถโหลดข้อมูลความจำและเวิร์กโฟลว์ได้');
@@ -235,6 +442,22 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
       setError(err instanceof ApiError ? err.message : 'เรียกทำงานเวิร์กโฟลว์ไม่สำเร็จ');
     } finally {
       setRunningGroupId(null);
+    }
+  }
+
+  async function handleRefreshTraces() {
+    setRefreshingTraces(true);
+    setError(null);
+    try {
+      const res = await apiRequest<{ reasoning_traces: ReasoningTraceRecord[] }>(
+        '/api/workflows/reasoning-traces?limit=40',
+        { token }
+      );
+      setReasoningTraces(res.reasoning_traces || []);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'ไม่สามารถอัปเดตบันทึกการตัดสินใจได้');
+    } finally {
+      setRefreshingTraces(false);
     }
   }
 
@@ -508,6 +731,19 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
               </div>
             </section>
           )}
+
+          {fuzzyTraces.length > 0 && (
+            <section>
+              <h3 className="mb-3 text-sm font-semibold text-cyan-300 tabular-nums">
+                บันทึกการตัดสินใจ (Reasoning Trace) ที่ตรงกัน ({fuzzyTraces.length})
+              </h3>
+              <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B]">
+                {fuzzyTraces.map((item) => (
+                  <ReasoningTraceRow key={item.id} item={item} />
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       ) : tab === 'knowledge' ? (
         <div className="grid gap-6 lg:grid-cols-12">
@@ -714,6 +950,55 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                     </div>
                   );
                 })
+              )}
+            </div>
+          </section>
+
+          {/* Persistent Reasoning Trace Audit Log */}
+          <section aria-label="บันทึกการตัดสินใจย้อนหลังของแกนสมอง">
+            <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-slate-100">
+                  บันทึกการตัดสินใจย้อนหลัง (Reasoning Trace)
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-400">
+                  ตรวจสอบเส้นทางแกนสมอง ลำดับสมการ/ตรรกะ หลักฐานกราฟความรู้ และสถานะ Native-Only ย้อนหลังของแต่ละคำตอบ
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  aria-label="กรองสถานะ Reasoning Trace"
+                  value={traceStatusFilter}
+                  onChange={(e) => setTraceStatusFilter(e.target.value)}
+                  className="h-9 rounded-xl border border-slate-800 bg-[#0E172B] px-3 text-xs text-slate-200 focus:border-cyan-400 focus:outline-none"
+                >
+                  <option value="ALL">ทุกสถานะ ({reasoningTraces.length})</option>
+                  <option value="VERIFIED">VERIFIED</option>
+                  <option value="NOT_LEARNED">NOT_LEARNED</option>
+                  <option value="BLOCKED">BLOCKED</option>
+                  <option value="PENDING_APPROVAL">PENDING_APPROVAL</option>
+                </select>
+                <button
+                  type="button"
+                  disabled={refreshingTraces}
+                  onClick={() => void handleRefreshTraces()}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-slate-800 bg-[#0E172B] px-3 text-xs font-medium text-cyan-300 hover:border-cyan-500/50 disabled:opacity-50"
+                >
+                  <RotateCw className={`h-3.5 w-3.5 ${refreshingTraces ? 'animate-spin' : ''}`} />
+                  <span>รีเฟรช</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B]">
+              {fuzzyTraces.length === 0 ? (
+                <div className="p-6 text-sm text-slate-400">
+                  {traceStatusFilter !== 'ALL'
+                    ? `ไม่พบบันทึกการตัดสินใจที่มีสถานะ ${traceStatusFilter}`
+                    : 'ยังไม่มีบันทึกการตัดสินใจในระบบ เมื่อสนทนากับ ZYRQUEN ในเวิร์กสเปซ ระบบจะบันทึก Trace การตัดสินใจไว้ตรวจสอบย้อนหลังที่นี่'}
+                </div>
+              ) : (
+                fuzzyTraces.map((item) => <ReasoningTraceRow key={item.id} item={item} />)
               )}
             </div>
           </section>

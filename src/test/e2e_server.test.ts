@@ -78,6 +78,17 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
       Authorization: `Bearer ${setupJson.token}`,
     };
 
+    const adminOverviewInit = await fetch(`${baseUrl}/api/admin/overview`, {
+      headers: authHeaders,
+    });
+    expect(adminOverviewInit.status).toBe(200);
+    const adminOverviewJson = (await adminOverviewInit.json()) as {
+      training_readiness?: { gate_status: string; datasets_total: number; clean_datasets: number };
+    };
+    expect(adminOverviewJson.training_readiness?.gate_status).toBe('BLOCKED');
+    expect(adminOverviewJson.training_readiness?.datasets_total).toBe(0);
+    expect(adminOverviewJson.training_readiness?.clean_datasets).toBe(0);
+
     // 3. Create conversation & test real Python AST math + KG learn/recall + OOD abstention
     const convRes = await fetch(`${baseUrl}/api/conversations`, {
       method: 'POST',
@@ -114,6 +125,39 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
     expect(oodRes.status).toBe(201);
     const oodJson = (await oodRes.json()) as { assistant_message: { status: string } };
     expect(oodJson.assistant_message.status).toBe('NOT_LEARNED');
+
+    // Verify persistent Reasoning Trace stored in SQLite & exposed via workflows endpoints
+    const wfRes = await fetch(`${baseUrl}/api/workflows`, { headers: authHeaders });
+    expect(wfRes.status).toBe(200);
+    const wfJson = (await wfRes.json()) as {
+      ok: boolean;
+      reasoning_traces: Array<{
+        prompt: string;
+        status: string;
+        engine_path_json: string;
+        external_models_used: number;
+      }>;
+    };
+    expect(wfJson.ok).toBe(true);
+    expect(wfJson.reasoning_traces.length).toBeGreaterThanOrEqual(2);
+    const persistedMath = wfJson.reasoning_traces.find((t) => t.prompt.includes('(10 + 15) * 4'));
+    expect(persistedMath).toBeDefined();
+    expect(persistedMath?.status).toBe('VERIFIED');
+    expect(persistedMath?.external_models_used).toBe(0);
+    expect(JSON.parse(persistedMath!.engine_path_json)).toContain('math_ast');
+
+    const traceFilterRes = await fetch(
+      `${baseUrl}/api/workflows/reasoning-traces?status=NOT_LEARNED`,
+      { headers: authHeaders }
+    );
+    expect(traceFilterRes.status).toBe(200);
+    const traceFilterJson = (await traceFilterRes.json()) as {
+      ok: boolean;
+      reasoning_traces: Array<{ prompt: string; status: string }>;
+    };
+    expect(traceFilterJson.ok).toBe(true);
+    expect(traceFilterJson.reasoning_traces.some((t) => t.status === 'NOT_LEARNED')).toBe(true);
+    expect(traceFilterJson.reasoning_traces.every((t) => t.status === 'NOT_LEARNED')).toBe(true);
 
     // 4. Autonomous Mission DAG execution with postcondition check
     const missionRes = await fetch(`${baseUrl}/api/autonomous/missions`, {

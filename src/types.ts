@@ -130,11 +130,70 @@ export interface NativeTrace {
     contradictions: string[];
   };
   checkpoint?: {
+    engine?: string;
     checkpoint_version: number;
     perplexity: number;
-    matched_vocab: number;
+    matched_vocab?: number;
+    param_count?: number;
     generated: string | null;
     reason?: string;
+  };
+  statistics?: {
+    count: number;
+    mean: number;
+    median: number;
+    sum: number;
+    min: number;
+    max: number;
+    range: number;
+    stdev: number;
+    pstdev: number;
+  };
+  algebra?: {
+    engine: string;
+    equation: string;
+    variable?: string;
+    solution_type: string;
+    result?: number | string | null;
+    roots?: Array<number | string>;
+    solutions?: Record<string, number | string>;
+    summary_tag?: string;
+    steps: string[];
+  };
+  logic?: {
+    contradiction?: boolean;
+    determined?: boolean;
+    derived_relation?: string | null;
+    target?: string[];
+    steps: string[];
+  };
+  graph_path?: {
+    found: boolean;
+    start: string;
+    end: string;
+    max_depth?: number;
+    path?: {
+      hops: number;
+      bidirectional?: boolean;
+      edges: Array<{ from: string; relation: string; to: string; source: string }>;
+    } | null;
+  };
+  plan?: {
+    goal: string;
+    steps: Array<{
+      step_id: string;
+      title: string;
+      status: string;
+      depends_on?: string[];
+      requires_approval?: boolean;
+      detail: string;
+    }>;
+  };
+  autonomous_mission?: {
+    mission_id?: string;
+    status?: string;
+    stages?: Array<{ stage: string; label?: string; status: string; detail?: string }>;
+    knowledge_developed?: unknown[];
   };
   external_tool?: {
     tool_id: string;
@@ -284,6 +343,23 @@ export interface WorkflowRun {
   updated_at: string;
 }
 
+export interface ReasoningTraceRecord {
+  id: string;
+  user_id: string;
+  conversation_id: string | null;
+  message_id: string | null;
+  prompt: string;
+  response_preview: string;
+  mode: string;
+  model_version: string;
+  status: string;
+  engine_path_json: string;
+  trace_json: string;
+  latency_ms: number;
+  external_models_used: number;
+  created_at: string;
+}
+
 export interface ApiKeyItem {
   id: string;
   name: string;
@@ -407,6 +483,23 @@ export interface ToolsOverview {
   workspace_files: WorkspaceFileItem[];
 }
 
+export interface TrainingReadinessSummary {
+  gate_status: 'BLOCKED' | 'AWAITING_APPROVAL' | 'READY_FOR_TRAINING_GATE' | 'VERIFIED' | string;
+  datasets_total: number;
+  clean_datasets: number;
+  triples_total: number;
+  verified_triples: number;
+  experiments_total: number;
+  approved_experiments: number;
+  pending_experiments: number;
+  pending_training_runs: number;
+  checkpoints_total: number;
+  neural_checkpoints: number;
+  datasets: DatasetItem[];
+  checkpoints: CheckpointItem[];
+  experiments: ExperimentItem[];
+}
+
 export interface AdminOverview {
   users: User[];
   pending_runs: WorkflowRun[];
@@ -415,6 +508,7 @@ export interface AdminOverview {
   tools?: ExternalToolItem[];
   audit_logs: AuditLogItem[];
   system: SystemMetrics;
+  training_readiness?: TrainingReadinessSummary;
 }
 
 export type BenchmarkPolarity = 'positive' | 'negative' | 'invariant';

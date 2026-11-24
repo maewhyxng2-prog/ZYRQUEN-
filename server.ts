@@ -821,10 +821,31 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
     res.json({ ok: true });
   });
 
-  app.get('/api/workflows', requireAuth, async (_req: AuthedRequest, res: Response) => {
+  app.get('/api/workflows', requireAuth, async (req: AuthedRequest, res: Response) => {
     const data = await runPythonScript('db_bridge.py', {
       action: 'workflows_list',
-      payload: {},
+      payload: {
+        user_id: req.user!.id,
+        is_admin: req.user!.role === 'admin',
+      },
+    });
+    res.json(data);
+  });
+
+  app.get('/api/workflows/reasoning-traces', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const q = String(req.query.q || '').trim().slice(0, 120);
+    const status = String(req.query.status || '').trim().slice(0, 32);
+    const rawLimit = Number(req.query.limit ?? 40);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(100, Math.round(rawLimit))) : 40;
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'reasoning_traces_list',
+      payload: {
+        user_id: req.user!.id,
+        is_admin: req.user!.role === 'admin',
+        q,
+        status,
+        limit,
+      },
     });
     res.json(data);
   });
@@ -1119,7 +1140,11 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
       res.status(400).json({ error: 'Dataset name and content are required.' });
       return;
     }
-    const result = await runPythonScript<{ ok: boolean; error?: string }>('zyrquen_core.py', {
+    const result = await runPythonScript<{
+      ok: boolean;
+      dataset?: { id: string; name: string; total_records: number };
+      error?: string;
+    }>('zyrquen_core.py', {
       cmd: 'ingest_dataset',
       payload: { name, content, user_id: req.user!.id },
     });
@@ -1127,6 +1152,16 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
       res.status(400).json({ error: result.error || 'Dataset ingestion failed' });
       return;
     }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'DATASET_INGEST',
+        target: String(result.dataset?.id || name),
+        outcome: `READY (${result.dataset?.total_records ?? 0} records)`,
+      },
+    });
     res.status(201).json(result);
   });
 

@@ -422,14 +422,14 @@ export function WorkspaceView({
               <div className="flex items-center gap-3">
                 <ZyrquenEmblem size={36} active={sending || streamingContent !== null} />
                 <div>
-                  <h2 className="text-lg font-bold text-slate-50">เวิร์กสเปซ ZYRQUEN Ω∞</h2>
+                  <h2 className="text-lg font-bold text-slate-50">แกนประมวลผลและเหตุผล ZYRQUEN Ω∞</h2>
                   <p className="text-xs text-slate-400">
-                    Python 3.11 AST · กราฟความรู้ภายใน · Checkpoint N-Gram
+                    การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง
                   </p>
                 </div>
               </div>
               <p className="text-sm leading-relaxed text-slate-300">
-                ทุกคำตอบประมวลผลจากแกนสมองภายในโดยตรง ไม่เชื่อมต่อ LLM ภายนอก คุณสามารถคำนวณนิพจน์ทางคณิตศาสตร์ สอนและถามกราฟความรู้ หรือทดสอบ Checkpoint ที่ฝึกไว้ได้ทันที
+                ระบบประมวลผลเชิงสัญลักษณ์ การให้เหตุผล การสร้างและเชื่อมโยงกราฟความรู้ และการวางแผนงานภายในของ ZYRQUEN
               </p>
               <div className="grid w-full gap-2.5 sm:grid-cols-2">
                 {[

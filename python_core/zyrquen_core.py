@@ -390,6 +390,29 @@ def init_db() -> None:
                 details_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS reasoning_traces (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                conversation_id TEXT,
+                message_id TEXT,
+                prompt TEXT NOT NULL,
+                response_preview TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'auto',
+                model_version TEXT NOT NULL DEFAULT 'zyrquen-omega-v1',
+                status TEXT NOT NULL,
+                engine_path_json TEXT NOT NULL,
+                trace_json TEXT NOT NULL,
+                latency_ms REAL NOT NULL DEFAULT 0.0,
+                external_models_used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_reasoning_traces_user_created
+                ON reasoning_traces(user_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_reasoning_traces_created
+                ON reasoning_traces(created_at DESC);
             """
         )
         init_tools_schema(conn, DATA_DIR)

@@ -97,7 +97,9 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(screen.getByRole('button', { name: /ตั้งค่าผู้ดูแลและเข้าใช้งาน/i }));
 
     expect(await screen.findByText(/สวัสดี, หัวหน้าทีมวิจัย/i)).toBeInTheDocument();
-    expect(screen.getByText(/แกนสมองภายในพร้อมใช้งาน/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง/i)
+    ).toBeInTheDocument();
   });
 
   it('อนุญาตให้สมัครสมาชิกใหม่ (role=user) ทั้งก่อนและหลังตั้งค่าผู้ดูแล พร้อมตรวจสอบยืนยันรหัสผ่าน', async () => {
@@ -472,7 +474,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
 
     // Alt+N global shortcut starts a fresh Workspace conversation
     fireEvent.keyDown(window, { key: 'n', altKey: true });
-    expect(await screen.findByText('เวิร์กสเปซ ZYRQUEN Ω∞')).toBeInTheDocument();
+    expect(await screen.findByText('แกนประมวลผลและเหตุผล ZYRQUEN Ω∞')).toBeInTheDocument();
 
     window.history.replaceState({}, '', '/');
     fireEvent(window, new PopStateEvent('popstate'));
@@ -1559,6 +1561,131 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     });
   });
 
+  it('หน้าผู้ดูแลระบบแสดง Training Readiness Gate (BLOCKED เมื่อไม่มีชุดข้อมูลแม้ RAM/Disk ว่าง) และนำเข้าชุดข้อมูล 5+ รายการได้โดยตรง', async () => {
+    let ingested = false;
+    mockFetch({
+      'GET /api/admin/overview': () =>
+        new Response(
+          JSON.stringify({
+            users: [],
+            pending_runs: [],
+            pending_tool_invocations: [],
+            pending_experiments: [],
+            tools: [],
+            audit_logs: [],
+            system: {
+              python_version: '3.11.2',
+              platform: 'Linux',
+              cpu_count: 4,
+              load_1m: 0.1,
+              mem_total_mb: 12288,
+              mem_available_mb: 11574,
+              disk_free_gb: 566.42,
+              disk_total_gb: 566.74,
+              sqlite_db_kb: 204,
+            },
+            training_readiness: {
+              gate_status: ingested ? 'READY_FOR_TRAINING_GATE' : 'BLOCKED',
+              datasets_total: ingested ? 1 : 0,
+              clean_datasets: ingested ? 1 : 0,
+              triples_total: 0,
+              verified_triples: 0,
+              experiments_total: 0,
+              approved_experiments: 0,
+              pending_experiments: 0,
+              pending_training_runs: 0,
+              checkpoints_total: 0,
+              neural_checkpoints: 0,
+              datasets: ingested
+                ? [
+                    {
+                      id: 'ds-admin-1',
+                      name: 'admin-real-corpus',
+                      manifest_hash: 'abcd1234',
+                      total_records: 5,
+                      train_count: 3,
+                      val_count: 1,
+                      test_count: 1,
+                      leakage_detected: 0,
+                      status: 'READY',
+                      created_at: '2026-11-24T00:00:00Z',
+                    },
+                  ]
+                : [],
+              checkpoints: [],
+              experiments: [],
+            },
+          }),
+          { status: 200 }
+        ),
+      'POST /api/developer/datasets': () => {
+        ingested = true;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            deduplicated_removed: 0,
+            dataset: {
+              id: 'ds-admin-1',
+              name: 'admin-real-corpus',
+              manifest_hash: 'abcd1234',
+              total_records: 5,
+              train_count: 3,
+              val_count: 1,
+              test_count: 1,
+              leakage_detected: 0,
+              status: 'READY',
+              created_at: '2026-11-24T00:00:00Z',
+            },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+
+    render(
+      <SettingsView
+        token="t-admin"
+        user={{
+          id: 'u-admin',
+          email: 'admin@zyrquen.local',
+          display_name: 'Admin',
+          role: 'admin',
+          created_at: '2026-11-24T00:00:00Z',
+        }}
+        activeTab="admin"
+        autoExpandTrace={false}
+        defaultMode="auto"
+        onChangeTab={vi.fn()}
+        onUpdatePreferences={vi.fn()}
+        onLogout={vi.fn()}
+      />
+    );
+
+    expect(
+      await screen.findByText(/ความพร้อมก่อนเริ่มฝึก Native Model \(Training Readiness Gate\)/i)
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('BLOCKED').length).toBeGreaterThanOrEqual(1);
+
+    fireEvent.change(screen.getByLabelText('ชื่อชุดข้อมูล Admin'), {
+      target: { value: 'admin-real-corpus' },
+    });
+    fireEvent.change(screen.getByLabelText('เนื้อหาชุดข้อมูล Admin'), {
+      target: {
+        value: [
+          'ประโยคจริงข้อที่หนึ่งสำหรับฝึกโมเดล',
+          'ประโยคจริงข้อที่สองสำหรับตรวจสอบข้อมูล',
+          'ประโยคจริงข้อที่สามสำหรับประเมินผล',
+          'ประโยคจริงข้อที่สี่สำหรับการเรียนรู้ภายใน',
+          'ประโยคจริงข้อที่ห้าสำหรับทดสอบความถูกต้อง',
+        ].join('\n'),
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'นำเข้าชุดข้อมูลและตรวจ Data Leakage' }));
+
+    expect(await screen.findByText('READY_FOR_TRAINING_GATE')).toBeInTheDocument();
+    expect(await screen.findByText('admin-real-corpus')).toBeInTheDocument();
+  });
+
   it('ZyrquenEmblem & zyrquen-logo.svg: แสดงโลโก้เรขาคณิตแบบเคลื่อนไหวและเร่งความเร็วเมื่อกำลังประมวลผล', () => {
     const svgFile = fs.readFileSync(path.join(process.cwd(), 'public', 'zyrquen-logo.svg'), 'utf8');
     expect(svgFile).toContain('<polygon');
@@ -1587,5 +1714,96 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
 
     const gradientIds = Array.from(container.querySelectorAll('linearGradient')).map((el) => el.id);
     expect(new Set(gradientIds).size).toBe(gradientIds.length);
+  });
+
+  it('แสดงผลและค้นหา Log การตัดสินใจ (Reasoning Trace) ย้อนหลังในหน้าเวิร์กโฟลว์ได้ครบถ้วน', async () => {
+    const sampleTraces = [
+      {
+        id: 'rt-1',
+        user_id: 'u-admin',
+        conversation_id: 'conv-1',
+        message_id: 'msg-1',
+        prompt: 'คำนวณ (10 + 15) * 4',
+        response_preview: '**ผลลัพธ์:** `100`',
+        mode: 'math',
+        model_version: 'zyrquen-omega-v1',
+        status: 'VERIFIED',
+        engine_path_json: JSON.stringify(['math_ast']),
+        trace_json: JSON.stringify({
+          engine_path: ['math_ast'],
+          model_version: 'zyrquen-omega-v1',
+          external_models_used: false,
+          math: {
+            expression: '(10 + 15) * 4',
+            result: 100,
+            steps: ['10 + 15 = 25', '25 * 4 = 100'],
+          },
+        }),
+        latency_ms: 3.4,
+        external_models_used: 0,
+        created_at: '2026-11-24T10:00:00Z',
+      },
+      {
+        id: 'rt-2',
+        user_id: 'u-admin',
+        conversation_id: 'conv-1',
+        message_id: 'msg-2',
+        prompt: 'อธิบายสิ่งที่ไม่เคยสอน',
+        response_preview: '**สถานะ: ยังไม่ได้เรียนรู้ในแกนสมองภายใน (Not Learned)**',
+        mode: 'auto',
+        model_version: 'zyrquen-omega-v1',
+        status: 'NOT_LEARNED',
+        engine_path_json: JSON.stringify(['unlearned_boundary']),
+        trace_json: JSON.stringify({
+          engine_path: ['unlearned_boundary'],
+          model_version: 'zyrquen-omega-v1',
+          external_models_used: false,
+        }),
+        latency_ms: 2.1,
+        external_models_used: 0,
+        created_at: '2026-11-24T10:01:00Z',
+      },
+    ];
+
+    mockFetch({
+      'GET /api/knowledge': () => new Response(JSON.stringify({ triples: [] }), { status: 200 }),
+      'GET /api/workflows': () =>
+        new Response(
+          JSON.stringify({ groups: [], runs: [], reasoning_traces: sampleTraces }),
+          { status: 200 }
+        ),
+      'GET /api/autonomous/missions': () =>
+        new Response(JSON.stringify({ missions: [] }), { status: 200 }),
+    });
+
+    render(
+      <MemoryWorkflowsView
+        token="t-admin"
+        user={{
+          id: 'u-admin',
+          email: 'admin@zyrquen.local',
+          display_name: 'Admin',
+          role: 'admin',
+          created_at: '2026-11-24T00:00:00Z',
+        }}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /ระบบเวิร์กโฟลว์/i }));
+
+    expect(
+      await screen.findByText(/บันทึกการตัดสินใจย้อนหลัง \(Reasoning Trace\)/i)
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('คำนวณ (10 + 15) * 4').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('math_ast')).toBeInTheDocument();
+    expect(screen.getByText('10 + 15 = 25')).toBeInTheDocument();
+    expect(screen.getByText('25 * 4 = 100')).toBeInTheDocument();
+
+    // Filter by NOT_LEARNED
+    fireEvent.change(screen.getByLabelText('กรองสถานะ Reasoning Trace'), {
+      target: { value: 'NOT_LEARNED' },
+    });
+    expect(screen.queryByText('math_ast')).not.toBeInTheDocument();
+    expect(screen.getByText('unlearned_boundary')).toBeInTheDocument();
   });
 });

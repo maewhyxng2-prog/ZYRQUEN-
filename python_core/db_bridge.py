@@ -34,6 +34,117 @@ def row_to_dict(row):
     return dict(row) if row is not None else None
 
 
+def _insert_reasoning_trace(
+    conn,
+    *,
+    user_id: str,
+    conversation_id: str | None,
+    message_id: str | None,
+    prompt: str,
+    response_content: str,
+    mode: str,
+    status: str,
+    trace_obj: dict | None,
+    created_at: str | None = None,
+) -> dict:
+    trace_dict = trace_obj if isinstance(trace_obj, dict) else {}
+    raw_path = trace_dict.get("engine_path")
+    engine_path = [str(x) for x in raw_path] if isinstance(raw_path, list) else []
+    meta = trace_dict.get("metadata") if isinstance(trace_dict.get("metadata"), dict) else {}
+    model_version = str(
+        trace_dict.get("model_version")
+        or meta.get("modelVersion")
+        or meta.get("model_version")
+        or "zyrquen-omega-v1"
+    ).strip()[:64] or "zyrquen-omega-v1"
+    try:
+        latency_ms = float(trace_dict.get("latency_ms", 0.0) or 0.0)
+    except Exception:
+        latency_ms = 0.0
+    ext_used = 1 if trace_dict.get("external_models_used", False) else 0
+    trace_id = str(uuid.uuid4())
+    ts = created_at or now_iso()
+    preview = str(response_content or "").strip()[:320]
+    trace_str = json.dumps(trace_dict, ensure_ascii=False)
+    engine_str = json.dumps(engine_path, ensure_ascii=False)
+    conn.execute(
+        """
+        INSERT INTO reasoning_traces (
+            id, user_id, conversation_id, message_id, prompt, response_preview,
+            mode, model_version, status, engine_path_json, trace_json,
+            latency_ms, external_models_used, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trace_id,
+            str(user_id),
+            conversation_id,
+            message_id,
+            str(prompt or "")[:1000],
+            preview,
+            str(mode or "auto")[:32],
+            model_version,
+            str(status or "VERIFIED")[:32],
+            engine_str,
+            trace_str,
+            round(latency_ms, 2),
+            ext_used,
+            ts,
+        ),
+    )
+    return {
+        "id": trace_id,
+        "user_id": str(user_id),
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "prompt": str(prompt or "")[:1000],
+        "response_preview": preview,
+        "mode": str(mode or "auto")[:32],
+        "model_version": model_version,
+        "status": str(status or "VERIFIED")[:32],
+        "engine_path_json": engine_str,
+        "trace_json": trace_str,
+        "latency_ms": round(latency_ms, 2),
+        "external_models_used": ext_used,
+        "created_at": ts,
+    }
+
+
+def _query_reasoning_traces(
+    conn,
+    *,
+    user_id: str | None = None,
+    is_admin: bool = False,
+    q: str = "",
+    status: str = "",
+    limit: int = 30,
+) -> list[dict]:
+    safe_limit = max(1, min(100, int(limit or 30)))
+    clauses: list[str] = []
+    params: list[object] = []
+    if user_id and not is_admin:
+        clauses.append("user_id = ?")
+        params.append(str(user_id))
+    clean_status = str(status or "").strip().upper()
+    if clean_status and clean_status != "ALL":
+        clauses.append("status = ?")
+        params.append(clean_status)
+    clean_q = str(q or "").strip().lower()
+    if clean_q:
+        like = f"%{clean_q}%"
+        clauses.append(
+            "(lower(prompt) LIKE ? OR lower(response_preview) LIKE ? OR lower(model_version) LIKE ? OR lower(engine_path_json) LIKE ? OR lower(status) LIKE ?)"
+        )
+        params.extend([like, like, like, like, like])
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(safe_limit)
+    rows = conn.execute(
+        f"SELECT * FROM reasoning_traces {where_sql} ORDER BY created_at DESC, rowid DESC LIMIT ?",
+        tuple(params),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def handle_action(action: str, payload: dict) -> dict:
     conn = get_db()
 
@@ -224,7 +335,9 @@ def handle_action(action: str, payload: dict) -> dict:
         mode = str(payload.get("mode", "auto"))
         asst_content = str(payload["assistant_content"])
         asst_status = str(payload.get("assistant_status", "VERIFIED"))
-        trace_json = json.dumps(payload.get("trace", {}))
+        trace_obj = payload.get("trace", {})
+        trace_json = json.dumps(trace_obj, ensure_ascii=False)
+        asst_ts = now_iso()
         new_title = conv["title"]
         if new_title == "New Native Session" and user_content:
             new_title = user_content[:48] + ("..." if len(user_content) > 48 else "")
@@ -235,7 +348,19 @@ def handle_action(action: str, payload: dict) -> dict:
             )
             conn.execute(
                 "INSERT INTO messages (id, conversation_id, role, content, mode, trace_json, status, created_at) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?)",
-                (asst_msg_id, cid, asst_content, mode, trace_json, asst_status, now_iso()),
+                (asst_msg_id, cid, asst_content, mode, trace_json, asst_status, asst_ts),
+            )
+            _insert_reasoning_trace(
+                conn,
+                user_id=uid,
+                conversation_id=cid,
+                message_id=asst_msg_id,
+                prompt=user_content,
+                response_content=asst_content,
+                mode=mode,
+                status=asst_status,
+                trace_obj=trace_obj if isinstance(trace_obj, dict) else {},
+                created_at=asst_ts,
             )
             conn.execute(
                 "UPDATE conversations SET title=?, mode=?, updated_at=? WHERE id=?",
@@ -307,8 +432,51 @@ def handle_action(action: str, payload: dict) -> dict:
             dict(r)
             for r in conn.execute("SELECT * FROM workflow_runs ORDER BY created_at DESC LIMIT 30").fetchall()
         ]
+        reasoning_traces = _query_reasoning_traces(
+            conn,
+            user_id=payload.get("user_id"),
+            is_admin=bool(payload.get("is_admin", False)),
+            limit=30,
+        )
         conn.close()
-        return {"ok": True, "groups": WORKFLOW_GROUPS, "runs": runs}
+        return {
+            "ok": True,
+            "groups": WORKFLOW_GROUPS,
+            "runs": runs,
+            "reasoning_traces": reasoning_traces,
+        }
+
+    if action == "reasoning_traces_list":
+        traces = _query_reasoning_traces(
+            conn,
+            user_id=payload.get("user_id"),
+            is_admin=bool(payload.get("is_admin", False)),
+            q=str(payload.get("q", "")),
+            status=str(payload.get("status", "")),
+            limit=int(payload.get("limit", 40) or 40),
+        )
+        conn.close()
+        return {"ok": True, "reasoning_traces": traces}
+
+    if action == "reasoning_trace_record":
+        uid = str(payload.get("user_id", "")).strip()
+        if not uid:
+            conn.close()
+            return {"ok": False, "error": "user_id is required"}
+        with conn:
+            rec = _insert_reasoning_trace(
+                conn,
+                user_id=uid,
+                conversation_id=payload.get("conversation_id"),
+                message_id=payload.get("message_id"),
+                prompt=str(payload.get("prompt", "")),
+                response_content=str(payload.get("response_content", "")),
+                mode=str(payload.get("mode", "auto")),
+                status=str(payload.get("status", "VERIFIED")),
+                trace_obj=payload.get("trace") if isinstance(payload.get("trace"), dict) else {},
+            )
+        conn.close()
+        return {"ok": True, "reasoning_trace": rec}
 
     if action == "workflow_decide":
         run_id = str(payload["run_id"])
@@ -474,6 +642,50 @@ def handle_action(action: str, payload: dict) -> dict:
                 "SELECT * FROM experiments WHERE approval_status='PENDING_APPROVAL' ORDER BY created_at DESC"
             ).fetchall()
         ]
+        datasets = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, name, manifest_hash, total_records, train_count, val_count, test_count, leakage_detected, status, created_at FROM datasets ORDER BY created_at DESC LIMIT 20"
+            ).fetchall()
+        ]
+        checkpoints = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, version, dataset_id, vocab_size, ngram_order, train_loss, val_loss, perplexity, eval_accuracy, eval_status, created_at FROM checkpoints ORDER BY version DESC LIMIT 20"
+            ).fetchall()
+        ]
+        experiments_recent = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, hypothesis, dataset_id, baseline_ckpt_id, candidate_ckpt_id, baseline_metrics_json, candidate_metrics_json, improved, approval_status, approved_by, created_at FROM experiments ORDER BY created_at DESC LIMIT 12"
+            ).fetchall()
+        ]
+        triples_total = conn.execute("SELECT COUNT(*) FROM knowledge_triples").fetchone()[0]
+        verified_triples = conn.execute(
+            """
+            SELECT COUNT(*) FROM knowledge_triples
+            WHERE confidence >= 0.8
+              AND source NOT LIKE '%uncorroborated%'
+              AND source NOT LIKE '%conflicting%'
+              AND source NOT LIKE '%stale%'
+            """
+        ).fetchone()[0]
+        clean_datasets = sum(
+            1 for d in datasets if int(d.get("leakage_detected", 0)) == 0 and int(d.get("total_records", 0)) >= 5
+        )
+        neural_checkpoints = sum(1 for c in checkpoints if str(c.get("eval_status") or "").startswith("NEURAL"))
+        approved_experiments = sum(1 for e in experiments_recent if e.get("approval_status") == "APPROVED")
+        pending_training_runs = sum(1 for r in pending_runs if r.get("group_id") == "native_training")
+
+        if clean_datasets == 0:
+            gate_status = "BLOCKED"
+        elif len(pending_experiments) > 0 or pending_training_runs > 0:
+            gate_status = "AWAITING_APPROVAL"
+        elif len(checkpoints) == 0:
+            gate_status = "READY_FOR_TRAINING_GATE"
+        else:
+            gate_status = "VERIFIED"
+
         conn.close()
         return {
             "ok": True,
@@ -484,6 +696,22 @@ def handle_action(action: str, payload: dict) -> dict:
             "tools": tools,
             "audit_logs": audit_logs,
             "system": get_system_metrics(),
+            "training_readiness": {
+                "gate_status": gate_status,
+                "datasets_total": len(datasets),
+                "clean_datasets": clean_datasets,
+                "triples_total": triples_total,
+                "verified_triples": verified_triples,
+                "experiments_total": len(experiments_recent),
+                "approved_experiments": approved_experiments,
+                "pending_experiments": len(pending_experiments),
+                "pending_training_runs": pending_training_runs,
+                "checkpoints_total": len(checkpoints),
+                "neural_checkpoints": neural_checkpoints,
+                "datasets": datasets,
+                "checkpoints": checkpoints,
+                "experiments": experiments_recent,
+            },
         }
 
     if action == "admin_user_role":
@@ -713,10 +941,24 @@ def handle_action(action: str, payload: dict) -> dict:
                     "analysis_summary": analysis_obj.get("summary"),
                 },
             }
+            tool_msg_id = str(uuid.uuid4())
+            tool_ts = now_iso()
             with conn:
                 conn.execute(
                     "INSERT INTO messages (id, conversation_id, role, content, mode, trace_json, status, created_at) VALUES (?, ?, 'assistant', ?, 'auto', ?, ?, ?)",
-                    (str(uuid.uuid4()), inv["conversation_id"], md, json.dumps(trace_obj), msg_status, now_iso()),
+                    (tool_msg_id, inv["conversation_id"], md, json.dumps(trace_obj, ensure_ascii=False), msg_status, tool_ts),
+                )
+                _insert_reasoning_trace(
+                    conn,
+                    user_id=inv["user_id"],
+                    conversation_id=inv["conversation_id"],
+                    message_id=tool_msg_id,
+                    prompt=f"[Governed Tool: {inv['tool_id']}] {json.dumps(tool_input, ensure_ascii=False)[:240]}",
+                    response_content=md,
+                    mode="auto",
+                    status=msg_status,
+                    trace_obj=trace_obj,
+                    created_at=tool_ts,
                 )
         conn.close()
         return res
