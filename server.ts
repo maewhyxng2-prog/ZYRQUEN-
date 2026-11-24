@@ -240,6 +240,19 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '1mb' }));
 
+  // Platform-independent versioned API routing: /api/v1/* -> /api/*
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (
+      req.url === '/api/v1' ||
+      req.url.startsWith('/api/v1/') ||
+      req.url.startsWith('/api/v1?')
+    ) {
+      res.setHeader('X-ZYRQUEN-API-Version', 'v1');
+      req.url = req.url.replace(/^\/api\/v1(?=\/|\?|$)/, '/api');
+    }
+    next();
+  });
+
   // Record API usage latency for authenticated /api routes
   app.use('/api', (req: AuthedRequest, res: Response, next: NextFunction) => {
     const started = performance.now();
@@ -260,6 +273,48 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
       }
     });
     next();
+  });
+
+  app.get('/api/platform/manifest', async (_req, res) => {
+    try {
+      const pyHealth = await runPythonScript<{
+        ok: boolean;
+        metrics: Record<string, unknown>;
+        counts: Record<string, number>;
+      }>('zyrquen_core.py', { cmd: 'health', payload: {} });
+      res.json({
+        platform: 'ZYRQUEN',
+        tagline: 'Autonomous Foundational Intelligence',
+        architecture: 'One Native Intelligence Core, Multiple Platforms',
+        api_version: 'v1',
+        supported_api_prefixes: ['/api/v1', '/api'],
+        supported_clients: ['web', 'desktop', 'mobile-android', 'mobile-ios', 'cli'],
+        browser_dependencies_in_core: false,
+        external_models_used: false,
+        data_portability: ['json', 'jsonl', 'sqlite-wal', 'json.gz-checkpoint'],
+        native_core: {
+          status: pyHealth.ok ? 'ready' : 'degraded',
+          counts: pyHealth.counts,
+          python_version: pyHealth.metrics?.python_version,
+        },
+        capabilities: [
+          'inference',
+          'causal_reasoning',
+          'knowledge_graph',
+          'dag_missions',
+          'native_transformer_training',
+          'continual_learning_replay',
+          'failure_driven_curriculum',
+          'scientific_evaluation',
+        ],
+      });
+    } catch {
+      res.status(503).json({
+        platform: 'ZYRQUEN',
+        api_version: 'v1',
+        native_core: { status: 'offline' },
+      });
+    }
   });
 
   app.get('/api/health', async (_req, res) => {
@@ -1244,6 +1299,89 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
         actor_email: req.user!.email,
         action: 'NEURAL_EXPERIMENT_RUN',
         target: String(result.experiment?.id || 'experiment'),
+        outcome: String(result.experiment?.approval_status || 'RECORDED'),
+      },
+    });
+    res.status(201).json(result);
+  });
+
+  app.post('/api/developer/curriculum/synthesize', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const rawLimit = Number(req.body?.limit ?? 50);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(200, Math.round(rawLimit))) : 50;
+    const heldoutPrompts = Array.isArray(req.body?.heldoutPrompts)
+      ? req.body.heldoutPrompts.slice(0, 200).map((item: unknown) => String(item))
+      : undefined;
+
+    const result = await runPythonScript<{
+      ok: boolean;
+      error?: string;
+      curriculum_count?: number;
+      manifest_sha256?: string;
+    }>('zyrquen_core.py', {
+      cmd: 'synthesize_curriculum',
+      payload: { limit, heldout_prompts: heldoutPrompts },
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Curriculum synthesis failed' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'CURRICULUM_SYNTHESIZED',
+        target: String(result.manifest_sha256 || 'curriculum').slice(0, 16),
+        outcome: `ITEMS_${String(result.curriculum_count ?? 0)}`,
+      },
+    });
+    res.status(201).json(result);
+  });
+
+  app.post('/api/developer/continual-learning/run', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const newTrainLines = Array.isArray(req.body?.newTrainLines)
+      ? req.body.newTrainLines.slice(0, 200).map((s: unknown) => String(s))
+      : undefined;
+    const anchorLines = Array.isArray(req.body?.anchorLines)
+      ? req.body.anchorLines.slice(0, 200).map((s: unknown) => String(s))
+      : undefined;
+    const rawEpochs = Number(req.body?.epochs ?? 6);
+    const epochs = Number.isFinite(rawEpochs) ? Math.max(1, Math.min(20, Math.round(rawEpochs))) : 6;
+    const rawReplay = Number(req.body?.replayRatio ?? 0.35);
+    const replayRatio = Number.isFinite(rawReplay) ? Math.max(0, Math.min(1, rawReplay)) : 0.35;
+    const rawLambda = Number(req.body?.anchorL2Lambda ?? 0.02);
+    const anchorL2Lambda = Number.isFinite(rawLambda) ? Math.max(0, Math.min(1, rawLambda)) : 0.02;
+    const rawSeed = Number(req.body?.seed ?? 42);
+    const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
+
+    const result = await runPythonScript<{
+      ok: boolean;
+      error?: string;
+      experiment?: Record<string, unknown>;
+      catastrophic_forgetting_detected?: boolean;
+    }>('zyrquen_core.py', {
+      cmd: 'run_continual_round',
+      payload: {
+        user_id: req.user!.id,
+        new_train_lines: newTrainLines,
+        anchor_lines: anchorLines,
+        epochs,
+        replay_ratio: replayRatio,
+        anchor_l2_lambda: anchorL2Lambda,
+        seed,
+      },
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Continual learning round failed' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'CONTINUAL_LEARNING_ROUND',
+        target: String(result.experiment?.id || 'continual'),
         outcome: String(result.experiment?.approval_status || 'RECORDED'),
       },
     });

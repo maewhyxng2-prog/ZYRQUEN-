@@ -44,7 +44,7 @@ function renderStatusLabel(status: string) {
     case 'PASS':
     case 'VERIFIED':
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-cyan-300">
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-success)]">
           <CheckCircle2 className="h-3.5 w-3.5" />
           <span>{status}</span>
         </span>
@@ -56,7 +56,7 @@ function renderStatusLabel(status: string) {
     case 'WARN':
     case 'NOT_LEARNED':
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-300">
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-warning)]">
           <Clock className="h-3.5 w-3.5" />
           <span>{status}</span>
         </span>
@@ -66,14 +66,14 @@ function renderStatusLabel(status: string) {
     case 'BLOCKED':
     case 'CANCELLED':
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-rose-300">
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-danger)]">
           <XCircle className="h-3.5 w-3.5" />
           <span>{status}</span>
         </span>
       );
     default:
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400">
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-text-secondary)]">
           <span>{status}</span>
         </span>
       );
@@ -154,38 +154,63 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
     );
   }
 
+  const taskTimings = Array.isArray(trace.task_timings) ? trace.task_timings : [];
+  const totalTaskMs = taskTimings.reduce((acc, t) => acc + (Number(t.duration_ms) || 0), 0);
+  const bottleneck =
+    trace.bottleneck_task ||
+    (taskTimings.length > 0
+      ? (() => {
+          const slowest = taskTimings.reduce((best, cur) =>
+            (cur.duration_ms || 0) > (best.duration_ms || 0) ? cur : best
+          );
+          return {
+            task: slowest.task,
+            duration_ms: slowest.duration_ms,
+            share_pct:
+              totalTaskMs > 0
+                ? Math.round(((slowest.duration_ms || 0) / totalTaskMs) * 1000) / 10
+                : 0,
+          };
+        })()
+      : null);
+
   return (
-    <details className="group border-b border-slate-800/80 last:border-b-0">
-      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-3.5 transition-colors hover:bg-[#131F38]/50 sm:px-5">
+    <details className="group border-b border-[var(--color-border)] last:border-b-0">
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-3.5 transition-colors hover:bg-[var(--color-surface-hover)] sm:px-5">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             {renderStatusLabel(item.status)}
-            <span className="rounded-md border border-slate-700/80 bg-[#070C18] px-2 py-0.5 font-mono text-[11px] text-slate-300">
+            <span className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 font-mono text-[11px] text-[var(--color-text)]">
               {item.model_version}
             </span>
-            <span className="font-mono text-[11px] text-cyan-300/90">
+            <span className="font-mono text-[11px] text-[var(--color-accent)]">
               {enginePath.length > 0 ? enginePath.join(' → ') : item.mode}
             </span>
+            {bottleneck && (
+              <span className="rounded-md border border-[var(--color-warning)]/40 bg-[var(--color-warning-bg)] px-2 py-0.5 font-mono text-[11px] text-[var(--color-warning)] tabular-nums">
+                Bottleneck: {bottleneck.task} ({bottleneck.duration_ms} ms)
+              </span>
+            )}
           </div>
-          <p className="mt-1.5 text-sm font-medium text-slate-100 line-clamp-1">
+          <p className="mt-1.5 line-clamp-1 text-sm font-medium text-[var(--color-text)]">
             {item.prompt}
           </p>
         </div>
 
         <div className="flex shrink-0 items-center gap-3 pt-0.5 text-right">
           <div className="hidden sm:block">
-            <p className="font-mono text-xs text-slate-300 tabular-nums">{item.latency_ms} ms</p>
-            <p className="text-[11px] text-slate-500 tabular-nums">
+            <p className="font-mono text-xs text-[var(--color-text)] tabular-nums">{item.latency_ms} ms</p>
+            <p className="text-[11px] text-[var(--color-text-muted)] tabular-nums">
               {new Date(item.created_at).toLocaleString('th-TH')}
             </p>
           </div>
-          <ChevronDown className="h-4 w-4 text-slate-400 transition-transform group-open:rotate-180" />
+          <ChevronDown className="h-4 w-4 text-[var(--color-text-muted)] transition-transform group-open:rotate-180" />
         </div>
       </summary>
 
-      <div className="border-t border-slate-800/70 bg-[#070C18]/70 px-4 py-4 space-y-3 sm:px-5">
+      <div className="space-y-3 border-t border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-          <span className="inline-flex items-center gap-1.5 font-medium text-emerald-300">
+          <span className="inline-flex items-center gap-1.5 font-medium text-[var(--color-success)]">
             <ShieldCheck className="h-3.5 w-3.5" />
             <span>
               {item.external_models_used === 0
@@ -193,38 +218,119 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
                 : 'ตรวจพบการอ้างอิงภายนอก'}
             </span>
           </span>
-          <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+          <span className="font-mono text-[11px] text-[var(--color-text-secondary)] tabular-nums">
             mode: {item.mode} · {item.latency_ms} ms ·{' '}
             {new Date(item.created_at).toLocaleString('th-TH')}
           </span>
         </div>
 
         <div className="grid gap-3 md:grid-cols-2">
-          <div className="rounded-xl border border-slate-800 bg-[#0E172B] p-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
               คำถามตั้งต้น (Prompt)
             </p>
-            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-100">
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-[var(--color-text)]">
               {item.prompt}
             </p>
           </div>
-          <div className="rounded-xl border border-slate-800 bg-[#0E172B] p-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
               คำตอบที่ได้ (Response Preview)
             </p>
-            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-300">
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-[var(--color-text-secondary)]">
               {item.response_preview || '—'}
             </p>
           </div>
         </div>
 
+        {taskTimings.length > 0 && (
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-warning)]">
+                <Clock className="h-3.5 w-3.5" />
+                <span>บันทึกเวลาทำงานแยกราย Task (Bottleneck Profiler · {taskTimings.length} งาน)</span>
+              </p>
+              {bottleneck && (
+                <span className="font-mono text-[11px] text-[var(--color-warning)] tabular-nums">
+                  ช้าที่สุด: {bottleneck.task} ({bottleneck.duration_ms} ms · {bottleneck.share_pct}%)
+                </span>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              {taskTimings.map((timing, idx) => {
+                const isBottleneck =
+                  bottleneck &&
+                  timing.task === bottleneck.task &&
+                  timing.duration_ms === bottleneck.duration_ms;
+                const pct =
+                  totalTaskMs > 0
+                    ? Math.min(100, Math.max(4, Math.round(((timing.duration_ms || 0) / totalTaskMs) * 100)))
+                    : 10;
+                return (
+                  <div
+                    key={`${timing.task}-${idx}`}
+                    className={`rounded-lg border px-2.5 py-2 text-xs ${
+                      isBottleneck
+                        ? 'border-[var(--color-warning)]/40 bg-[var(--color-warning-bg)]'
+                        : 'border-[var(--color-border)] bg-[var(--color-surface)]'
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="font-mono text-[10px] text-[var(--color-text-muted)] tabular-nums">
+                          #{timing.order ?? idx + 1}
+                        </span>
+                        <span className="truncate font-mono text-[11px] font-medium text-[var(--color-text)]">
+                          {timing.task}
+                        </span>
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                            timing.matched
+                              ? 'bg-[var(--zyrquen-indigo)]/30 text-[var(--color-accent)]'
+                              : 'bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]'
+                          }`}
+                        >
+                          {timing.status}
+                        </span>
+                      </div>
+                      <span
+                        className={`font-mono text-[11px] font-semibold tabular-nums ${
+                          isBottleneck ? 'text-[var(--color-warning)]' : 'text-[var(--color-text)]'
+                        }`}
+                      >
+                        {timing.duration_ms} ms
+                      </span>
+                    </div>
+                    <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-surface-hover)]">
+                      <div
+                        className="h-full rounded-full"
+                        style={{
+                          width: `${pct}%`,
+                          backgroundColor: isBottleneck
+                            ? 'var(--color-warning)'
+                            : timing.matched
+                              ? 'var(--color-accent)'
+                              : 'var(--color-text-muted)',
+                        }}
+                      />
+                    </div>
+                    {timing.detail && (
+                      <p className="mt-1 font-mono text-[10px] text-[var(--color-text-secondary)]">{timing.detail}</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {orderedSteps.length > 0 && (
-          <div className="rounded-xl border border-slate-800 bg-[#0E172B] p-3">
-            <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-cyan-300">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-3">
+            <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-accent)]">
               <GitBranch className="h-3.5 w-3.5" />
               <span>ลำดับขั้นตอนการตัดสินใจ ({orderedSteps.length} ขั้น)</span>
             </p>
-            <ol className="space-y-1.5 pl-4 list-decimal text-xs text-slate-200">
+            <ol className="list-decimal space-y-1.5 pl-4 text-xs text-[var(--color-text)]">
               {orderedSteps.map((step, idx) => (
                 <li key={idx} className="leading-relaxed">
                   {step}
@@ -235,17 +341,17 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
         )}
 
         {trace.matched_triples && trace.matched_triples.length > 0 && (
-          <div className="rounded-xl border border-slate-800 bg-[#0E172B] p-3">
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-cyan-300">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-3">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-accent)]">
               หลักฐานจากกราฟความรู้ที่ใช้อ้างอิง ({trace.matched_triples.length} รายการ)
             </p>
-            <ul className="space-y-1 text-xs text-slate-300">
+            <ul className="space-y-1 text-xs text-[var(--color-text)]">
               {trace.matched_triples.map((m) => (
                 <li key={m.id} className="font-mono text-[11px]">
                   {m.inferred_chain
                     ? `[${m.hop || 2}-hop] ${m.inferred_chain}`
                     : `${m.subject} -[${m.relation}]-> ${m.object}`}{' '}
-                  <span className="text-slate-500">({m.source})</span>
+                  <span className="text-[var(--color-text-muted)]">({m.source})</span>
                 </li>
               ))}
             </ul>
@@ -349,38 +455,35 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
     return base.filter((t) => t.status === traceStatusFilter);
   }, [trimmedQuery, traceFuse, reasoningTraces, traceStatusFilter]);
 
-  const loadData = useCallback(
-    async () => {
-      await Promise.resolve();
-      setLoading(true);
-      setError(null);
-      try {
-        const [kRes, wRes, mRes] = await Promise.all([
-          apiRequest<{ triples: KnowledgeTriple[] }>('/api/knowledge', { token }),
-          apiRequest<{
-            groups: WorkflowGroup[];
-            runs: WorkflowRun[];
-            reasoning_traces?: ReasoningTraceRecord[];
-          }>('/api/workflows', {
-            token,
-          }),
-          apiRequest<{ missions: AutonomousMissionItem[] }>('/api/autonomous/missions', {
-            token,
-          }).catch(() => ({ missions: [] as AutonomousMissionItem[] })),
-        ]);
-        setTriples(kRes.triples);
-        setGroups(wRes.groups);
-        setRuns(wRes.runs);
-        setReasoningTraces(wRes.reasoning_traces || []);
-        setMissions(mRes.missions || []);
-      } catch (err) {
-        setError(err instanceof ApiError ? err.message : 'ไม่สามารถโหลดข้อมูลความจำและเวิร์กโฟลว์ได้');
-      } finally {
-        setLoading(false);
-      }
-    },
-    [token]
-  );
+  const loadData = useCallback(async () => {
+    await Promise.resolve();
+    setLoading(true);
+    setError(null);
+    try {
+      const [kRes, wRes, mRes] = await Promise.all([
+        apiRequest<{ triples: KnowledgeTriple[] }>('/api/knowledge', { token }),
+        apiRequest<{
+          groups: WorkflowGroup[];
+          runs: WorkflowRun[];
+          reasoning_traces?: ReasoningTraceRecord[];
+        }>('/api/workflows', {
+          token,
+        }),
+        apiRequest<{ missions: AutonomousMissionItem[] }>('/api/autonomous/missions', {
+          token,
+        }).catch(() => ({ missions: [] as AutonomousMissionItem[] })),
+      ]);
+      setTriples(kRes.triples);
+      setGroups(wRes.groups);
+      setRuns(wRes.runs);
+      setReasoningTraces(wRes.reasoning_traces || []);
+      setMissions(mRes.missions || []);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'ไม่สามารถโหลดข้อมูลความจำและเวิร์กโฟลว์ได้');
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
 
   useEffect(() => {
     let active = true;
@@ -556,22 +659,22 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
     <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:py-8">
       <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight text-slate-50">
+          <h2 className="text-2xl font-bold tracking-tight text-[var(--color-text)]">
             ความจำและระบบเวิร์กโฟลว์ภายใน
           </h2>
-          <p className="mt-1 text-sm text-slate-400">
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             จัดการกราฟความรู้ถาวร เวิร์กโฟลว์กลางทั้ง 8 กลุ่มงาน และภารกิจอัตโนมัติ (DAG Executor)
           </p>
         </div>
 
-        <div className="grid grid-cols-3 gap-1 rounded-xl border border-slate-800 bg-[#0E172B] p-1 sm:w-auto">
+        <div className="grid grid-cols-3 gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-1 sm:w-auto">
           <button
             type="button"
             onClick={() => setTab('knowledge')}
             className={`flex min-h-[40px] items-center justify-center gap-2 rounded-lg px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
               tab === 'knowledge'
-                ? 'bg-blue-600 text-white'
-                : 'text-slate-400 hover:text-slate-100'
+                ? 'bg-[var(--color-primary)] text-white'
+                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
             }`}
           >
             <BrainCircuit className="h-3.5 w-3.5" />
@@ -582,8 +685,8 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
             onClick={() => setTab('workflows')}
             className={`flex min-h-[40px] items-center justify-center gap-2 rounded-lg px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
               tab === 'workflows'
-                ? 'bg-blue-600 text-white'
-                : 'text-slate-400 hover:text-slate-100'
+                ? 'bg-[var(--color-primary)] text-white'
+                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
             }`}
           >
             <Workflow className="h-3.5 w-3.5" />
@@ -594,8 +697,8 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
             onClick={() => setTab('missions')}
             className={`flex min-h-[40px] items-center justify-center gap-2 rounded-lg px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
               tab === 'missions'
-                ? 'bg-blue-600 text-white'
-                : 'text-slate-400 hover:text-slate-100'
+                ? 'bg-[var(--color-primary)] text-white'
+                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
             }`}
           >
             <Cpu className="h-3.5 w-3.5" />
@@ -605,22 +708,22 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
       </div>
 
       {/* Unified Global Fuzzy Search Bar (queries Knowledge Fragments & Workflow Definitions) */}
-      <div className="mb-6 relative">
-        <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+      <div className="relative mb-6">
+        <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-text-muted)]" />
         <input
           type="search"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           placeholder="ค้นหาแบบคลุมเครือ (Fuzzy Search) ทั้งกราฟความรู้และนิยามเวิร์กโฟลว์..."
           aria-label="ค้นหากราฟความรู้และเวิร์กโฟลว์"
-          className="h-11 w-full rounded-xl border border-slate-800 bg-[#0E172B] pl-10 pr-10 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+          className="h-11 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] pl-10 pr-10 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
         />
         {searchQuery && (
           <button
             type="button"
             onClick={() => setSearchQuery('')}
             aria-label="ล้างคำค้นหา"
-            className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:text-slate-100"
+            className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
           >
             <X className="h-4 w-4" />
           </button>
@@ -630,7 +733,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
       {error && (
         <div
           role="alert"
-          className="mb-5 rounded-2xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-sm text-rose-200"
+          className="mb-5 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
         >
           {error}
         </div>
@@ -639,12 +742,12 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
       {trimmedQuery ? (
         <div className="space-y-6" aria-label="ผลลัพธ์การค้นหาทั้งหมด">
           <section>
-            <h3 className="mb-3 text-sm font-semibold text-cyan-300 tabular-nums">
+            <h3 className="mb-3 text-sm font-semibold text-[var(--color-accent)] tabular-nums">
               กราฟความรู้ที่ตรงกัน ({fuzzyTriples.length})
             </h3>
-            <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] divide-y divide-slate-800/80">
+            <div className="divide-y divide-[var(--color-border)] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
               {fuzzyTriples.length === 0 ? (
-                <p className="p-4 text-sm text-slate-400">
+                <p className="p-4 text-sm text-[var(--color-text-secondary)]">
                   ไม่พบความจำในกราฟความรู้ที่ตรงกับ &ldquo;{trimmedQuery}&rdquo;
                 </p>
               ) : (
@@ -654,19 +757,19 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                     className="flex min-h-[56px] items-center justify-between gap-3 px-4 py-3"
                   >
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-slate-100">
+                      <p className="text-sm font-medium text-[var(--color-text)]">
                         <span>{t.subject}</span>
-                        <span className="mx-2 text-cyan-400">→ {t.relation} →</span>
+                        <span className="mx-2 text-[var(--color-accent)]">→ {t.relation} →</span>
                         <span>{t.object}</span>
                       </p>
-                      <p className="mt-0.5 text-xs text-slate-400 tabular-nums">{t.source}</p>
+                      <p className="mt-0.5 text-xs text-[var(--color-text-secondary)] tabular-nums">{t.source}</p>
                     </div>
                     {(user.role === 'admin' || t.created_by === user.id) && (
                       <button
                         type="button"
                         onClick={() => void handleDeleteTriple(t.id)}
                         aria-label={`ลบความสัมพันธ์ ${t.subject}`}
-                        className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-rose-950/40 hover:text-rose-300"
+                        className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-[var(--color-text-muted)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -678,11 +781,11 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
           </section>
 
           <section>
-            <h3 className="mb-3 text-sm font-semibold text-cyan-300 tabular-nums">
+            <h3 className="mb-3 text-sm font-semibold text-[var(--color-accent)] tabular-nums">
               นิยามเวิร์กโฟลว์ที่ตรงกัน ({fuzzyGroups.length})
             </h3>
             {fuzzyGroups.length === 0 ? (
-              <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] p-4 text-sm text-slate-400">
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 text-sm text-[var(--color-text-secondary)]">
                 ไม่พบนิยามเวิร์กโฟลว์ที่ตรงกับ &ldquo;{trimmedQuery}&rdquo;
               </div>
             ) : (
@@ -690,11 +793,11 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                 {fuzzyGroups.map((grp) => (
                   <div
                     key={grp.id}
-                    className="flex flex-col justify-between rounded-2xl border border-slate-800/80 bg-[#0E172B] p-4"
+                    className="flex flex-col justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4"
                   >
                     <div>
-                      <h4 className="text-sm font-semibold text-slate-100">{grp.name}</h4>
-                      <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
+                      <h4 className="text-sm font-semibold text-[var(--color-text)]">{grp.name}</h4>
+                      <p className="mt-1.5 text-xs leading-relaxed text-[var(--color-text-secondary)]">
                         {grp.description}
                       </p>
                     </div>
@@ -702,7 +805,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                       type="button"
                       disabled={runningGroupId === grp.id}
                       onClick={() => void handleRunWorkflow(grp.id)}
-                      className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-[#070C18] text-xs font-medium text-cyan-300 transition-colors hover:border-cyan-500/60 hover:bg-[#131F38] disabled:opacity-50"
+                      className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] text-xs font-medium text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
                     >
                       <Play className="h-3.5 w-3.5" />
                       <span>{runningGroupId === grp.id ? 'กำลังทำงาน...' : 'เริ่มรันเวิร์กโฟลว์'}</span>
@@ -715,17 +818,17 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
 
           {fuzzyRuns.length > 0 && (
             <section>
-              <h3 className="mb-3 text-sm font-semibold text-cyan-300 tabular-nums">
+              <h3 className="mb-3 text-sm font-semibold text-[var(--color-accent)] tabular-nums">
                 ประวัติการรันที่ตรงกัน ({fuzzyRuns.length})
               </h3>
-              <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] divide-y divide-slate-800/80">
+              <div className="divide-y divide-[var(--color-border)] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
                 {fuzzyRuns.map((run) => (
                   <div key={run.id} className="p-4">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-semibold text-slate-100">{run.group_id}</span>
+                      <span className="text-sm font-semibold text-[var(--color-text)]">{run.group_id}</span>
                       {renderStatusLabel(run.status)}
                     </div>
-                    <p className="mt-1 text-xs text-slate-300">{run.summary}</p>
+                    <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{run.summary}</p>
                   </div>
                 ))}
               </div>
@@ -734,10 +837,10 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
 
           {fuzzyTraces.length > 0 && (
             <section>
-              <h3 className="mb-3 text-sm font-semibold text-cyan-300 tabular-nums">
+              <h3 className="mb-3 text-sm font-semibold text-[var(--color-accent)] tabular-nums">
                 บันทึกการตัดสินใจ (Reasoning Trace) ที่ตรงกัน ({fuzzyTraces.length})
               </h3>
-              <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B]">
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
                 {fuzzyTraces.map((item) => (
                   <ReasoningTraceRow key={item.id} item={item} />
                 ))}
@@ -747,15 +850,15 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
         </div>
       ) : tab === 'knowledge' ? (
         <div className="grid gap-6 lg:grid-cols-12">
-          <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 lg:col-span-5">
-            <h3 className="text-base font-semibold text-slate-100">บันทึกความสัมพันธ์ใหม่</h3>
-            <p className="mt-1 text-xs text-slate-400">
+          <section className="rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 lg:col-span-5">
+            <h3 className="text-base font-semibold text-[var(--color-text)]">บันทึกความสัมพันธ์ใหม่</h3>
+            <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
               เพิ่มความรู้ลงในกราฟ SQLite ภายในพร้อมตรวจสอบข้อขัดแย้งกับความจำเดิมอัตโนมัติ
             </p>
 
             <form onSubmit={handleAddTriple} className="mt-4 space-y-3.5">
               <div>
-                <label htmlFor="triple-subject" className="mb-1 block text-xs text-slate-300">
+                <label htmlFor="triple-subject" className="mb-1 block text-xs text-[var(--color-text-secondary)]">
                   ประธาน (Subject)
                 </label>
                 <input
@@ -765,12 +868,12 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                   value={subject}
                   onChange={(e) => setSubject(e.target.value)}
                   placeholder="ZYRQUEN"
-                  className="h-11 w-full rounded-xl border border-slate-800 bg-[#070C18] px-3 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                  className="h-11 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                 />
               </div>
 
               <div>
-                <label htmlFor="triple-relation" className="mb-1 block text-xs text-slate-300">
+                <label htmlFor="triple-relation" className="mb-1 block text-xs text-[var(--color-text-secondary)]">
                   ความสัมพันธ์ (Relation)
                 </label>
                 <input
@@ -780,12 +883,12 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                   value={relation}
                   onChange={(e) => setRelation(e.target.value)}
                   placeholder="บังคับใช้"
-                  className="h-11 w-full rounded-xl border border-slate-800 bg-[#070C18] px-3 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                  className="h-11 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                 />
               </div>
 
               <div>
-                <label htmlFor="triple-object" className="mb-1 block text-xs text-slate-300">
+                <label htmlFor="triple-object" className="mb-1 block text-xs text-[var(--color-text-secondary)]">
                   กรรม (Object)
                 </label>
                 <input
@@ -795,12 +898,12 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                   value={objectVal}
                   onChange={(e) => setObjectVal(e.target.value)}
                   placeholder="Approval Gate"
-                  className="h-11 w-full rounded-xl border border-slate-800 bg-[#070C18] px-3 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                  className="h-11 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                 />
               </div>
 
               {contradictionWarning && (
-                <div className="flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-950/30 p-3 text-xs text-amber-200">
+                <div className="flex items-start gap-2 rounded-xl border border-[var(--color-warning)]/40 bg-[var(--color-warning-bg)] p-3 text-xs text-[var(--color-warning)]">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                   <span>{contradictionWarning}</span>
                 </div>
@@ -808,7 +911,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
 
               <button
                 type="submit"
-                className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-medium text-white hover:bg-blue-500"
+                className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] text-sm font-medium text-white hover:bg-[var(--color-primary-hover)]"
               >
                 <Plus className="h-4 w-4" />
                 <span>เพิ่มความจำ</span>
@@ -817,11 +920,11 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
           </section>
 
           <section className="lg:col-span-7">
-            <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] divide-y divide-slate-800/80">
+            <div className="divide-y divide-[var(--color-border)] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
               {loading ? (
-                <div className="p-6 text-sm text-slate-400">กำลังโหลดกราฟความรู้...</div>
+                <div className="p-6 text-sm text-[var(--color-text-secondary)]">กำลังโหลดกราฟความรู้...</div>
               ) : fuzzyTriples.length === 0 ? (
-                <div className="p-6 text-sm text-slate-400">
+                <div className="p-6 text-sm text-[var(--color-text-secondary)]">
                   {searchQuery
                     ? `ไม่พบความสัมพันธ์ที่ตรงกับ "${searchQuery}"`
                     : 'ยังไม่มีข้อมูลในกราฟความรู้ คุณสามารถสอนในเวิร์กสเปซหรือเพิ่มจากแบบฟอร์มด้านซ้าย'}
@@ -833,12 +936,12 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                     className="flex min-h-[60px] items-center justify-between gap-3 px-4 py-3"
                   >
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-slate-100">
+                      <p className="text-sm font-medium text-[var(--color-text)]">
                         <span>{t.subject}</span>
-                        <span className="mx-2 text-cyan-400">→ {t.relation} →</span>
+                        <span className="mx-2 text-[var(--color-accent)]">→ {t.relation} →</span>
                         <span>{t.object}</span>
                       </p>
-                      <p className="mt-0.5 text-xs text-slate-400 tabular-nums">
+                      <p className="mt-0.5 text-xs text-[var(--color-text-secondary)] tabular-nums">
                         {t.source} · {new Date(t.created_at).toLocaleDateString('th-TH')}
                       </p>
                     </div>
@@ -847,7 +950,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                         type="button"
                         onClick={() => void handleDeleteTriple(t.id)}
                         aria-label={`ลบความสัมพันธ์ ${t.subject}`}
-                        className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-rose-950/40 hover:text-rose-300"
+                        className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-[var(--color-text-muted)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -865,16 +968,16 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
             {fuzzyGroups.map((grp) => (
               <div
                 key={grp.id}
-                className="flex flex-col justify-between rounded-2xl border border-slate-800/80 bg-[#0E172B] p-4"
+                className="flex flex-col justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4"
               >
                 <div>
                   <div className="flex items-start justify-between gap-2">
-                    <h3 className="text-sm font-semibold text-slate-100">{grp.name}</h3>
+                    <h3 className="text-sm font-semibold text-[var(--color-text)]">{grp.name}</h3>
                   </div>
-                  <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
+                  <p className="mt-1.5 text-xs leading-relaxed text-[var(--color-text-secondary)]">
                     {grp.description}
                   </p>
-                  <p className="mt-3 text-[11px] text-slate-500">
+                  <p className="mt-3 text-[11px] text-[var(--color-text-muted)]">
                     {grp.requires_approval ? 'ต้องผ่าน Approval Gate' : 'ทำงานอัตโนมัติได้ทันที'} ·{' '}
                     <span className="tabular-nums">{grp.stages.length} ขั้นตอน</span>
                   </p>
@@ -884,7 +987,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                   type="button"
                   disabled={runningGroupId === grp.id}
                   onClick={() => void handleRunWorkflow(grp.id)}
-                  className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-[#070C18] text-xs font-medium text-cyan-300 transition-colors hover:border-cyan-500/60 hover:bg-[#131F38] disabled:opacity-50"
+                  className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] text-xs font-medium text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
                 >
                   <Play className="h-3.5 w-3.5" />
                   <span>{runningGroupId === grp.id ? 'กำลังทำงาน...' : 'เริ่มรันเวิร์กโฟลว์'}</span>
@@ -895,12 +998,12 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
 
           {/* Recent Workflow Executions */}
           <section>
-            <h3 className="mb-3 text-base font-semibold text-slate-100">
+            <h3 className="mb-3 text-base font-semibold text-[var(--color-text)]">
               ประวัติการรันเวิร์กโฟลว์ล่าสุด
             </h3>
-            <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] divide-y divide-slate-800/80">
+            <div className="divide-y divide-[var(--color-border)] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
               {fuzzyRuns.length === 0 ? (
-                <div className="p-6 text-sm text-slate-400">
+                <div className="p-6 text-sm text-[var(--color-text-secondary)]">
                   {searchQuery
                     ? `ไม่พบประวัติเวิร์กโฟลว์ที่ตรงกับ "${searchQuery}"`
                     : 'ยังไม่มีการรันเวิร์กโฟลว์ เลือกกลุ่มงานด้านบนเพื่อตรวจสอบสถานะจริงของระบบ'}
@@ -917,31 +1020,31 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                     <div key={run.id} className="p-4 sm:p-5">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-3">
-                          <span className="text-sm font-semibold text-slate-100">
+                          <span className="text-sm font-semibold text-[var(--color-text)]">
                             {run.group_id}
                           </span>
                           {renderStatusLabel(run.status)}
                         </div>
-                        <span className="text-xs text-slate-400 tabular-nums">
+                        <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
                           {new Date(run.created_at).toLocaleString('th-TH')}
                         </span>
                       </div>
-                      <p className="mt-1.5 text-sm text-slate-300">{run.summary}</p>
+                      <p className="mt-1.5 text-sm text-[var(--color-text-secondary)]">{run.summary}</p>
                       {stages.length > 0 && (
                         <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                           {stages.map((st) => (
                             <div
                               key={st.stage}
-                              className="rounded-xl border border-slate-800/80 bg-[#070C18] px-3 py-2"
+                              className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
                             >
                               <div className="flex items-center justify-between gap-2">
-                                <span className="font-mono text-[11px] text-slate-300">
+                                <span className="font-mono text-[11px] text-[var(--color-text)]">
                                   {st.stage}
                                 </span>
                                 {renderStatusLabel(st.status)}
                               </div>
                               {st.detail && (
-                                <p className="mt-1 text-[11px] text-slate-400">{st.detail}</p>
+                                <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{st.detail}</p>
                               )}
                             </div>
                           ))}
@@ -958,10 +1061,10 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
           <section aria-label="บันทึกการตัดสินใจย้อนหลังของแกนสมอง">
             <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <h3 className="text-base font-semibold text-slate-100">
+                <h3 className="text-base font-semibold text-[var(--color-text)]">
                   บันทึกการตัดสินใจย้อนหลัง (Reasoning Trace)
                 </h3>
-                <p className="mt-0.5 text-xs text-slate-400">
+                <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                   ตรวจสอบเส้นทางแกนสมอง ลำดับสมการ/ตรรกะ หลักฐานกราฟความรู้ และสถานะ Native-Only ย้อนหลังของแต่ละคำตอบ
                 </p>
               </div>
@@ -970,7 +1073,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                   aria-label="กรองสถานะ Reasoning Trace"
                   value={traceStatusFilter}
                   onChange={(e) => setTraceStatusFilter(e.target.value)}
-                  className="h-9 rounded-xl border border-slate-800 bg-[#0E172B] px-3 text-xs text-slate-200 focus:border-cyan-400 focus:outline-none"
+                  className="h-9 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 text-xs text-[var(--color-text)] focus:border-[var(--color-focus)] focus:outline-none"
                 >
                   <option value="ALL">ทุกสถานะ ({reasoningTraces.length})</option>
                   <option value="VERIFIED">VERIFIED</option>
@@ -982,7 +1085,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                   type="button"
                   disabled={refreshingTraces}
                   onClick={() => void handleRefreshTraces()}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-slate-800 bg-[#0E172B] px-3 text-xs font-medium text-cyan-300 hover:border-cyan-500/50 disabled:opacity-50"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-accent)] hover:border-[var(--color-accent)] disabled:opacity-50"
                 >
                   <RotateCw className={`h-3.5 w-3.5 ${refreshingTraces ? 'animate-spin' : ''}`} />
                   <span>รีเฟรช</span>
@@ -990,9 +1093,9 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
               </div>
             </div>
 
-            <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B]">
+            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
               {fuzzyTraces.length === 0 ? (
-                <div className="p-6 text-sm text-slate-400">
+                <div className="p-6 text-sm text-[var(--color-text-secondary)]">
                   {traceStatusFilter !== 'ALL'
                     ? `ไม่พบบันทึกการตัดสินใจที่มีสถานะ ${traceStatusFilter}`
                     : 'ยังไม่มีบันทึกการตัดสินใจในระบบ เมื่อสนทนากับ ZYRQUEN ในเวิร์กสเปซ ระบบจะบันทึก Trace การตัดสินใจไว้ตรวจสอบย้อนหลังที่นี่'}
@@ -1005,11 +1108,11 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
         </div>
       ) : (
         <div className="space-y-6">
-          <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5">
-            <h3 className="text-base font-semibold text-slate-100">
+          <section className="rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5">
+            <h3 className="text-base font-semibold text-[var(--color-text)]">
               สั่งงานภารกิจอัตโนมัติ (DAG Cognitive-Action Loop)
             </h3>
-            <p className="mt-1 text-xs text-slate-400">
+            <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
               ระบบจะแตกงานเป็นกราฟ DAG ตรวจสอบ pre/postconditions และพักรอที่ P5 Approval Gate อัตโนมัติเมื่อต้องสืบค้นเว็บ
             </p>
             <form onSubmit={handleLaunchMission} className="mt-4 flex flex-col gap-2 sm:flex-row">
@@ -1020,12 +1123,12 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                 onChange={(e) => setNewMissionGoal(e.target.value)}
                 placeholder="ระบุเป้าหมายภารกิจ (เช่น คำนวณ 3x + 7 = 22 หรือ ค้นคว้าเรื่อง SQLite)..."
                 aria-label="เป้าหมายภารกิจอัตโนมัติ"
-                className="h-11 flex-1 rounded-xl border border-slate-800 bg-[#070C18] px-3.5 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                className="h-11 flex-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
               />
               <button
                 type="submit"
                 disabled={launchingMission}
-                className="flex h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 whitespace-nowrap"
+                className="flex h-11 items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] px-5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-50 whitespace-nowrap"
               >
                 <Play className="h-4 w-4" />
                 <span>{launchingMission ? 'กำลังเริ่มภารกิจ...' : 'เริ่มภารกิจอัตโนมัติ'}</span>
@@ -1034,23 +1137,31 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
           </section>
 
           <div className="grid gap-6 lg:grid-cols-12">
-            <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] divide-y divide-slate-800/80 lg:col-span-5">
+            <section className="divide-y divide-[var(--color-border)] rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] lg:col-span-5">
               <div className="px-5 py-3.5">
-                <h3 className="text-sm font-semibold text-slate-100">
+                <h3 className="text-sm font-semibold text-[var(--color-text)]">
                   รายการภารกิจถาวร ({missions.length})
                 </h3>
               </div>
               {missions.length === 0 ? (
-                <p className="p-5 text-sm text-slate-400">ยังไม่มีภารกิจอัตโนมัติในระบบ</p>
+                <p className="p-5 text-sm text-[var(--color-text-secondary)]">ยังไม่มีภารกิจอัตโนมัติในระบบ</p>
               ) : (
                 missions.map((m) => {
                   const isSelected = selectedMissionId === m.id;
                   const canResume = !['COMPLETED', 'CANCELLED'].includes(m.status);
-                  const canCancel = ['AWAITING_APPROVAL', 'EXECUTING', 'PLAN_READY', 'RECOVERING', 'AWAITING_EVIDENCE'].includes(m.status);
+                  const canCancel = [
+                    'AWAITING_APPROVAL',
+                    'EXECUTING',
+                    'PLAN_READY',
+                    'RECOVERING',
+                    'AWAITING_EVIDENCE',
+                  ].includes(m.status);
                   return (
                     <div
                       key={m.id}
-                      className={`p-4 transition-colors ${isSelected ? 'bg-[#131F38]/70' : 'hover:bg-[#131F38]/40'}`}
+                      className={`p-4 transition-colors ${
+                        isSelected ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]/60'
+                      }`}
                     >
                       <button
                         type="button"
@@ -1059,11 +1170,11 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                       >
                         <div className="flex items-center justify-between gap-2">
                           {renderStatusLabel(m.status)}
-                          <span className="text-[11px] text-slate-400 tabular-nums">
+                          <span className="text-[11px] text-[var(--color-text-muted)] tabular-nums">
                             {new Date(m.created_at).toLocaleString('th-TH')}
                           </span>
                         </div>
-                        <p className="mt-1.5 text-sm font-medium text-slate-100 line-clamp-2">
+                        <p className="mt-1.5 line-clamp-2 text-sm font-medium text-[var(--color-text)]">
                           {m.goal}
                         </p>
                       </button>
@@ -1074,7 +1185,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                               type="button"
                               disabled={missionActionId === m.id}
                               onClick={() => void handleMissionAction(m.id, 'resume')}
-                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-[#070C18] px-3 text-xs font-medium text-cyan-300 hover:bg-[#131F38] disabled:opacity-50"
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-accent)] hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
                             >
                               <RotateCw className="h-3 w-3" />
                               <span>ดำเนินต่อ (Resume)</span>
@@ -1085,7 +1196,7 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                               type="button"
                               disabled={missionActionId === m.id}
                               onClick={() => void handleMissionAction(m.id, 'cancel')}
-                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-[#070C18] px-3 text-xs font-medium text-rose-300 hover:bg-rose-950/40 disabled:opacity-50"
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-3 text-xs font-medium text-[var(--color-danger)] hover:opacity-90 disabled:opacity-50"
                             >
                               <XCircle className="h-3 w-3" />
                               <span>ยกเลิกภารกิจ</span>
@@ -1099,21 +1210,21 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
               )}
             </section>
 
-            <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 lg:col-span-7">
+            <section className="rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 lg:col-span-7">
               {loadingMissionDetail ? (
-                <p className="text-sm text-slate-400">กำลังโหลดโครงสร้าง DAG และหลักฐาน...</p>
+                <p className="text-sm text-[var(--color-text-secondary)]">กำลังโหลดโครงสร้าง DAG และหลักฐาน...</p>
               ) : !selectedMissionDetail ? (
-                <p className="text-sm text-slate-400">
+                <p className="text-sm text-[var(--color-text-secondary)]">
                   เลือกภารกิจทางด้านซ้ายเพื่อดูโหนด DAG, จำนวนรอบ Retry, และหลักฐานจากอินเทอร์เน็ต
                 </p>
               ) : (
                 <div className="space-y-5">
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] pb-3">
                     <div>
-                      <p className="text-sm font-semibold text-slate-100">
+                      <p className="text-sm font-semibold text-[var(--color-text)]">
                         {selectedMissionDetail.mission.goal}
                       </p>
-                      <p className="mt-0.5 font-mono text-[11px] text-slate-400">
+                      <p className="mt-0.5 font-mono text-[11px] text-[var(--color-text-muted)]">
                         ID: {selectedMissionDetail.mission.id}
                       </p>
                     </div>
@@ -1121,11 +1232,11 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                   </div>
 
                   <div>
-                    <h4 className="mb-2.5 text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                    <h4 className="mb-2.5 text-xs font-semibold uppercase tracking-wider text-[var(--color-accent)]">
                       DAG Nodes ({selectedMissionDetail.nodes.length})
                     </h4>
                     {selectedMissionDetail.nodes.length === 0 ? (
-                      <p className="text-xs text-slate-400">ไม่มีข้อมูลโหนดย่อยสำหรับภารกิจนี้</p>
+                      <p className="text-xs text-[var(--color-text-secondary)]">ไม่มีข้อมูลโหนดย่อยสำหรับภารกิจนี้</p>
                     ) : (
                       <div className="space-y-2">
                         {selectedMissionDetail.nodes.map((nd) => {
@@ -1141,27 +1252,27 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                           return (
                             <div
                               key={nd.id}
-                              className="rounded-xl border border-slate-800 bg-[#070C18] p-3"
+                              className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3"
                             >
                               <div className="flex flex-wrap items-center justify-between gap-2">
-                                <span className="font-mono text-xs font-semibold text-slate-100">
+                                <span className="font-mono text-xs font-semibold text-[var(--color-text)]">
                                   {nd.task_id}
                                 </span>
                                 <div className="flex items-center gap-3">
-                                  <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+                                  <span className="font-mono text-[11px] text-[var(--color-text-muted)] tabular-nums">
                                     attempts: {nd.attempt_count}
                                   </span>
                                   {renderStatusLabel(nd.execution_status)}
                                 </div>
                               </div>
-                              <p className="mt-1 text-xs text-slate-300">{parsedTitle}</p>
+                              <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{parsedTitle}</p>
                               {deps.length > 0 && (
-                                <p className="mt-1 font-mono text-[11px] text-slate-500">
+                                <p className="mt-1 font-mono text-[11px] text-[var(--color-text-muted)]">
                                   deps: {deps.join(', ')}
                                 </p>
                               )}
                               {nd.last_error && (
-                                <p className="mt-1.5 text-xs text-rose-300">
+                                <p className="mt-1.5 text-xs text-[var(--color-danger)]">
                                   last_error: {nd.last_error}
                                 </p>
                               )}
@@ -1173,11 +1284,11 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                   </div>
 
                   <div>
-                    <h4 className="mb-2.5 text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                    <h4 className="mb-2.5 text-xs font-semibold uppercase tracking-wider text-[var(--color-accent)]">
                       Mission Evidence ({selectedMissionDetail.evidence.length})
                     </h4>
                     {selectedMissionDetail.evidence.length === 0 ? (
-                      <p className="text-xs text-slate-400">
+                      <p className="text-xs text-[var(--color-text-secondary)]">
                         ยังไม่มีหลักฐานภายนอกที่บันทึกไว้ในภารกิจนี้
                       </p>
                     ) : (
@@ -1185,15 +1296,15 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                         {selectedMissionDetail.evidence.map((ev) => (
                           <div
                             key={ev.id}
-                            className="rounded-xl border border-slate-800 bg-[#070C18] p-3 text-xs"
+                            className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs"
                           >
                             <div className="flex flex-wrap items-center justify-between gap-2">
-                              <span className="font-semibold text-slate-200">{ev.provider}</span>
-                              <span className="font-mono text-[11px] text-cyan-300">
+                              <span className="font-semibold text-[var(--color-text)]">{ev.provider}</span>
+                              <span className="font-mono text-[11px] text-[var(--color-accent)]">
                                 {ev.trust_grade}
                               </span>
                             </div>
-                            <p className="mt-1 flex items-center gap-1 break-all font-mono text-[11px] text-slate-400">
+                            <p className="mt-1 flex items-center gap-1 break-all font-mono text-[11px] text-[var(--color-text-secondary)]">
                               <ExternalLink className="h-3 w-3 shrink-0" />
                               <span>{ev.source_url}</span>
                             </p>

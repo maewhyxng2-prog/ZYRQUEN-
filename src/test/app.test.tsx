@@ -8,8 +8,11 @@ import App, {
   type MemorySnapshot,
   type ThreadLoadEntry,
 } from '../App';
+import { AuthGate } from '../components/AuthGate';
 import { MemoryWorkflowsView } from '../components/MemoryWorkflowsView';
 import { SettingsView } from '../components/SettingsView';
+import { SpacetimeFabric } from '../components/SpacetimeFabric';
+import { TemporalIntelligenceCore } from '../components/TemporalIntelligenceCore';
 import { ZyrquenEmblem } from '../components/ZyrquenEmblem';
 import { streamConversationMessage } from '../lib/api';
 
@@ -1805,5 +1808,257 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     });
     expect(screen.queryByText('math_ast')).not.toBeInTheDocument();
     expect(screen.getByText('unlearned_boundary')).toBeInTheDocument();
+  });
+
+  it('แสดงบันทึกเวลาทำงานราย Task และ Bottleneck Profiler ใน Reasoning Trace และแสดงกราฟ Recharts ในแท็บความเสถียรเนทีฟของผู้ดูแลระบบ', async () => {
+    const timedTrace = {
+      id: 'rt-timed-1',
+      user_id: 'u-admin',
+      conversation_id: 'conv-1',
+      message_id: 'msg-timed-1',
+      prompt: 'คำนวณ (12 + 8) * 3',
+      response_preview: '**ผลลัพธ์:** `60`',
+      mode: 'auto',
+      model_version: 'zyrquen-omega-v1',
+      status: 'VERIFIED',
+      engine_path_json: JSON.stringify(['math_ast']),
+      trace_json: JSON.stringify({
+        engine_path: ['math_ast'],
+        model_version: 'zyrquen-omega-v1',
+        latency_ms: 14.8,
+        external_models_used: false,
+        task_timings: [
+          { order: 1, task: 'autonomous_mission_detect', duration_ms: 0.4, matched: false, status: 'SKIPPED' },
+          { order: 2, task: 'math_ast', duration_ms: 14.4, matched: true, status: 'VERIFIED' },
+        ],
+        bottleneck_task: { task: 'math_ast', duration_ms: 14.4, share_pct: 97.3 },
+      }),
+      latency_ms: 14.8,
+      external_models_used: 0,
+      created_at: '2026-11-24T10:05:00Z',
+    };
+
+    mockFetch({
+      'GET /api/knowledge': () => new Response(JSON.stringify({ triples: [] }), { status: 200 }),
+      'GET /api/workflows': () =>
+        new Response(
+          JSON.stringify({ groups: [], runs: [], reasoning_traces: [timedTrace] }),
+          { status: 200 }
+        ),
+      'GET /api/autonomous/missions': () =>
+        new Response(JSON.stringify({ missions: [] }), { status: 200 }),
+      'GET /api/admin/overview': () =>
+        new Response(
+          JSON.stringify({
+            users: [],
+            pending_runs: [],
+            pending_tool_invocations: [],
+            pending_experiments: [],
+            tools: [],
+            audit_logs: [],
+            reasoning_traces: [timedTrace],
+            recent_api_usage: [],
+            system: {
+              python_version: '3.11.2',
+              platform: 'Linux',
+              cpu_count: 4,
+              load_1m: 0.1,
+              mem_total_mb: 4096,
+              mem_available_mb: 2048,
+              disk_free_gb: 20,
+              disk_total_gb: 50,
+              sqlite_db_kb: 32,
+            },
+          }),
+          { status: 200 }
+        ),
+    });
+
+    const memView = render(
+      <MemoryWorkflowsView
+        token="t-admin"
+        user={{
+          id: 'u-admin',
+          email: 'admin@zyrquen.local',
+          display_name: 'Admin',
+          role: 'admin',
+          created_at: '2026-11-24T00:00:00Z',
+        }}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /ระบบเวิร์กโฟลว์/i }));
+    expect(await screen.findByText(/Bottleneck: math_ast \(14\.4 ms\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/บันทึกเวลาทำงานแยกราย Task/i)).toBeInTheDocument();
+    expect(screen.getByText('autonomous_mission_detect')).toBeInTheDocument();
+    memView.unmount();
+
+    const onCapture = vi.fn();
+    render(
+      <SettingsView
+        token="t-admin"
+        user={{
+          id: 'u-admin',
+          email: 'admin@zyrquen.local',
+          display_name: 'Admin',
+          role: 'admin',
+          created_at: '2026-11-24T00:00:00Z',
+        }}
+        activeTab="admin"
+        autoExpandTrace={false}
+        defaultMode="auto"
+        perfSamples={[
+          {
+            timestamp: 1700000000000,
+            heapSupported: true,
+            usedJSHeapMB: 24.5,
+            totalJSHeapMB: 48,
+            jsHeapLimitMB: 2048,
+            streamBufferBytes: 1024,
+            messageCount: 2,
+            activeStreamCount: 0,
+            pendingThreadLoads: 0,
+            heapDeltaMB: 0,
+            leakWarning: false,
+          },
+          {
+            timestamp: 1700000002000,
+            heapSupported: true,
+            usedJSHeapMB: 26.2,
+            totalJSHeapMB: 48,
+            jsHeapLimitMB: 2048,
+            streamBufferBytes: 2048,
+            messageCount: 4,
+            activeStreamCount: 1,
+            pendingThreadLoads: 0,
+            heapDeltaMB: 1.7,
+            leakWarning: false,
+          },
+        ]}
+        clientLatencies={[
+          {
+            timestamp: 1700000002000,
+            label: 'คำนวณ (12 + 8) * 3',
+            endpoint: '/api/conversations/conv-1/stream',
+            latencyMs: 19.5,
+            status: 'VERIFIED',
+          },
+        ]}
+        cleanupVerification={{
+          clean: true,
+          activeCount: 0,
+          abortedCount: 1,
+          leakedRequestIds: [],
+          checkedAt: 1700000002000,
+        }}
+        onCapturePerfSample={onCapture}
+        onChangeTab={vi.fn()}
+        onUpdatePreferences={vi.fn()}
+        onLogout={vi.fn()}
+      />
+    );
+
+    const stabilityTab = await screen.findByRole('tab', {
+      name: /ความเสถียรเนทีฟ \(PerformanceMonitor\)/i,
+    });
+    fireEvent.click(stabilityTab);
+
+    expect(
+      await screen.findByText(/ความเสถียรสภาพแวดล้อมเนทีฟ \(PerformanceMonitor & Bottleneck Telemetry\)/i)
+    ).toBeInTheDocument();
+    expect(screen.getByText('26.2 MB')).toBeInTheDocument();
+    expect(screen.getByText('STABLE')).toBeInTheDocument();
+    expect(screen.getByTestId('recharts-heap-chart')).toBeInTheDocument();
+    expect(screen.getByTestId('recharts-latency-chart')).toBeInTheDocument();
+    expect(screen.getByTestId('recharts-bottleneck-chart')).toBeInTheDocument();
+    expect(screen.getAllByText('math_ast').length).toBeGreaterThanOrEqual(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'สุ่มเก็บเมตริกทันที' }));
+    expect(onCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('แสดงผล TemporalIntelligenceCore, SpacetimeFabric, IntersectionObserver pause และสลับธีม Neural Aurora Dark/Light', () => {
+    window.localStorage.removeItem('zyrquen_theme');
+    document.documentElement.classList.remove('light', 'dark');
+
+    // Mock IntersectionObserver to verify offscreen animation pause
+    let triggerIntersect: ((entries: IntersectionObserverEntry[]) => void) | null = null;
+    const prevIO = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class MockIO {
+      constructor(cb: IntersectionObserverCallback) {
+        triggerIntersect = (entries) => cb(entries, this as unknown as IntersectionObserver);
+      }
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+      takeRecords = () => [];
+      root = null;
+      rootMargin = '';
+      thresholds = [];
+    } as unknown as typeof IntersectionObserver;
+
+    try {
+      const { container, rerender } = render(
+        <>
+          <TemporalIntelligenceCore variant="prominent" size={148} active />
+          <TemporalIntelligenceCore variant="ambient" size={40} />
+          <SpacetimeFabric density="expansive" />
+        </>
+      );
+
+      const cores = container.querySelectorAll('[data-temporal-core]');
+      expect(cores).toHaveLength(2);
+      expect(cores[0]).toHaveAttribute('data-temporal-core', 'prominent');
+      expect(cores[0]).toHaveAttribute('data-active', 'true');
+      expect(cores[0].className).toContain('zyrq-temporal-active');
+      expect(cores[1]).toHaveAttribute('data-temporal-core', 'ambient');
+
+      // Check all 6 animation classes & unique SVG defs IDs
+      expect(container.querySelector('.zyrq-temporal-pulse')).toBeTruthy();
+      expect(container.querySelector('.zyrq-temporal-ring-cw')).toBeTruthy();
+      expect(container.querySelector('.zyrq-temporal-ring-ccw')).toBeTruthy();
+      expect(container.querySelector('.zyrq-temporal-energy-path')).toBeTruthy();
+      expect(container.querySelector('.zyrq-spacetime-warp')).toBeTruthy();
+      expect(container.querySelector('.zyrq-temporal-particle-track-a')).toBeTruthy();
+
+      const gradIds = Array.from(container.querySelectorAll('linearGradient[id]')).map((el) =>
+        el.getAttribute('id')
+      );
+      expect(new Set(gradIds).size).toBe(gradIds.length);
+
+      const fabric = container.querySelector('[data-spacetime-fabric="expansive"]');
+      expect(fabric).toBeTruthy();
+      expect(fabric).toHaveAttribute('data-offscreen', 'false');
+
+      act(() => {
+        triggerIntersect?.([{ isIntersecting: false } as IntersectionObserverEntry]);
+      });
+      expect(fabric).toHaveAttribute('data-offscreen', 'true');
+
+      // Switch to compact AuthGate mode on สมัครสมาชิก & test Light/Dark theme persistence
+      rerender(
+        <AuthGate
+          authStatus={{ initialized: true, userCount: 1, envPasscodeConfigured: false }}
+          onAuthenticated={vi.fn()}
+        />
+      );
+      expect(document.querySelector('[data-temporal-core="prominent"]')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'สมัครสมาชิก' }));
+      expect(document.querySelector('[data-temporal-core="compact"]')).toBeTruthy();
+
+      const toggleBtn = screen.getByRole('button', { name: /เปลี่ยนเป็นโหมดสว่าง/i });
+      fireEvent.click(toggleBtn);
+      expect(document.documentElement.classList.contains('light')).toBe(true);
+      expect(document.documentElement.dataset.theme).toBe('light');
+      expect(window.localStorage.getItem('zyrquen_theme')).toBe('light');
+
+      const backToDarkBtn = screen.getByRole('button', { name: /เปลี่ยนเป็นโหมดมืด/i });
+      fireEvent.click(backToDarkBtn);
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+      expect(document.documentElement.dataset.theme).toBe('dark');
+      expect(window.localStorage.getItem('zyrquen_theme')).toBe('dark');
+    } finally {
+      globalThis.IntersectionObserver = prevIO;
+    }
   });
 });

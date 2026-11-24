@@ -623,12 +623,15 @@ def execute_dag_loop(
             node["execution_status"] = "EXECUTING"
             retry_cfg = node.get("retry_policy") or {}
             max_attempts = max(1, int(retry_cfg.get("max_attempts", 1)))
+            node_started_at = time.perf_counter()
+            attempt_durations: list[float] = list(node.get("attempt_durations_ms") or [])
 
             use_approval = approved_by if node["task_id"] == resume_node_id else None
             use_inv_id = existing_invocation_id if node["task_id"] == resume_node_id else None
 
             while node["attempts"] < max_attempts:
                 node["attempts"] += 1
+                attempt_t0 = time.perf_counter()
                 try:
                     out = _execute_single_node(
                         conn,
@@ -642,6 +645,15 @@ def execute_dag_loop(
                     )
                 except Exception as exc:
                     out = {"status": "FAILED", "error": f"{type(exc).__name__}: {exc}"}
+                attempt_ms = round((time.perf_counter() - attempt_t0) * 1000, 3)
+                attempt_durations.append(attempt_ms)
+                node["attempt_durations_ms"] = attempt_durations
+                node["duration_ms"] = round(
+                    float(node.get("duration_ms") or 0.0) + (time.perf_counter() - node_started_at) * 1000
+                    if attempt_ms == 0.0
+                    else sum(attempt_durations),
+                    3,
+                )
 
                 node["output_data"] = out
                 if out.get("invocation_id"):

@@ -42,34 +42,34 @@ export function ZyrquenEmblem({
     >
       <defs>
         <linearGradient id={borderId} x1="2" y1="2" x2="34" y2="34" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#38BDF8" stopOpacity="0.82" />
-          <stop offset="0.5" stopColor="#22D3EE" stopOpacity="0.65" />
-          <stop offset="1" stopColor="#8B5CF6" stopOpacity="0.82" />
+          <stop stopColor="#5865F2" stopOpacity="0.88" />
+          <stop offset="0.5" stopColor="#21D4FD" stopOpacity="0.72" />
+          <stop offset="1" stopColor="#B47AFF" stopOpacity="0.88" />
         </linearGradient>
         <linearGradient id={strokeId} x1="9" y1="9" x2="27" y2="27" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#22D3EE" />
-          <stop offset="0.52" stopColor="#3B82F6" />
-          <stop offset="1" stopColor="#A78BFA" />
+          <stop stopColor="#21D4FD" />
+          <stop offset="0.52" stopColor="#5865F2" />
+          <stop offset="1" stopColor="#B47AFF" />
         </linearGradient>
         <linearGradient id={pulseId} x1="10" y1="11" x2="26" y2="25" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#CFFAFE" />
-          <stop offset="0.5" stopColor="#FFFFFF" />
-          <stop offset="1" stopColor="#DDD6FE" />
+          <stop stopColor="#21D4FD" />
+          <stop offset="0.5" stopColor="#F4F7FF" />
+          <stop offset="1" stopColor="#B47AFF" />
         </linearGradient>
         <radialGradient id={glowId} cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#22D3EE" stopOpacity="0.42" />
-          <stop offset="55%" stopColor="#3B82F6" stopOpacity="0.16" />
-          <stop offset="100%" stopColor="#0B1325" stopOpacity="0" />
+          <stop offset="0%" stopColor="#21D4FD" stopOpacity="0.42" />
+          <stop offset="55%" stopColor="#5865F2" stopOpacity="0.18" />
+          <stop offset="100%" stopColor="#090E1F" stopOpacity="0" />
         </radialGradient>
         <linearGradient id={orbitId} x1="5" y1="5" x2="31" y2="31" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#22D3EE" stopOpacity="0.72" />
-          <stop offset="0.5" stopColor="#3B82F6" stopOpacity="0.08" />
-          <stop offset="1" stopColor="#8B5CF6" stopOpacity="0.72" />
+          <stop stopColor="#21D4FD" stopOpacity="0.78" />
+          <stop offset="0.5" stopColor="#5865F2" stopOpacity="0.12" />
+          <stop offset="1" stopColor="#B47AFF" stopOpacity="0.78" />
         </linearGradient>
         <linearGradient id={orbitRevId} x1="31" y1="5" x2="5" y2="31" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#A78BFA" stopOpacity="0.5" />
-          <stop offset="0.5" stopColor="#22D3EE" stopOpacity="0.05" />
-          <stop offset="1" stopColor="#38BDF8" stopOpacity="0.5" />
+          <stop stopColor="#B47AFF" stopOpacity="0.56" />
+          <stop offset="0.5" stopColor="#21D4FD" stopOpacity="0.08" />
+          <stop offset="1" stopColor="#5865F2" stopOpacity="0.56" />
         </linearGradient>
         <filter id={bloomId} x="-35%" y="-35%" width="170%" height="170%">
           <feGaussianBlur stdDeviation="1.25" result="blur" />
@@ -87,7 +87,7 @@ export function ZyrquenEmblem({
         width="33"
         height="33"
         rx="10"
-        fill="#0B1325"
+        fill="#090E1F"
         stroke={`url(#${borderId})`}
         strokeWidth="1.4"
       />

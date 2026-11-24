@@ -111,9 +111,9 @@ export function CommandPalette({
     if (user.role === 'admin') {
       base.push({
         id: 'nav-settings-admin',
-        label: 'ไปที่ ผู้ดูแลระบบ (Admin & Approval Gate)',
+        label: 'ไปที่ ผู้ดูแลระบบ (Admin, Approval Gate & ความเสถียร)',
         hint: 'Admin',
-        keywords: 'admin approval gate governance audit ผู้ดูแลระบบ อนุมัติ',
+        keywords: 'admin approval gate governance audit stability performance monitor heap latency ผู้ดูแลระบบ อนุมัติ ความเสถียร',
         icon: Shield,
         onSelect: () => onNavigate('settings', 'admin'),
       });
@@ -193,10 +193,10 @@ export function CommandPalette({
         aria-label="แผงคำสั่งด่วน (Command Palette)"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
-        className="w-full max-w-lg overflow-hidden rounded-2xl border border-slate-700/80 bg-[#0E172B] shadow-2xl"
+        className="zyrq-glow w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] shadow-2xl"
       >
-        <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-3">
-          <Search className="h-4 w-4 shrink-0 text-cyan-300" />
+        <div className="flex items-center gap-3 border-b border-[var(--color-border)] px-4 py-3">
+          <Search className="h-4 w-4 shrink-0 text-[var(--color-accent)]" />
           <input
             ref={inputRef}
             type="text"
@@ -207,13 +207,13 @@ export function CommandPalette({
             }}
             placeholder="พิมพ์คำสั่ง ข้ามหน้า หรือค้นหาบทสนทนา..."
             aria-label="ค้นหาคำสั่งด่วน"
-            className="flex-1 bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
+            className="flex-1 bg-transparent text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
           />
           <button
             type="button"
             onClick={onClose}
             aria-label="ปิดแผงคำสั่งด่วน"
-            className="flex min-h-[32px] min-w-[32px] items-center justify-center rounded-lg text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+            className="flex min-h-[32px] min-w-[32px] items-center justify-center rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
           >
             <X className="h-4 w-4" />
           </button>
@@ -221,7 +221,7 @@ export function CommandPalette({
 
         <div className="max-h-[55dvh] overflow-y-auto p-2">
           {filtered.length === 0 ? (
-            <p className="px-3 py-6 text-center text-xs text-slate-400">
+            <p className="px-3 py-6 text-center text-xs text-[var(--color-text-secondary)]">
               ไม่พบคำสั่งที่ตรงกับ &ldquo;{query}&rdquo;
             </p>
           ) : (
@@ -238,14 +238,16 @@ export function CommandPalette({
                     onClose();
                   }}
                   className={`flex min-h-[44px] w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left transition-colors ${
-                    isSelected ? 'bg-blue-600/25 text-cyan-200' : 'text-slate-200 hover:bg-slate-800/60'
+                    isSelected
+                      ? 'bg-[var(--color-primary)]/20 text-[var(--color-accent)]'
+                      : 'text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]'
                   }`}
                 >
                   <div className="flex min-w-0 items-center gap-3">
-                    <Icon className="h-4 w-4 shrink-0 text-cyan-300" />
+                    <Icon className="h-4 w-4 shrink-0 text-[var(--color-accent)]" />
                     <span className="truncate text-sm font-medium">{item.label}</span>
                   </div>
-                  <span className="shrink-0 font-mono text-[11px] text-slate-400 tabular-nums">
+                  <span className="shrink-0 font-mono text-[11px] text-[var(--color-text-muted)] tabular-nums">
                     {item.hint}
                   </span>
                 </button>
@@ -254,9 +256,9 @@ export function CommandPalette({
           )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-slate-800/80 bg-[#070C18] px-4 py-2 text-[11px] text-slate-400">
+        <div className="flex items-center justify-between border-t border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-[11px] text-[var(--color-text-secondary)]">
           <span className="flex items-center gap-1.5">
-            <Command className="h-3 w-3 text-cyan-300" />
+            <Command className="h-3 w-3 text-[var(--color-accent)]" />
             <span>↑↓ เลือก · Enter เปิด · Esc ปิด</span>
           </span>
           <span className="font-mono">Ctrl+K / ⌘K</span>

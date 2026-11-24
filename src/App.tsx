@@ -9,17 +9,22 @@ import { MemoryWorkflowsView } from './components/MemoryWorkflowsView';
 import { SettingsView } from './components/SettingsView';
 import { WorkspaceView } from './components/WorkspaceView';
 import { apiRequest, ApiError, streamConversationMessage } from './lib/api';
+import { useZyrquenTheme } from './lib/theme';
 import type {
   AppScreen,
   AuthStatus,
+  ClientLatencySample,
   ConversationSummary,
   HomeSummary,
+  MemorySnapshot,
   MessageItem,
   ModelVariantId,
   ReasoningMode,
   SettingsTab,
+  ThreadCleanupVerification,
   User,
 } from './types';
+export type { MemorySnapshot, ThreadCleanupVerification } from './types';
 
 function readRouteFromUrl(): {
   screen: AppScreen;
@@ -58,34 +63,12 @@ function buildUrl(
   return qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
 }
 
-export interface MemorySnapshot {
-  timestamp: number;
-  heapSupported: boolean;
-  usedJSHeapMB: number | null;
-  totalJSHeapMB: number | null;
-  jsHeapLimitMB: number | null;
-  streamBufferBytes: number;
-  messageCount: number;
-  activeStreamCount: number;
-  pendingThreadLoads: number;
-  heapDeltaMB: number | null;
-  leakWarning: boolean;
-}
-
 export interface ThreadLoadEntry {
   requestId: number;
   conversationId: string;
   controller: AbortController;
   cleanedUp: boolean;
   settled: boolean;
-}
-
-export interface ThreadCleanupVerification {
-  clean: boolean;
-  activeCount: number;
-  abortedCount: number;
-  leakedRequestIds: number[];
-  checkedAt: number;
 }
 
 interface BrowserPerformanceMemory {
@@ -299,6 +282,7 @@ export function PerformanceMonitor({
 }
 
 export default function App() {
+  useZyrquenTheme();
   const initialRoute = readRouteFromUrl();
 
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
@@ -339,11 +323,40 @@ export default function App() {
   const [isOnline, setIsOnline] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
+  const [perfSamples, setPerfSamples] = useState<MemorySnapshot[]>([]);
+  const [clientLatencies, setClientLatencies] = useState<ClientLatencySample[]>([]);
+  const [cleanupVerification, setCleanupVerification] = useState<ThreadCleanupVerification | null>(null);
   const skipNextLoadCidRef = useRef<string | null>(null);
   const activeThreadRequestsRef = useRef<Map<number, ThreadLoadEntry>>(new Map());
   const threadRequestSeqRef = useRef(0);
   const activeStreamControllerRef = useRef<AbortController | null>(null);
   const lastCleanupVerificationRef = useRef<ThreadCleanupVerification | null>(null);
+  const baselineHeapRef = useRef<number | null>(null);
+
+  const handlePerfSample = useCallback((snapshot: MemorySnapshot) => {
+    setPerfSamples((prev) => {
+      const next = [...prev, snapshot];
+      return next.length > PERF_SAMPLE_LIMIT ? next.slice(next.length - PERF_SAMPLE_LIMIT) : next;
+    });
+    if (lastCleanupVerificationRef.current) {
+      setCleanupVerification(lastCleanupVerificationRef.current);
+    }
+  }, []);
+
+  const handleCapturePerfSampleNow = useCallback(() => {
+    const snap = readRuntimeMemorySnapshot({
+      streamingContent,
+      messageCount: messages.length,
+      activeStreamCount: activeStreamControllerRef.current ? 1 : 0,
+      pendingThreadLoads: activeThreadRequestsRef.current.size,
+      baselineHeapMB: baselineHeapRef.current,
+    });
+    if (baselineHeapRef.current === null && snap.usedJSHeapMB !== null) {
+      baselineHeapRef.current = snap.usedJSHeapMB;
+      snap.heapDeltaMB = 0;
+    }
+    handlePerfSample(snap);
+  }, [handlePerfSample, messages.length, streamingContent]);
 
   const pushRoute = useCallback(
     (nextScreen: AppScreen, nextCid: string | null = null, nextTab: SettingsTab = 'account') => {
@@ -636,6 +649,7 @@ export default function App() {
         pushRoute('workspace', targetCid, settingsTab);
       }
 
+      const requestStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
       const res = await streamConversationMessage<{
         title: string;
         user_message: MessageItem;
@@ -655,6 +669,24 @@ export default function App() {
       });
 
       if (streamController.signal.aborted) return;
+      const elapsedMs =
+        Math.round(
+          ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - requestStart) *
+            100
+        ) / 100;
+      setClientLatencies((prev) => {
+        const next: ClientLatencySample[] = [
+          ...prev,
+          {
+            timestamp: Date.now(),
+            label: (content || 'attachment').slice(0, 28),
+            endpoint: `/api/conversations/${targetCid}/stream`,
+            latencyMs: elapsedMs,
+            status: res.assistant_message.status,
+          },
+        ];
+        return next.length > 40 ? next.slice(next.length - 40) : next;
+      });
       setActiveTitle(res.title);
       setNativeReady(true);
       setMessages((prev) => [...prev, res.user_message, res.assistant_message]);
@@ -785,15 +817,15 @@ export default function App() {
     return (
       <div
         role="alert"
-        className="flex min-h-[100dvh] flex-col items-center justify-center bg-[#060A14] px-6 text-center text-slate-100"
+        className="flex min-h-[100dvh] flex-col items-center justify-center bg-[var(--color-bg)] px-6 text-center text-[var(--color-text)]"
       >
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-rose-500/40 bg-rose-950/30 text-rose-300">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] text-[var(--color-danger)]">
           <WifiOff className="h-6 w-6" />
         </div>
-        <h2 className="mt-4 text-xl font-bold tracking-tight text-slate-50">
+        <h2 className="mt-4 text-xl font-bold tracking-tight text-[var(--color-text)]">
           ต้องเชื่อมต่ออินเทอร์เน็ตเท่านั้น
         </h2>
-        <p className="mt-2 max-w-sm text-sm text-slate-400">
+        <p className="mt-2 max-w-sm text-sm text-[var(--color-text-secondary)]">
           ZYRQUEN Ω∞ ไม่รองรับการทำงานแบบออฟไลน์ กรุณาเชื่อมต่ออินเทอร์เน็ตเพื่อเข้าถึงแกนสมองและฐานข้อมูลบนเซิร์ฟเวอร์
         </p>
         <button
@@ -803,7 +835,7 @@ export default function App() {
             setIsOnline(nowOnline);
             if (nowOnline) void bootstrapAuthAndHealth();
           }}
-          className="mt-6 flex h-11 items-center justify-center rounded-xl bg-blue-600 px-5 text-sm font-medium text-white hover:bg-blue-500"
+          className="mt-6 flex h-11 items-center justify-center rounded-xl bg-[var(--color-primary)] px-5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)]"
         >
           ตรวจสอบการเชื่อมต่ออีกครั้ง
         </button>
@@ -816,19 +848,19 @@ export default function App() {
       return (
         <div
           role="alert"
-          className="flex min-h-[100dvh] flex-col items-center justify-center bg-[#060A14] px-6 text-center text-slate-100"
+          className="flex min-h-[100dvh] flex-col items-center justify-center bg-[var(--color-bg)] px-6 text-center text-[var(--color-text)]"
         >
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-500/40 bg-amber-950/30 text-amber-300">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--color-warning)]/40 bg-[var(--color-warning-bg)] text-[var(--color-warning)]">
             <WifiOff className="h-6 w-6" />
           </div>
-          <h2 className="mt-4 text-xl font-bold tracking-tight text-slate-50">
+          <h2 className="mt-4 text-xl font-bold tracking-tight text-[var(--color-text)]">
             ไม่สามารถเชื่อมต่อกับระบบออนไลน์ได้
           </h2>
-          <p className="mt-2 max-w-sm text-sm text-slate-400">{connectionError}</p>
+          <p className="mt-2 max-w-sm text-sm text-[var(--color-text-secondary)]">{connectionError}</p>
           <button
             type="button"
             onClick={() => void bootstrapAuthAndHealth()}
-            className="mt-6 flex h-11 items-center justify-center rounded-xl bg-blue-600 px-5 text-sm font-medium text-white hover:bg-blue-500"
+            className="mt-6 flex h-11 items-center justify-center rounded-xl bg-[var(--color-primary)] px-5 text-sm font-medium text-white hover:bg-[var(--color-primary-hover)]"
           >
             เชื่อมต่อใหม่อีกครั้ง
           </button>
@@ -836,7 +868,7 @@ export default function App() {
       );
     }
     return (
-      <div className="flex min-h-[100dvh] items-center justify-center bg-[#060A14] text-sm text-slate-400">
+      <div className="flex min-h-[100dvh] items-center justify-center bg-[var(--color-bg)] text-sm text-[var(--color-text-secondary)]">
         กำลังเริ่มต้นแกนสมอง ZYRQUEN Ω∞...
       </div>
     );
@@ -917,63 +949,65 @@ export default function App() {
             />
           )}
 
+          {(screen === 'workspace' || (screen === 'settings' && settingsTab === 'admin' && user.role === 'admin')) && (
+            <PerformanceMonitor
+              active={screen === 'workspace' || (screen === 'settings' && settingsTab === 'admin' && user.role === 'admin')}
+              streaming={sending || streamingContent !== null}
+              streamingContent={streamingContent}
+              messageCount={messages.length}
+              getActiveStreamCount={() => (activeStreamControllerRef.current ? 1 : 0)}
+              getPendingThreadLoads={() => activeThreadRequestsRef.current.size}
+              getCleanupVerification={() => lastCleanupVerificationRef.current}
+              onSample={handlePerfSample}
+            />
+          )}
+
           {screen === 'workspace' && (
-            <>
-              <PerformanceMonitor
-                active={screen === 'workspace'}
-                streaming={sending || streamingContent !== null}
-                streamingContent={streamingContent}
-                messageCount={messages.length}
-                getActiveStreamCount={() => (activeStreamControllerRef.current ? 1 : 0)}
-                getPendingThreadLoads={() => activeThreadRequestsRef.current.size}
-                getCleanupVerification={() => lastCleanupVerificationRef.current}
-              />
-              <WorkspaceView
-                token={token}
-                conversations={conversations}
-                activeConversationId={activeConversationId}
-                activeTitle={activeTitle}
-                messages={messages}
-                loadingThread={loadingThread}
-                sending={sending}
-                streamingContent={streamingContent}
-                error={workspaceError}
-                autoExpandTrace={autoExpandTrace}
-                defaultMode={defaultMode}
-                defaultModelVariant={selectedModelVariant}
-                onSelectConversation={(cid) => {
-                  if (cid !== activeConversationId) {
-                    activeStreamControllerRef.current?.abort();
-                    activeStreamControllerRef.current = null;
-                  }
-                  pushRoute('workspace', cid, settingsTab);
-                }}
-                onNewConversation={() => void handleNewConversation()}
-                onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
-                onSendMessage={(content, mode, attachment, variant) =>
-                  sendMessageToConversation(
-                    activeConversationId,
-                    content,
-                    mode,
-                    attachment,
-                    variant || selectedModelVariant
-                  )
+            <WorkspaceView
+              token={token}
+              conversations={conversations}
+              activeConversationId={activeConversationId}
+              activeTitle={activeTitle}
+              messages={messages}
+              loadingThread={loadingThread}
+              sending={sending}
+              streamingContent={streamingContent}
+              error={workspaceError}
+              autoExpandTrace={autoExpandTrace}
+              defaultMode={defaultMode}
+              defaultModelVariant={selectedModelVariant}
+              onSelectConversation={(cid) => {
+                if (cid !== activeConversationId) {
+                  activeStreamControllerRef.current?.abort();
+                  activeStreamControllerRef.current = null;
                 }
-                onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
-                onRetryLast={
-                  lastFailedPrompt
-                    ? () =>
-                        void sendMessageToConversation(
-                          activeConversationId,
-                          lastFailedPrompt.content,
-                          lastFailedPrompt.mode,
-                          lastFailedPrompt.attachment,
-                          lastFailedPrompt.modelVariant || selectedModelVariant
-                        )
-                    : undefined
-                }
-              />
-            </>
+                pushRoute('workspace', cid, settingsTab);
+              }}
+              onNewConversation={() => void handleNewConversation()}
+              onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
+              onSendMessage={(content, mode, attachment, variant) =>
+                sendMessageToConversation(
+                  activeConversationId,
+                  content,
+                  mode,
+                  attachment,
+                  variant || selectedModelVariant
+                )
+              }
+              onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
+              onRetryLast={
+                lastFailedPrompt
+                  ? () =>
+                      void sendMessageToConversation(
+                        activeConversationId,
+                        lastFailedPrompt.content,
+                        lastFailedPrompt.mode,
+                        lastFailedPrompt.attachment,
+                        lastFailedPrompt.modelVariant || selectedModelVariant
+                      )
+                  : undefined
+              }
+            />
           )}
 
           {screen === 'memory' && <MemoryWorkflowsView token={token} user={user} />}
@@ -985,6 +1019,10 @@ export default function App() {
               activeTab={user.role !== 'admin' && settingsTab === 'admin' ? 'account' : settingsTab}
               autoExpandTrace={autoExpandTrace}
               defaultMode={defaultMode}
+              perfSamples={perfSamples}
+              clientLatencies={clientLatencies}
+              cleanupVerification={cleanupVerification}
+              onCapturePerfSample={handleCapturePerfSampleNow}
               onChangeTab={(nextTab) => pushRoute('settings', null, nextTab)}
               onUpdatePreferences={(prefs) => {
                 if (prefs.autoExpandTrace !== undefined) setAutoExpandTrace(prefs.autoExpandTrace);

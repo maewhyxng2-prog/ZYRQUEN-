@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { ArrowRight, Eye, EyeOff, KeyRound, ShieldCheck, UserPlus } from 'lucide-react';
+import { ArrowRight, Eye, EyeOff, KeyRound, Moon, ShieldCheck, Sun, UserPlus } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
+import { useZyrquenTheme } from '../lib/theme';
 import type { AuthStatus, User } from '../types';
-import { ZyrquenEmblem } from './ZyrquenEmblem';
+import { SpacetimeFabric } from './SpacetimeFabric';
+import { TemporalIntelligenceCore } from './TemporalIntelligenceCore';
 
 interface AuthGateProps {
   authStatus: AuthStatus;
@@ -10,6 +12,7 @@ interface AuthGateProps {
 }
 
 export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
+  const { theme, toggleTheme } = useZyrquenTheme();
   const [mode, setMode] = useState<'claim' | 'login' | 'register'>(
     authStatus.initialized ? 'login' : 'claim'
   );
@@ -74,45 +77,66 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
     }
   }
 
+  const isCompactHero = mode === 'register';
+
   return (
-    <div className="flex min-h-[100dvh] flex-col justify-center bg-[#060A14] px-4 py-8 sm:px-6">
-      <div className="mx-auto w-full max-w-md">
-        <div className="mb-8 flex flex-col items-start gap-4">
-          <div className="flex items-center gap-3.5">
-            <ZyrquenEmblem size={44} />
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight text-slate-50">ZYRQUEN</h1>
-              <p className="text-sm font-medium text-slate-200">ปัญญาประดิษฐ์พื้นฐานแบบอัตโนมัติ</p>
-              <p className="text-xs font-semibold tracking-wide text-cyan-300">
-                Autonomous Foundational Intelligence
-              </p>
-            </div>
-          </div>
-          <p className="text-sm leading-relaxed text-slate-300">
-            สถาปัตยกรรมปัญญาประดิษฐ์ที่มุ่งพัฒนาความสามารถด้านการรับรู้ การเรียนรู้ การสร้างและวิวัฒนาการขององค์ความรู้ การให้เหตุผล และการพัฒนาความสามารถของตนเอง
-          </p>
-          <p className="text-xs font-semibold tracking-wide text-slate-200">
-            การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง
-          </p>
-          <p className="text-xs leading-relaxed text-slate-400">
-            {mode === 'claim'
-              ? 'ตั้งค่าผู้ดูแลระบบเริ่มต้น หรือสมัครสมาชิกเพื่อเข้าถึงแกนปัญญาและกลไกการพัฒนาความสามารถของ ZYRQUEN'
-              : mode === 'register'
-                ? 'สมัครสมาชิกเพื่อเข้าถึงแกนปัญญาและกลไกการพัฒนาความสามารถของ ZYRQUEN'
-                : 'เข้าสู่ระบบเพื่อเข้าถึงแกนปัญญาและกลไกการพัฒนาความสามารถของ ZYRQUEN'}
-          </p>
+    <div className="relative flex min-h-[100dvh] flex-col justify-center overflow-hidden bg-[var(--color-bg)] px-4 py-8 text-[var(--color-text)] sm:px-6">
+      <SpacetimeFabric
+        density={isCompactHero ? 'minimal' : 'balanced'}
+        className="absolute inset-0"
+      />
+
+      <div className="relative z-10 mx-auto w-full max-w-md">
+        <div className="mb-4 flex items-center justify-end">
+          <button
+            type="button"
+            onClick={toggleTheme}
+            aria-label={theme === 'dark' ? 'เปลี่ยนเป็นโหมดสว่าง (Light Mode)' : 'เปลี่ยนเป็นโหมดมืด (Dark Mode)'}
+            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]/90 px-3 text-xs font-medium text-[var(--color-text-secondary)] backdrop-blur-sm transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            {theme === 'dark' ? (
+              <Sun className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+            ) : (
+              <Moon className="h-3.5 w-3.5 text-[var(--color-primary)]" />
+            )}
+            <span>{theme === 'dark' ? 'โหมดสว่าง' : 'โหมดมืด'}</span>
+          </button>
         </div>
 
-        <div className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-6 sm:p-7">
+        <div className="mb-6 flex flex-col items-center text-center">
+          <TemporalIntelligenceCore
+            variant={isCompactHero ? 'compact' : 'prominent'}
+            size={isCompactHero ? 92 : 148}
+            active={loading}
+          />
+          <p className="mt-2 font-mono text-[11px] font-semibold tracking-[0.22em] text-[var(--color-accent)] uppercase">
+            AUTONOMOUS FOUNDATIONAL INTELLIGENCE
+          </p>
+          <h1 className="mt-1 text-3xl font-bold tracking-tight text-[var(--color-text)]">
+            ZYRQUEN
+          </h1>
+          <p className="mt-1 text-sm font-medium text-[var(--color-text-secondary)]">
+            ปัญญาประดิษฐ์พื้นฐานแบบอัตโนมัติ — ปัญญาที่พัฒนาได้
+          </p>
+          {!isCompactHero && (
+            <p className="mt-2 max-w-sm text-xs leading-relaxed text-[var(--color-text-muted)]">
+              การคิดอย่างต่อเนื่อง · การเรียนรู้ · วิวัฒนาการความรู้ · การให้เหตุผล · การพัฒนาตนเอง
+            </p>
+          )}
+        </div>
+
+        <div className="zyrq-glow rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]/95 p-6 backdrop-blur-md sm:p-7">
+          <div className="mb-5 h-[2px] w-full rounded-full zyrq-brand-gradient-line opacity-80" aria-hidden="true" />
+
           {authStatus.initialized ? (
-            <div className="mb-6 grid grid-cols-2 gap-1 rounded-xl bg-[#070C18] p-1">
+            <div className="mb-6 grid grid-cols-2 gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
               <button
                 type="button"
                 onClick={() => switchMode('login')}
                 className={`min-h-[44px] rounded-lg px-3 text-sm font-medium transition-colors whitespace-nowrap ${
                   mode === 'login'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-400 hover:text-slate-200'
+                    ? 'bg-[var(--color-primary)] text-white'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                 }`}
               >
                 เข้าสู่ระบบ
@@ -122,8 +146,8 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                 onClick={() => switchMode('register')}
                 className={`min-h-[44px] rounded-lg px-3 text-sm font-medium transition-colors whitespace-nowrap ${
                   mode === 'register'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-400 hover:text-slate-200'
+                    ? 'bg-[var(--color-primary)] text-white'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                 }`}
               >
                 สมัครสมาชิก
@@ -131,7 +155,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
             </div>
           ) : (
             <div
-              className={`mb-6 grid gap-1 rounded-xl bg-[#070C18] p-1 ${
+              className={`mb-6 grid gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1 ${
                 authStatus.userCount > 0 ? 'grid-cols-3' : 'grid-cols-2'
               }`}
             >
@@ -140,8 +164,8 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                 onClick={() => switchMode('claim')}
                 className={`min-h-[44px] rounded-lg px-2.5 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                   mode === 'claim'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-400 hover:text-slate-200'
+                    ? 'bg-[var(--color-primary)] text-white'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                 }`}
               >
                 ตั้งค่าผู้ดูแล
@@ -151,8 +175,8 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                 onClick={() => switchMode('register')}
                 className={`min-h-[44px] rounded-lg px-2.5 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                   mode === 'register'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-400 hover:text-slate-200'
+                    ? 'bg-[var(--color-primary)] text-white'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                 }`}
               >
                 สมัครสมาชิก
@@ -163,8 +187,8 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                   onClick={() => switchMode('login')}
                   className={`min-h-[44px] rounded-lg px-2.5 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                     mode === 'login'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--color-primary)] text-white'
+                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                   }`}
                 >
                   เข้าสู่ระบบ
@@ -174,14 +198,14 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
           )}
 
           {mode === 'claim' && !authStatus.initialized && (
-            <div className="mb-5 flex items-center gap-2.5 text-sm font-medium text-cyan-300">
+            <div className="mb-5 flex items-center gap-2.5 text-sm font-medium text-[var(--color-accent)]">
               <ShieldCheck className="h-4 w-4 shrink-0" />
               <span>ตั้งค่าผู้ดูแลระบบเริ่มต้น</span>
             </div>
           )}
 
           {mode === 'register' && (
-            <div className="mb-5 flex items-center gap-2.5 text-sm font-medium text-cyan-300">
+            <div className="mb-5 flex items-center gap-2.5 text-sm font-medium text-[var(--color-accent)]">
               <UserPlus className="h-4 w-4 shrink-0" />
               <span>สมัครสมาชิกใหม่ (บัญชีผู้ใช้งานทั่วไป)</span>
             </div>
@@ -192,7 +216,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
               <div>
                 <label
                   htmlFor="zyrq-display-name"
-                  className="mb-1.5 block text-xs font-medium text-slate-300"
+                  className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]"
                 >
                   ชื่อที่แสดง
                 </label>
@@ -205,7 +229,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
                   placeholder={mode === 'claim' ? 'หัวหน้าทีมวิจัย' : 'ชื่อของคุณ (อย่างน้อย 2 ตัวอักษร)'}
-                  className="h-12 w-full rounded-xl border border-slate-800 bg-[#070C18] px-3.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                  className="h-12 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                 />
               </div>
             )}
@@ -213,7 +237,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
             <div>
               <label
                 htmlFor="zyrq-email"
-                className="mb-1.5 block text-xs font-medium text-slate-300"
+                className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]"
               >
                 อีเมล
               </label>
@@ -225,14 +249,14 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="operator@zyrquen.local"
-                className="h-12 w-full rounded-xl border border-slate-800 bg-[#070C18] px-3.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                className="h-12 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
               />
             </div>
 
             <div>
               <label
                 htmlFor="zyrq-password"
-                className="mb-1.5 block text-xs font-medium text-slate-300"
+                className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]"
               >
                 รหัสผ่าน
               </label>
@@ -247,13 +271,13 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="อย่างน้อย 8 ตัวอักษร"
-                  className="h-12 w-full rounded-xl border border-slate-800 bg-[#070C18] pl-3.5 pr-11 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                  className="h-12 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] pl-3.5 pr-11 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                 />
                 <button
                   type="button"
                   aria-label={showPassword ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
                   onClick={() => setShowPassword((prev) => !prev)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-400 hover:text-slate-200"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
@@ -264,7 +288,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
               <div>
                 <label
                   htmlFor="zyrq-confirm-password"
-                  className="mb-1.5 block text-xs font-medium text-slate-300"
+                  className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]"
                 >
                   ยืนยันรหัสผ่าน
                 </label>
@@ -278,7 +302,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder="กรอกรหัสผ่านซ้ำอีกครั้ง"
-                  className="h-12 w-full rounded-xl border border-slate-800 bg-[#070C18] px-3.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                  className="h-12 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                 />
               </div>
             )}
@@ -287,9 +311,9 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
               <div>
                 <label
                   htmlFor="zyrq-passcode"
-                  className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                  className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-[var(--color-text-secondary)]"
                 >
-                  <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
+                  <KeyRound className="h-3.5 w-3.5 text-[var(--color-accent)]" />
                   <span>รหัสยืนยันการตั้งค่าเซิร์ฟเวอร์</span>
                 </label>
                 <input
@@ -299,7 +323,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                   value={passcode}
                   onChange={(e) => setPasscode(e.target.value)}
                   placeholder="กรอก ZYRQUEN_ADMIN_PASSCODE ที่ตั้งไว้"
-                  className="h-12 w-full rounded-xl border border-slate-800 bg-[#070C18] px-3.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                  className="h-12 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                 />
               </div>
             )}
@@ -307,7 +331,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
             {error && (
               <div
                 role="alert"
-                className="rounded-xl border border-rose-500/40 bg-rose-950/40 px-3.5 py-2.5 text-sm text-rose-200"
+                className="rounded-xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-3.5 py-2.5 text-sm text-[var(--color-danger)]"
               >
                 {error}
               </div>
@@ -316,7 +340,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
             <button
               type="submit"
               disabled={loading}
-              className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-semibold text-white transition-colors hover:bg-blue-500 disabled:opacity-60"
+              className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] px-5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-60"
             >
               <span>
                 {loading
@@ -331,7 +355,6 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
             </button>
           </form>
         </div>
-
       </div>
     </div>
   );

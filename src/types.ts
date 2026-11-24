@@ -78,6 +78,21 @@ export interface ConversationSmartSummary {
   };
 }
 
+export interface ReasoningTaskTiming {
+  order?: number;
+  task: string;
+  duration_ms: number;
+  matched: boolean;
+  status: string;
+  detail?: string;
+}
+
+export interface BottleneckTaskSummary {
+  task: string;
+  duration_ms: number;
+  share_pct: number;
+}
+
 export interface NativeTrace {
   mode?: string;
   model_version?: string;
@@ -89,6 +104,8 @@ export interface NativeTrace {
   latency_ms?: number;
   python_version?: string;
   external_models_used?: boolean;
+  task_timings?: ReasoningTaskTiming[];
+  bottleneck_task?: BottleneckTaskSummary | null;
   math?: {
     expression: string;
     result: number;
@@ -500,6 +517,36 @@ export interface TrainingReadinessSummary {
   experiments: ExperimentItem[];
 }
 
+export interface MemorySnapshot {
+  timestamp: number;
+  heapSupported: boolean;
+  usedJSHeapMB: number | null;
+  totalJSHeapMB: number | null;
+  jsHeapLimitMB: number | null;
+  streamBufferBytes: number;
+  messageCount: number;
+  activeStreamCount: number;
+  pendingThreadLoads: number;
+  heapDeltaMB: number | null;
+  leakWarning: boolean;
+}
+
+export interface ThreadCleanupVerification {
+  clean: boolean;
+  activeCount: number;
+  abortedCount: number;
+  leakedRequestIds: number[];
+  checkedAt: number;
+}
+
+export interface ClientLatencySample {
+  timestamp: number;
+  label: string;
+  endpoint: string;
+  latencyMs: number;
+  status: number | string;
+}
+
 export interface AdminOverview {
   users: User[];
   pending_runs: WorkflowRun[];
@@ -508,6 +555,8 @@ export interface AdminOverview {
   tools?: ExternalToolItem[];
   audit_logs: AuditLogItem[];
   system: SystemMetrics;
+  reasoning_traces?: ReasoningTraceRecord[];
+  recent_api_usage?: DeveloperOverview['usage']['recent'];
   training_readiness?: TrainingReadinessSummary;
 }
 

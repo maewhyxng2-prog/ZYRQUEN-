@@ -29,7 +29,8 @@ import {
   type ReasoningMode,
 } from '../types';
 import { SafeMessageText } from './SafeMessageText';
-import { ZyrquenEmblem } from './ZyrquenEmblem';
+import { SpacetimeFabric } from './SpacetimeFabric';
+import { TemporalIntelligenceCore } from './TemporalIntelligenceCore';
 
 interface WorkspaceViewProps {
   token: string;
@@ -320,24 +321,24 @@ export function WorkspaceView({
   }
 
   return (
-    <div className="relative flex h-[calc(100dvh-52px)] flex-col bg-[#060A14] md:h-[calc(100dvh-60px)]">
+    <div className="relative flex h-[calc(100dvh-52px)] flex-col bg-[var(--color-bg)] text-[var(--color-text)] md:h-[calc(100dvh-60px)]">
       {/* Compact Workspace Toolbar */}
-      <div className="flex h-12 shrink-0 items-center justify-between border-b border-slate-800/80 bg-[#090F1E] px-3 sm:px-6">
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 sm:px-6">
         <div className="flex min-w-0 items-center gap-2">
           <button
             type="button"
             onClick={() => setHistoryOpen(true)}
             aria-label="เปิดประวัติบทสนทนา"
-            className="flex min-h-[44px] items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-slate-300 transition-colors hover:bg-slate-800/70 hover:text-slate-100 whitespace-nowrap"
+            className="flex min-h-[44px] items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
           >
-            <History className="h-4 w-4 text-cyan-300" />
+            <History className="h-4 w-4 text-[var(--color-accent)]" />
             <span>ประวัติ</span>
-            <span className="text-slate-500 tabular-nums">({conversations.length})</span>
+            <span className="text-[var(--color-text-muted)] tabular-nums">({conversations.length})</span>
           </button>
-          <span className="hidden text-slate-700 sm:inline" aria-hidden="true">
+          <span className="hidden text-[var(--color-border)] sm:inline" aria-hidden="true">
             /
           </span>
-          <p className="hidden max-w-[260px] truncate text-xs font-medium text-slate-300 sm:block">
+          <p className="hidden max-w-[260px] truncate text-xs font-medium text-[var(--color-text-secondary)] sm:block">
             {activeTitle}
           </p>
         </div>
@@ -348,9 +349,9 @@ export function WorkspaceView({
               type="button"
               onClick={() => setSummaryOpen((prev) => !prev)}
               aria-expanded={summaryOpen}
-              className="flex min-h-[44px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-slate-300 transition-colors hover:bg-slate-800/70 hover:text-cyan-300 whitespace-nowrap"
+              className="flex min-h-[44px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
             >
-              <ListChecks className="h-4 w-4 text-cyan-300" />
+              <ListChecks className="h-4 w-4 text-[var(--color-accent)]" />
               <span className="hidden sm:inline">สรุปสำคัญ</span>
               {summaryOpen ? (
                 <ChevronUp className="h-3.5 w-3.5" />
@@ -362,7 +363,7 @@ export function WorkspaceView({
           <button
             type="button"
             onClick={onNewConversation}
-            className="flex min-h-[44px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-cyan-300 transition-colors hover:bg-slate-800/70 whitespace-nowrap"
+            className="flex min-h-[44px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
           >
             <Plus className="h-4 w-4" />
             <span>เซสชันใหม่</span>
@@ -374,27 +375,27 @@ export function WorkspaceView({
       {summaryOpen && activeConversationId && messages.length > 0 && (
         <section
           aria-label="สรุปประเด็นสำคัญอัตโนมัติ"
-          className="shrink-0 border-b border-slate-800/80 bg-[#0B1222] px-4 py-3 sm:px-6"
+          className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 sm:px-6"
         >
           <div className="mx-auto max-w-3xl">
             <div className="flex items-center justify-between gap-2">
-              <p className="text-xs font-semibold text-cyan-300">
+              <p className="text-xs font-semibold text-[var(--color-accent)]">
                 Smart Summary · ประเด็นและผลลัพธ์ยืนยันแล้ว
               </p>
               {smartSummary && (
-                <span className="text-[11px] text-slate-400 tabular-nums">
+                <span className="text-[11px] text-[var(--color-text-secondary)] tabular-nums">
                   {smartSummary.metrics.verified_count} ยืนยัน ·{' '}
                   {smartSummary.metrics.not_learned_count} Not Learned
                 </span>
               )}
             </div>
             {summaryLoading ? (
-              <p className="mt-2 text-xs text-slate-400">กำลังสรุปจากแกนสมองภายใน...</p>
+              <p className="mt-2 text-xs text-[var(--color-text-secondary)]">กำลังสรุปจากแกนสมองภายใน...</p>
             ) : smartSummary && smartSummary.bullets.length > 0 ? (
-              <ul className="mt-2 space-y-1 text-xs text-slate-200">
+              <ul className="mt-2 space-y-1 text-xs text-[var(--color-text)]">
                 {smartSummary.bullets.map((bullet) => (
                   <li key={bullet} className="flex items-start gap-2">
-                    <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
+                    <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
                     <div className="min-w-0 flex-1">
                       <SafeMessageText content={bullet} />
                     </div>
@@ -402,7 +403,7 @@ export function WorkspaceView({
                 ))}
               </ul>
             ) : (
-              <p className="mt-2 text-xs text-slate-400">
+              <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
                 ยังไม่มีผลลัพธ์เชิงโครงสร้างในบทสนทนานี้
               </p>
             )}
@@ -414,46 +415,55 @@ export function WorkspaceView({
       <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
           {loadingThread ? (
-            <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] p-6 text-sm text-slate-400">
+            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-6 text-sm text-[var(--color-text-secondary)]">
               กำลังโหลดประวัติข้อความ...
             </div>
           ) : messages.length === 0 ? (
-            <div className="my-6 flex flex-col items-start gap-5 rounded-3xl border border-slate-800/80 bg-[#0E172B] p-6 sm:p-8">
-              <div className="flex items-center gap-3">
-                <ZyrquenEmblem size={36} active={sending || streamingContent !== null} />
-                <div>
-                  <h2 className="text-lg font-bold text-slate-50">แกนประมวลผลและเหตุผล ZYRQUEN Ω∞</h2>
-                  <p className="text-xs text-slate-400">
-                    การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง
-                  </p>
+            <div className="zyrq-glow relative my-6 overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-6 sm:p-8">
+              <SpacetimeFabric density="minimal" className="absolute inset-0" />
+              <div className="relative z-10 flex flex-col items-start gap-5">
+                <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+                  <TemporalIntelligenceCore
+                    variant="compact"
+                    size={108}
+                    active={sending || streamingContent !== null}
+                  />
+                  <div>
+                    <h2 className="text-lg font-bold text-[var(--color-text)]">
+                      แกนประมวลผลและเหตุผล ZYRQUEN Ω∞
+                    </h2>
+                    <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
+                      การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง
+                    </p>
+                  </div>
                 </div>
-              </div>
-              <p className="text-sm leading-relaxed text-slate-300">
-                ระบบประมวลผลเชิงสัญลักษณ์ การให้เหตุผล การสร้างและเชื่อมโยงกราฟความรู้ และการวางแผนงานภายในของ ZYRQUEN
-              </p>
-              <div className="grid w-full gap-2.5 sm:grid-cols-2">
-                {[
-                  { text: 'คำนวณ (144 / 12) + sqrt(81)', m: 'math' as ReasoningMode },
-                  { text: 'สอน: ZYRQUEN -> บังคับใช้ -> Approval Gate', m: 'knowledge' as ReasoningMode },
-                  { text: 'ZYRQUEN บังคับใช้อะไร', m: 'knowledge' as ReasoningMode },
-                  { text: 'ทดสอบคำถามที่ยังไม่ได้เรียนรู้', m: 'auto' as ReasoningMode },
-                ].map((q) => (
-                  <button
-                    key={q.text}
-                    type="button"
-                    onClick={async () => {
-                      setActiveToolStatus(detectPendingToolActivity(q.text, q.m));
-                      try {
-                        await onSendMessage(q.text, q.m, undefined, selectedModelVariant);
-                      } finally {
-                        setActiveToolStatus(null);
-                      }
-                    }}
-                    className="min-h-[48px] rounded-2xl border border-slate-800 bg-[#070C18] px-4 py-2.5 text-left text-xs font-medium text-slate-200 transition-colors hover:border-cyan-500/50 hover:text-cyan-200"
-                  >
-                    {q.text}
-                  </button>
-                ))}
+                <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
+                  ระบบประมวลผลเชิงสัญลักษณ์ การให้เหตุผล การสร้างและเชื่อมโยงกราฟความรู้ และการวางแผนงานภายในของ ZYRQUEN
+                </p>
+                <div className="grid w-full gap-2.5 sm:grid-cols-2">
+                  {[
+                    { text: 'คำนวณ (144 / 12) + sqrt(81)', m: 'math' as ReasoningMode },
+                    { text: 'สอน: ZYRQUEN -> บังคับใช้ -> Approval Gate', m: 'knowledge' as ReasoningMode },
+                    { text: 'ZYRQUEN บังคับใช้อะไร', m: 'knowledge' as ReasoningMode },
+                    { text: 'ทดสอบคำถามที่ยังไม่ได้เรียนรู้', m: 'auto' as ReasoningMode },
+                  ].map((q) => (
+                    <button
+                      key={q.text}
+                      type="button"
+                      onClick={async () => {
+                        setActiveToolStatus(detectPendingToolActivity(q.text, q.m));
+                        try {
+                          await onSendMessage(q.text, q.m, undefined, selectedModelVariant);
+                        } finally {
+                          setActiveToolStatus(null);
+                        }
+                      }}
+                      className="min-h-[48px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]/90 px-4 py-2.5 text-left text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
+                    >
+                      {q.text}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           ) : (
@@ -470,8 +480,8 @@ export function WorkspaceView({
                   <div
                     className={`max-w-[92%] sm:max-w-[85%] rounded-2xl px-4 py-3.5 ${
                       isUser
-                        ? 'bg-blue-600 text-white'
-                        : 'border border-slate-800/90 bg-[#0E172B] text-slate-100'
+                        ? 'bg-[var(--color-primary)] text-white'
+                        : 'border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text)]'
                     }`}
                   >
                     {isUser ? (
@@ -488,7 +498,7 @@ export function WorkspaceView({
                       <button
                         type="button"
                         onClick={() => toggleTrace(msg.id)}
-                        className="flex min-h-[36px] items-center gap-2 px-1 text-xs text-slate-400 hover:text-cyan-300"
+                        className="flex min-h-[36px] items-center gap-2 px-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]"
                       >
                         <span>
                           {msg.status} · {(trace.engine_path || []).join(' → ')} ·{' '}
@@ -502,9 +512,44 @@ export function WorkspaceView({
                       </button>
 
                       {isTraceOpen && (
-                        <pre className="mt-1.5 overflow-x-auto rounded-xl border border-slate-800 bg-[#070C18] p-3 font-mono text-[11px] leading-relaxed text-cyan-200/90">
-                          {JSON.stringify(trace, null, 2)}
-                        </pre>
+                        <div className="mt-1.5 space-y-2">
+                          {trace.task_timings && trace.task_timings.length > 0 && (
+                            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs">
+                              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                <span className="font-semibold text-[var(--color-warning)]">
+                                  เวลาทำงานราย Task ({trace.task_timings.length})
+                                </span>
+                                {trace.bottleneck_task && (
+                                  <span className="font-mono text-[11px] text-[var(--color-warning)] tabular-nums">
+                                    Bottleneck: {trace.bottleneck_task.task} ({trace.bottleneck_task.duration_ms} ms · {trace.bottleneck_task.share_pct}%)
+                                  </span>
+                                )}
+                              </div>
+                              <div className="grid gap-1.5 sm:grid-cols-2">
+                                {trace.task_timings.map((t, idx) => (
+                                  <div
+                                    key={`${t.task}-${idx}`}
+                                    className="flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1.5 font-mono text-[11px]"
+                                  >
+                                    <span className="truncate text-[var(--color-text)]">{t.task}</span>
+                                    <span
+                                      className={`shrink-0 tabular-nums ${
+                                        trace.bottleneck_task?.task === t.task
+                                          ? 'font-semibold text-[var(--color-warning)]'
+                                          : 'text-[var(--color-accent)]'
+                                      }`}
+                                    >
+                                      {t.duration_ms} ms
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <pre className="overflow-x-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-[11px] leading-relaxed text-[var(--color-accent)]">
+                            {JSON.stringify(trace, null, 2)}
+                          </pre>
+                        </div>
                       )}
                     </div>
                   )}
@@ -515,7 +560,7 @@ export function WorkspaceView({
 
           {sending && (
             <div className="flex flex-col items-start gap-2" role="status" aria-live="polite">
-              <div className="inline-flex items-center gap-2 rounded-2xl border border-slate-800/90 bg-[#0E172B] px-3.5 py-2.5 text-xs font-medium text-cyan-300">
+              <div className="inline-flex items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-xs font-medium text-[var(--color-accent)]">
                 {activeToolStatus?.toolId === 'web_search' ? (
                   <Globe className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
                 ) : activeToolStatus?.toolId === 'doc_fetch' ? (
@@ -532,7 +577,7 @@ export function WorkspaceView({
                 </span>
               </div>
               {streamingContent && (
-                <div className="max-w-[92%] sm:max-w-[85%] rounded-2xl border border-blue-500/30 bg-[#0E172B] px-4 py-3.5 text-slate-100">
+                <div className="max-w-[92%] sm:max-w-[85%] rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-surface-raised)] px-4 py-3.5 text-[var(--color-text)]">
                   <SafeMessageText content={streamingContent} />
                 </div>
               )}
@@ -542,14 +587,14 @@ export function WorkspaceView({
           {error && (
             <div
               role="alert"
-              className="flex items-center justify-between gap-3 rounded-2xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-sm text-rose-200"
+              className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
             >
               <span>{error}</span>
               {onRetryLast && (
                 <button
                   type="button"
                   onClick={onRetryLast}
-                  className="min-h-[36px] rounded-lg bg-rose-500/20 px-3 text-xs font-medium text-rose-100 hover:bg-rose-500/30"
+                  className="min-h-[36px] rounded-lg border border-[var(--color-danger)]/35 bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-surface-hover)]"
                 >
                   ลองใหม่
                 </button>
@@ -562,10 +607,10 @@ export function WorkspaceView({
       </div>
 
       {/* Bottom-Docked Message Composer */}
-      <div className="shrink-0 border-t border-slate-800/90 bg-[#090F1E] px-3 py-2.5 pb-safe sm:px-6 sm:py-3">
+      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 pb-safe sm:px-6 sm:py-3">
         <form onSubmit={handleSubmit} className="mx-auto flex w-full max-w-3xl flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1 rounded-xl bg-[#060A14] p-1">
+            <div className="flex items-center gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-1">
               {(
                 [
                   { id: 'auto', label: 'อัตโนมัติ' },
@@ -580,8 +625,8 @@ export function WorkspaceView({
                   onClick={() => setMode(m.id)}
                   className={`min-h-[32px] rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
                     mode === m.id
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--color-primary)] text-white'
+                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                   }`}
                 >
                   {m.label}
@@ -590,13 +635,13 @@ export function WorkspaceView({
             </div>
 
             {attachment && (
-              <div className="flex min-w-0 items-center gap-2 rounded-lg border border-slate-800 bg-[#0E172B] px-2.5 py-1 text-xs text-cyan-300">
+              <div className="flex min-w-0 items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-xs text-[var(--color-accent)]">
                 <span className="max-w-[140px] truncate">{attachment.name}</span>
                 <button
                   type="button"
                   onClick={() => setAttachment(null)}
                   aria-label="ลบไฟล์แนบ"
-                  className="text-slate-400 hover:text-slate-100"
+                  className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -607,9 +652,9 @@ export function WorkspaceView({
           {(speechError || listening) && (
             <div className="flex items-center justify-between gap-2 text-xs">
               {speechError ? (
-                <span className="text-rose-300">{speechError}</span>
+                <span className="text-[var(--color-danger)]">{speechError}</span>
               ) : (
-                <span className="text-cyan-300">
+                <span className="text-[var(--color-accent)]">
                   กำลังฟังเสียง ({speechLang === 'th-TH' ? 'ภาษาไทย' : 'English'})...
                 </span>
               )}
@@ -621,7 +666,7 @@ export function WorkspaceView({
                     setSpeechLang(nextLang);
                     recognitionRef.current?.stop();
                   }}
-                  className="rounded-lg border border-slate-700 bg-[#060A14] px-2 py-0.5 font-mono text-[11px] text-slate-300 hover:border-cyan-400"
+                  className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-0.5 font-mono text-[11px] text-[var(--color-text)] hover:border-[var(--color-accent)]"
                 >
                   {speechLang === 'th-TH' ? 'สลับ EN' : 'สลับ TH'}
                 </button>
@@ -641,7 +686,7 @@ export function WorkspaceView({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               aria-label="แนบไฟล์ข้อความ"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-800 bg-[#060A14] text-slate-300 transition-colors hover:border-slate-700 hover:text-cyan-300"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
             >
               <Paperclip className="h-4 w-4" />
             </button>
@@ -653,8 +698,8 @@ export function WorkspaceView({
               aria-pressed={listening}
               className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition-colors ${
                 listening
-                  ? 'border-cyan-400 bg-cyan-950/50 text-cyan-300'
-                  : 'border-slate-800 bg-[#060A14] text-slate-300 hover:border-slate-700 hover:text-cyan-300'
+                  ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]'
+                  : 'border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'
               }`}
             >
               {listening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
@@ -676,14 +721,14 @@ export function WorkspaceView({
               }}
               placeholder="พิมพ์ข้อความถึงแกนสมอง ZYRQUEN..."
               aria-label="ช่องพิมพ์ข้อความ"
-              className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-slate-800 bg-[#060A14] px-3.5 py-2.5 text-[15px] text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+              className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
             />
 
             <button
               type="submit"
               disabled={sending || (!input.trim() && !attachment)}
               aria-label="ส่งข้อความ"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white transition-colors hover:bg-blue-500 disabled:opacity-40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[var(--color-primary)] text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-40"
             >
               <Send className="h-4 w-4" />
             </button>
@@ -692,11 +737,11 @@ export function WorkspaceView({
           {/* Composer Footer: Consistent Model Variant Selector across Mobile & Desktop */}
           <footer
             aria-label="ส่วนท้ายช่องข้อความ"
-            className="flex items-center justify-between gap-2 border-t border-slate-800/70 pt-2"
+            className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2"
           >
             <div className="relative flex min-w-0 items-center">
               <Cpu
-                className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-blue-400"
+                className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--color-primary)]"
                 aria-hidden="true"
               />
               <select
@@ -707,25 +752,25 @@ export function WorkspaceView({
                   setSelectedModelVariant(nextVariant);
                   onModelVariantChange?.(nextVariant);
                 }}
-                className="h-9 max-w-[230px] cursor-pointer appearance-none rounded-xl border border-blue-500/35 bg-[#060A14] pl-8 pr-8 font-mono text-xs font-medium text-slate-100 transition-colors hover:border-blue-400/60 hover:bg-[#0E172B] focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-600/30 sm:max-w-none"
+                className="h-9 max-w-[230px] cursor-pointer appearance-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] pl-8 pr-8 font-mono text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-primary)] focus:border-[var(--color-focus)] focus:outline-none sm:max-w-none"
               >
                 {MODEL_VARIANTS.map((variant) => (
                   <option
                     key={variant.id}
                     value={variant.id}
-                    className="bg-[#0E172B] text-slate-100"
+                    className="bg-[var(--color-surface-raised)] text-[var(--color-text)]"
                   >
                     {variant.label}
                   </option>
                 ))}
               </select>
               <ChevronDown
-                className="pointer-events-none absolute right-2.5 h-3.5 w-3.5 text-blue-400"
+                className="pointer-events-none absolute right-2.5 h-3.5 w-3.5 text-[var(--color-primary)]"
                 aria-hidden="true"
               />
             </div>
 
-            <span className="truncate font-mono text-[11px] text-blue-300/80">
+            <span className="truncate font-mono text-[11px] text-[var(--color-accent)]">
               <span className="sm:hidden">{selectedModelVariant}</span>
               <span className="hidden sm:inline">
                 {selectedModelVariant} · Enter ส่ง
@@ -739,18 +784,18 @@ export function WorkspaceView({
       {historyOpen && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm md:items-stretch md:justify-start">
           <div
-            className="flex max-h-[82dvh] w-full flex-col rounded-t-3xl border-t border-slate-800 bg-[#0E172B] md:h-full md:max-h-none md:w-80 md:rounded-none md:border-r md:border-t-0"
+            className="flex max-h-[82dvh] w-full flex-col rounded-t-3xl border-t border-[var(--color-border)] bg-[var(--color-surface-raised)] md:h-full md:max-h-none md:w-80 md:rounded-none md:border-r md:border-t-0"
             role="dialog"
             aria-label="ประวัติบทสนทนา"
           >
-            <div className="mx-auto mt-3 h-1.5 w-10 rounded-full bg-slate-700 md:hidden" />
-            <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
-              <h3 className="text-base font-semibold text-slate-100">ประวัติบทสนทนา</h3>
+            <div className="mx-auto mt-3 h-1.5 w-10 rounded-full bg-[var(--color-border)] md:hidden" />
+            <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4">
+              <h3 className="text-base font-semibold text-[var(--color-text)]">ประวัติบทสนทนา</h3>
               <button
                 type="button"
                 onClick={() => setHistoryOpen(false)}
                 aria-label="ปิดประวัติ"
-                className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -763,22 +808,22 @@ export function WorkspaceView({
                   onNewConversation();
                   setHistoryOpen(false);
                 }}
-                className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-medium text-white hover:bg-blue-500"
+                className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] text-sm font-medium text-white hover:bg-[var(--color-primary-hover)]"
               >
                 <Plus className="h-4 w-4" />
                 <span>เริ่มบทสนทนาใหม่</span>
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-3 pb-6 divide-y divide-slate-800/70">
+            <div className="flex-1 divide-y divide-[var(--color-border)] overflow-y-auto px-3 pb-6">
               {conversations.length === 0 ? (
-                <p className="p-4 text-sm text-slate-400">ยังไม่มีบทสนทนาที่บันทึกไว้</p>
+                <p className="p-4 text-sm text-[var(--color-text-secondary)]">ยังไม่มีบทสนทนาที่บันทึกไว้</p>
               ) : (
                 conversations.map((conv) => (
                   <div
                     key={conv.id}
-                    className={`flex items-center justify-between gap-2 py-2 px-2 rounded-xl ${
-                      conv.id === activeConversationId ? 'bg-[#131F38]' : ''
+                    className={`flex items-center justify-between gap-2 rounded-xl px-2 py-2 ${
+                      conv.id === activeConversationId ? 'bg-[var(--color-surface-hover)]' : ''
                     }`}
                   >
                     <button
@@ -789,8 +834,8 @@ export function WorkspaceView({
                       }}
                       className="min-h-[44px] min-w-0 flex-1 text-left"
                     >
-                      <p className="truncate text-sm font-medium text-slate-100">{conv.title}</p>
-                      <p className="text-xs text-slate-400 tabular-nums">
+                      <p className="truncate text-sm font-medium text-[var(--color-text)]">{conv.title}</p>
+                      <p className="text-xs text-[var(--color-text-secondary)] tabular-nums">
                         {conv.mode} · {conv.message_count} ข้อความ
                       </p>
                     </button>
@@ -798,7 +843,7 @@ export function WorkspaceView({
                       type="button"
                       onClick={() => onDeleteConversation(conv.id)}
                       aria-label={`ลบ ${conv.title}`}
-                      className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-rose-950/40 hover:text-rose-300"
+                      className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-[var(--color-text-muted)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>

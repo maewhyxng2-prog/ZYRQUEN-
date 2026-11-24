@@ -5,7 +5,7 @@ function renderInlineSegments(line: string): React.ReactNode[] {
   return parts.map((part, idx) => {
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
       return (
-        <strong key={idx} className="font-semibold text-slate-50">
+        <strong key={idx} className="font-semibold text-[var(--color-text)]">
           {part.slice(2, -2)}
         </strong>
       );
@@ -14,7 +14,7 @@ function renderInlineSegments(line: string): React.ReactNode[] {
       return (
         <code
           key={idx}
-          className="rounded bg-slate-800/90 px-1.5 py-0.5 font-mono text-[0.85em] text-cyan-300"
+          className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-0.5 font-mono text-[0.85em] text-[var(--color-accent)]"
         >
           {part.slice(1, -1)}
         </code>
@@ -22,7 +22,7 @@ function renderInlineSegments(line: string): React.ReactNode[] {
     }
     if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
       return (
-        <em key={idx} className="italic text-slate-300">
+        <em key={idx} className="italic text-[var(--color-text-secondary)]">
           {part.slice(1, -1)}
         </em>
       );
@@ -34,7 +34,7 @@ function renderInlineSegments(line: string): React.ReactNode[] {
 export function SafeMessageText({ content }: { content: string }) {
   const lines = content.split('\n');
   return (
-    <div className="space-y-2 text-[15px] leading-relaxed text-slate-200">
+    <div className="space-y-2 text-[15px] leading-relaxed text-[var(--color-text)]">
       {lines.map((line, i) => {
         const trimmed = line.trim();
         if (!trimmed) {
@@ -44,7 +44,7 @@ export function SafeMessageText({ content }: { content: string }) {
           return (
             <div
               key={i}
-              className="rounded-r-xl border-l-2 border-cyan-500/60 bg-[#070C18]/80 px-3 py-2 text-xs leading-relaxed text-cyan-200"
+              className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs leading-relaxed text-[var(--color-accent)]"
             >
               {renderInlineSegments(trimmed.slice(2))}
             </div>
@@ -53,7 +53,10 @@ export function SafeMessageText({ content }: { content: string }) {
         if (trimmed.startsWith('- ')) {
           return (
             <div key={i} className="flex items-start gap-2.5 pl-1">
-              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" aria-hidden="true" />
+              <span
+                className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]"
+                aria-hidden="true"
+              />
               <span className="min-w-0 flex-1">{renderInlineSegments(trimmed.slice(2))}</span>
             </div>
           );

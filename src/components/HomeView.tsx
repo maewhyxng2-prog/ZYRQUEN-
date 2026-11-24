@@ -15,7 +15,8 @@ import type {
   ReasoningMode,
   User,
 } from '../types';
-import { ZyrquenEmblem } from './ZyrquenEmblem';
+import { SpacetimeFabric } from './SpacetimeFabric';
+import { TemporalIntelligenceCore } from './TemporalIntelligenceCore';
 
 interface HomeViewProps {
   user: User;
@@ -49,6 +50,27 @@ const STARTER_PROMPTS: Array<{ label: string; prompt: string; mode: ReasoningMod
     label: 'ทดสอบขอบเขตความซื่อสัตย์',
     prompt: 'อธิบายทฤษฎีที่ยังไม่ได้สอนในแกนความจำ',
     mode: 'auto',
+  },
+];
+
+const PILLARS = [
+  {
+    code: 'Cognition',
+    title: 'การรับรู้',
+    detail: 'รับเป้าหมาย วิเคราะห์บริบท และจำแนกโครงสร้างปัญหา',
+    accent: 'var(--zyrquen-cyan)',
+  },
+  {
+    code: 'Knowledge',
+    title: 'องค์ความรู้',
+    detail: 'เชื่อมโยงกราฟความรู้ถาวร ตรวจจับข้อขัดแย้ง และบันทึกหลักฐาน',
+    accent: 'var(--zyrquen-blue)',
+  },
+  {
+    code: 'Reasoning',
+    title: 'การให้เหตุผล',
+    detail: 'คำนวณ AST วางแผน DAG และงดตอบเดาเมื่อยังไม่ได้เรียนรู้',
+    accent: 'var(--zyrquen-violet)',
   },
 ];
 
@@ -102,36 +124,70 @@ export function HomeView({
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:py-8">
-      {/* Product Identity & Greeting */}
-      <section className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div className="flex items-start gap-3.5">
-          <ZyrquenEmblem size={44} className="mt-0.5 shrink-0" />
-          <div>
-            <p className="text-xs font-medium text-cyan-300">
-              ZYRQUEN — ปัญญาประดิษฐ์พื้นฐานแบบอัตโนมัติ (Autonomous Foundational Intelligence)
-            </p>
-            <h2 className="mt-1 text-2xl font-bold tracking-tight text-slate-50 sm:text-3xl text-balance">
-              สวัสดี, {user.display_name}
-            </h2>
+      {/* Neural Aurora Hero Showcase with Temporal Core & Expansive Spacetime Fabric */}
+      <section className="zyrq-glow relative mb-6 overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 sm:p-7">
+        <SpacetimeFabric density="expansive" className="absolute inset-0" />
+        <div
+          className="zyrq-brand-gradient-line absolute inset-x-0 top-0 h-[2px] opacity-85"
+          aria-hidden="true"
+        />
+
+        <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+            <div className="shrink-0 self-center sm:self-auto">
+              <TemporalIntelligenceCore variant="compact" size={136} active={loading} />
+            </div>
+            <div className="min-w-0">
+              <p className="font-mono text-[11px] font-semibold tracking-[0.18em] text-[var(--color-accent)] uppercase">
+                ZYRQUEN · AUTONOMOUS FOUNDATIONAL INTELLIGENCE
+              </p>
+              <h2 className="mt-1 text-2xl font-bold tracking-tight text-[var(--color-text)] sm:text-3xl text-balance">
+                สวัสดี, {user.display_name}
+              </h2>
+              <p className="mt-1 text-sm font-medium text-[var(--color-text-secondary)]">
+                ปัญญาที่พัฒนาได้ — ระบบประมวลผล เรียนรู้ วิเคราะห์ และสร้างองค์ความรู้
+              </p>
+              <p className="mt-2 text-xs font-medium text-[var(--color-text-muted)]">
+                การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-2.5 sm:grid-cols-3 lg:w-[460px] lg:shrink-0">
+            {PILLARS.map((pillar) => (
+              <div
+                key={pillar.code}
+                className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]/85 p-3 backdrop-blur-sm"
+              >
+                <p
+                  className="font-mono text-[10px] font-semibold uppercase tracking-wider"
+                  style={{ color: pillar.accent }}
+                >
+                  {pillar.code}
+                </p>
+                <p className="mt-0.5 text-xs font-semibold text-[var(--color-text)]">
+                  {pillar.title}
+                </p>
+                <p className="mt-1 text-[11px] leading-snug text-[var(--color-text-secondary)]">
+                  {pillar.detail}
+                </p>
+              </div>
+            ))}
           </div>
         </div>
-
-        <p className="text-xs font-medium text-slate-400">
-          การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง
-        </p>
       </section>
 
       {/* Primary Autonomous Command Entry Point */}
-      <section className="mb-8 rounded-3xl border border-slate-800/90 bg-[#0E172B] p-4 sm:p-6">
+      <section className="mb-8 rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 sm:p-6">
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <label htmlFor="home-ai-input" className="text-sm font-medium text-slate-200">
+            <label htmlFor="home-ai-input" className="text-sm font-medium text-[var(--color-text)]">
               สั่งงานแกนปัญญา ZYRQUEN Ω∞
             </label>
             <div
               role="group"
               aria-label="โหมดการประมวลผล"
-              className="flex flex-wrap items-center gap-1 rounded-xl bg-[#070C18] p-1"
+              className="flex flex-wrap items-center gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1"
             >
               {(
                 [
@@ -148,8 +204,8 @@ export function HomeView({
                   onClick={() => setMode(m.id)}
                   className={`min-h-[36px] rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
                     mode === m.id
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--color-primary)] text-white'
+                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                   }`}
                 >
                   {m.label}
@@ -170,7 +226,7 @@ export function HomeView({
               }
             }}
             placeholder="พิมพ์คำสั่ง โจทย์คณิตศาสตร์ แผนงาน DAG หรือสอนความรู้เข้าแกนสมอง..."
-            className="w-full resize-none rounded-2xl border border-slate-800 bg-[#070C18] px-4 py-3 text-[15px] text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+            className="w-full resize-none rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
           />
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -180,7 +236,7 @@ export function HomeView({
                   key={starter.label}
                   type="button"
                   onClick={() => onStartPrompt(starter.prompt, starter.mode)}
-                  className="min-h-[36px] rounded-xl border border-slate-800 bg-[#090F1E] px-3 text-xs font-medium text-slate-300 transition-colors hover:border-cyan-500/50 hover:text-cyan-200 whitespace-nowrap"
+                  className="min-h-[36px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
                 >
                   {starter.label}
                 </button>
@@ -191,7 +247,7 @@ export function HomeView({
               <button
                 type="button"
                 onClick={handleLaunchAutonomousLoop}
-                className="flex h-10 items-center justify-center gap-2 rounded-xl border border-cyan-500/40 bg-[#070C18] px-3.5 text-xs font-semibold text-cyan-300 transition-colors hover:border-cyan-400 hover:bg-[#131F38] whitespace-nowrap"
+                className="flex h-10 items-center justify-center gap-2 rounded-xl border border-[var(--zyrquen-indigo)] bg-[var(--zyrquen-indigo)]/20 px-3.5 text-xs font-semibold text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
               >
                 <Sparkles className="h-4 w-4" />
                 <span>{prompt.trim() ? 'รันวงจร 7 ขั้น' : 'ความจำ & DAG'}</span>
@@ -199,7 +255,7 @@ export function HomeView({
 
               <button
                 type="submit"
-                className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-semibold text-white transition-colors hover:bg-blue-500 whitespace-nowrap"
+                className="flex h-10 items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] px-5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary-hover)] whitespace-nowrap"
               >
                 <span>{prompt.trim() ? 'ส่งคำสั่ง' : 'เปิดเวิร์กสเปซ'}</span>
                 <ArrowRight className="h-4 w-4" />
@@ -212,13 +268,13 @@ export function HomeView({
       {error && (
         <div
           role="alert"
-          className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-sm text-rose-200"
+          className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
         >
           <span>{error}</span>
           <button
             type="button"
             onClick={onRetry}
-            className="min-h-[40px] rounded-lg bg-rose-500/20 px-3 text-xs font-medium text-rose-100 hover:bg-rose-500/30"
+            className="min-h-[40px] rounded-lg border border-[var(--color-danger)]/35 bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-surface-hover)]"
           >
             ลองใหม่
           </button>
@@ -231,34 +287,34 @@ export function HomeView({
           {recentMissions.length > 0 && (
             <section>
               <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-base font-semibold text-slate-100">
+                <h3 className="text-base font-semibold text-[var(--color-text)]">
                   ปฏิบัติการอัตโนมัติล่าสุด
                 </h3>
                 <button
                   type="button"
                   onClick={() => onNavigate('memory')}
-                  className="min-h-[36px] px-2 text-xs font-medium text-cyan-300 hover:text-cyan-200 whitespace-nowrap"
+                  className="min-h-[36px] px-2 text-xs font-medium text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] whitespace-nowrap"
                 >
                   ดูทั้งหมด
                 </button>
               </div>
-              <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] divide-y divide-slate-800/80">
+              <div className="divide-y divide-[var(--color-border)] overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
                 {recentMissions.map((m) => (
                   <button
                     key={m.id}
                     type="button"
                     onClick={() => onNavigate('memory')}
-                    className="flex min-h-[54px] w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-[#131F38]"
+                    className="flex min-h-[54px] w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
                   >
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium text-slate-100">{m.goal}</p>
-                      <p className="mt-0.5 text-xs text-slate-400 tabular-nums">
+                      <p className="truncate text-sm font-medium text-[var(--color-text)]">{m.goal}</p>
+                      <p className="mt-0.5 text-xs text-[var(--color-text-secondary)] tabular-nums">
                         <span>{m.status}</span>
                         <span aria-hidden="true"> · </span>
                         <span>{formatRelativeTime(m.created_at)}</span>
                       </p>
                     </div>
-                    <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />
+                    <ChevronRight className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
                   </button>
                 ))}
               </div>
@@ -267,30 +323,30 @@ export function HomeView({
 
           <section>
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-base font-semibold text-slate-100">
+              <h3 className="text-base font-semibold text-[var(--color-text)]">
                 บทสนทนาและสั่งงานล่าสุด
               </h3>
               <button
                 type="button"
                 onClick={() => onNavigate('workspace')}
-                className="min-h-[36px] px-2 text-xs font-medium text-cyan-300 hover:text-cyan-200 whitespace-nowrap"
+                className="min-h-[36px] px-2 text-xs font-medium text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] whitespace-nowrap"
               >
                 ดูเวิร์กสเปซ
               </button>
             </div>
 
-            <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] divide-y divide-slate-800/80">
+            <div className="divide-y divide-[var(--color-border)] overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
               {loading && !homeSummary ? (
-                <div className="p-6 text-sm text-slate-400">กำลังโหลดรายการเซสชัน...</div>
+                <div className="p-6 text-sm text-[var(--color-text-secondary)]">กำลังโหลดรายการเซสชัน...</div>
               ) : recent.length === 0 ? (
                 <div className="flex flex-col items-start gap-3 p-6">
-                  <p className="text-sm text-slate-300">
+                  <p className="text-sm text-[var(--color-text-secondary)]">
                     ยังไม่มีประวัติบทสนทนา พิมพ์คำสั่งด้านบนหรือเลือกตัวอย่างเริ่มต้นเพื่อเริ่มใช้งาน
                   </p>
                   <button
                     type="button"
                     onClick={() => onNavigate('workspace')}
-                    className="min-h-[38px] rounded-xl bg-slate-800 px-4 text-xs font-medium text-slate-100 hover:bg-slate-700"
+                    className="min-h-[38px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 text-xs font-medium text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
                   >
                     เปิดเวิร์กสเปซเปล่า
                   </button>
@@ -301,14 +357,14 @@ export function HomeView({
                     key={conv.id}
                     type="button"
                     onClick={() => onOpenConversation(conv.id)}
-                    className="flex min-h-[58px] w-full items-center gap-3.5 px-4 py-3 text-left transition-colors hover:bg-[#131F38]"
+                    className="flex min-h-[58px] w-full items-center gap-3.5 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
                   >
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#070C18] text-blue-400">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-primary)]">
                       <MessageSquareText className="h-4 w-4" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium text-slate-100">{conv.title}</p>
-                      <p className="mt-0.5 text-xs text-slate-400 tabular-nums">
+                      <p className="truncate text-sm font-medium text-[var(--color-text)]">{conv.title}</p>
+                      <p className="mt-0.5 text-xs text-[var(--color-text-secondary)] tabular-nums">
                         <span>{conv.mode}</span>
                         <span aria-hidden="true"> · </span>
                         <span>{conv.message_count} ข้อความ</span>
@@ -316,7 +372,7 @@ export function HomeView({
                         <span>{formatRelativeTime(conv.updated_at)}</span>
                       </p>
                     </div>
-                    <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />
+                    <ChevronRight className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
                   </button>
                 ))
               )}
@@ -326,40 +382,44 @@ export function HomeView({
 
         <section className="lg:col-span-5">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-base font-semibold text-slate-100">
+            <h3 className="text-base font-semibold text-[var(--color-text)]">
               สรุปสถานะการพัฒนาและความรู้
             </h3>
           </div>
 
-          <div className="rounded-2xl border border-slate-800/80 bg-[#0E172B] p-5 space-y-4">
+          <div className="space-y-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5">
             <div className="grid grid-cols-2 gap-3 tabular-nums">
-              <div className="rounded-xl border border-slate-800/90 bg-[#070C18] p-3">
-                <p className="text-[11px] text-slate-400">ความรู้ในกราฟ (KG)</p>
-                <p className="mt-1 text-lg font-semibold text-slate-100">
-                  {counts?.triples ?? 0} <span className="text-xs font-normal text-slate-400">รายการ</span>
+              <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+                <p className="text-[11px] text-[var(--color-text-secondary)]">ความรู้ในกราฟ (KG)</p>
+                <p className="mt-1 text-lg font-semibold text-[var(--color-text)]">
+                  {counts?.triples ?? 0}{' '}
+                  <span className="text-xs font-normal text-[var(--color-text-muted)]">รายการ</span>
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-800/90 bg-[#070C18] p-3">
-                <p className="text-[11px] text-slate-400">ชุดข้อมูลจริง</p>
-                <p className="mt-1 text-lg font-semibold text-slate-100">
-                  {counts?.datasets ?? 0} <span className="text-xs font-normal text-slate-400">ชุด</span>
+              <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+                <p className="text-[11px] text-[var(--color-text-secondary)]">ชุดข้อมูลจริง</p>
+                <p className="mt-1 text-lg font-semibold text-[var(--color-text)]">
+                  {counts?.datasets ?? 0}{' '}
+                  <span className="text-xs font-normal text-[var(--color-text-muted)]">ชุด</span>
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-800/90 bg-[#070C18] p-3">
-                <p className="text-[11px] text-slate-400">Model Checkpoints</p>
-                <p className="mt-1 text-lg font-semibold text-slate-100">
-                  {counts?.checkpoints ?? 0} <span className="text-xs font-normal text-slate-400">รุ่น</span>
+              <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+                <p className="text-[11px] text-[var(--color-text-secondary)]">Model Checkpoints</p>
+                <p className="mt-1 text-lg font-semibold text-[var(--color-text)]">
+                  {counts?.checkpoints ?? 0}{' '}
+                  <span className="text-xs font-normal text-[var(--color-text-muted)]">รุ่น</span>
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-800/90 bg-[#070C18] p-3">
-                <p className="text-[11px] text-slate-400">รออนุมัติ (Gate)</p>
-                <p className="mt-1 text-lg font-semibold text-slate-100">
-                  {counts?.pending_approvals ?? 0} <span className="text-xs font-normal text-slate-400">รายการ</span>
+              <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+                <p className="text-[11px] text-[var(--color-text-secondary)]">รออนุมัติ (Gate)</p>
+                <p className="mt-1 text-lg font-semibold text-[var(--zyrquen-violet)]">
+                  {counts?.pending_approvals ?? 0}{' '}
+                  <span className="text-xs font-normal text-[var(--color-text-muted)]">รายการ</span>
                 </p>
               </div>
             </div>
 
-            <div className="rounded-xl border border-slate-800/70 bg-[#070C18]/70 px-3.5 py-2.5 text-xs text-slate-400">
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-2.5 text-xs text-[var(--color-text-secondary)]">
               ตัวเลขทั้งหมดสะท้อนข้อมูลจริงในพื้นที่ทำงาน และแยกสถานะการทดสอบออกจากหน้าผู้ดูแลระบบ
             </div>
 
@@ -367,17 +427,17 @@ export function HomeView({
               <button
                 type="button"
                 onClick={() => onNavigate('memory')}
-                className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl border border-slate-800 bg-[#070C18] px-3 text-xs font-medium text-slate-200 transition-colors hover:border-cyan-500/50 hover:text-cyan-200"
+                className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
               >
-                <BrainCircuit className="h-4 w-4 text-cyan-300" />
+                <BrainCircuit className="h-4 w-4 text-[var(--color-accent)]" />
                 <span>ความจำ &amp; DAG</span>
               </button>
               <button
                 type="button"
                 onClick={() => onNavigate('settings')}
-                className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl border border-slate-800 bg-[#070C18] px-3 text-xs font-medium text-slate-200 transition-colors hover:border-cyan-500/50 hover:text-cyan-200"
+                className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
               >
-                <Workflow className="h-4 w-4 text-blue-400" />
+                <Workflow className="h-4 w-4 text-[var(--color-primary)]" />
                 <span>ตั้งค่า &amp; Training</span>
               </button>
             </div>
@@ -387,4 +447,3 @@ export function HomeView({
     </div>
   );
 }
-

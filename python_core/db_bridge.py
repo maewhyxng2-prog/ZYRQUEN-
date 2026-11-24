@@ -686,6 +686,14 @@ def handle_action(action: str, payload: dict) -> dict:
         else:
             gate_status = "VERIFIED"
 
+        reasoning_traces = _query_reasoning_traces(conn, is_admin=True, limit=40)
+        recent_api_usage = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT endpoint, method, status_code, latency_ms, created_at FROM api_usage_logs ORDER BY created_at DESC LIMIT 40"
+            ).fetchall()
+        ]
+
         conn.close()
         return {
             "ok": True,
@@ -696,6 +704,8 @@ def handle_action(action: str, payload: dict) -> dict:
             "tools": tools,
             "audit_logs": audit_logs,
             "system": get_system_metrics(),
+            "reasoning_traces": reasoning_traces,
+            "recent_api_usage": recent_api_usage,
             "training_readiness": {
                 "gate_status": gate_status,
                 "datasets_total": len(datasets),

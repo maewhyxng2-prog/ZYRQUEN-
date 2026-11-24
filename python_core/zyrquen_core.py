@@ -48,6 +48,10 @@ from memory_learning import (
     record_episodic_experience,
     run_controlled_neural_experiment,
 )
+from continual_learning import (
+    run_continual_learning_round,
+    synthesize_failure_curriculum,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("ZYRQUEN_DATA_DIR") or (BASE_DIR / "data"))
@@ -2521,12 +2525,50 @@ def handle_infer(payload: dict) -> dict:
     }
     model_policy = model_policy_map.get(model_version, "balanced_hybrid")
 
+    task_timings: list[dict] = []
+
+    def _record_task_timing(
+        task_name: str,
+        t0: float,
+        *,
+        matched: bool,
+        status_label: str,
+        detail: str | None = None,
+    ) -> None:
+        entry: dict = {
+            "order": len(task_timings) + 1,
+            "task": task_name,
+            "duration_ms": round((time.perf_counter() - t0) * 1000, 3),
+            "matched": bool(matched),
+            "status": status_label,
+        }
+        if detail:
+            entry["detail"] = detail
+        task_timings.append(entry)
+
+    def _finalize_trace() -> None:
+        trace["task_timings"] = task_timings
+        trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+        if task_timings:
+            total_tasks_ms = sum(float(t.get("duration_ms", 0.0) or 0.0) for t in task_timings)
+            slowest = max(task_timings, key=lambda t: float(t.get("duration_ms", 0.0) or 0.0))
+            slowest_ms = float(slowest.get("duration_ms", 0.0) or 0.0)
+            trace["bottleneck_task"] = {
+                "task": slowest["task"],
+                "duration_ms": slowest_ms,
+                "share_pct": round((slowest_ms / total_tasks_ms) * 100, 1) if total_tasks_ms > 0 else 0.0,
+            }
+        else:
+            trace["bottleneck_task"] = None
+
     trace: dict = {
         "mode": mode,
         "model_version": model_version,
         "model_policy": model_policy,
         "metadata": {"modelVersion": model_version, "modelPolicy": model_policy},
         "engine_path": [],
+        "task_timings": task_timings,
+        "bottleneck_task": None,
         "latency_ms": 0.0,
         "python_version": platform.python_version(),
         "external_models_used": False,
@@ -2534,6 +2576,7 @@ def handle_infer(payload: dict) -> dict:
 
     # 0. Autonomous Continuous Operation Trigger from Conversation Channel
     if mode == "auto":
+        t0 = time.perf_counter()
         m_mission = re.match(
             r"^(?:ภารกิจ|ปฏิบัติการ(?:อัตโนมัติ)?|mission|autonomous)\s*:?\s*(.+)$",
             prompt,
@@ -2554,6 +2597,30 @@ def handle_infer(payload: dict) -> dict:
                 }
             )
             mission = mission_res.get("mission", {})
+            m_stat = str(mission.get("status") or "")
+            _record_task_timing(
+                "autonomous_cognitive_loop",
+                t0,
+                matched=True,
+                status_label=m_stat or "COMPLETED",
+                detail=f"goal={goal_text[:60]}",
+            )
+            for node_row in mission_res.get("nodes") or []:
+                try:
+                    n_obj = json.loads(node_row.get("node_json") or "{}")
+                except Exception:
+                    n_obj = {}
+                if isinstance(n_obj, dict) and n_obj.get("duration_ms") is not None:
+                    task_timings.append(
+                        {
+                            "order": len(task_timings) + 1,
+                            "task": f"dag_node:{n_obj.get('task_id') or node_row.get('task_id')}",
+                            "duration_ms": float(n_obj.get("duration_ms", 0.0) or 0.0),
+                            "matched": True,
+                            "status": str(node_row.get("execution_status") or n_obj.get("execution_status") or "UNKNOWN"),
+                            "detail": str(n_obj.get("tool_id") or ""),
+                        }
+                    )
             trace["engine_path"] = ["autonomous_cognitive_loop", "dag_executor"]
             trace["autonomous_mission"] = {
                 "mission_id": mission.get("id"),
@@ -2561,8 +2628,7 @@ def handle_infer(payload: dict) -> dict:
                 "stages": json.loads(mission.get("stages_json") or "[]"),
                 "knowledge_developed": json.loads(mission.get("knowledge_developed_json") or "[]"),
             }
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
-            m_stat = str(mission.get("status") or "")
+            _finalize_trace()
             if m_stat in {"PENDING_APPROVAL", "AWAITING_APPROVAL"}:
                 msg_status = "PENDING_APPROVAL"
             elif m_stat in {"BLOCKED", "CANCELLED"}:
@@ -2576,11 +2642,20 @@ def handle_infer(payload: dict) -> dict:
                 "status": msg_status,
                 "trace": trace,
             }
+        _record_task_timing("autonomous_mission_detect", t0, matched=False, status_label="MISS")
 
     # 1. Native DAG Goal Decomposition & Planning
     if mode in ("auto", "plan"):
+        t0 = time.perf_counter()
         plan_res = try_native_planning(conn, prompt, force_plan=(mode == "plan"))
         if plan_res:
+            _record_task_timing(
+                "native_planner",
+                t0,
+                matched=True,
+                status_label="VERIFIED",
+                detail=f"{len(plan_res.get('steps') or [])} DAG steps",
+            )
             trace["engine_path"].append("native_planner")
             trace["plan"] = plan_res
             step_lines = [
@@ -2598,15 +2673,19 @@ def handle_infer(payload: dict) -> dict:
                 + f"\n\n*สถานะฐานข้อมูลจริง: ชุดข้อมูลผ่านเกณฑ์ {snap['clean_datasets']}, "
                 f"Checkpoint {snap['checkpoints']} รุ่น, ความจำ {snap['triples']} รายการ*"
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
+        _record_task_timing("native_planner", t0, matched=False, status_label="MISS")
 
     # 1.5 Governed External Tool Integration (Native Core calls tools, never replaced by them)
     if mode == "auto":
+        t0 = time.perf_counter()
         tool_req = detect_tool_intent(prompt)
         if tool_req:
             tool_id, tool_input = tool_req
+            _record_task_timing("external_tool_detect", t0, matched=True, status_label="HIT", detail=tool_id)
+            t_tool = time.perf_counter()
             inv_res = invoke_tool_governed(
                 conn,
                 DATA_DIR,
@@ -2651,14 +2730,24 @@ def handle_infer(payload: dict) -> dict:
                 msg_status = "PENDING_APPROVAL"
             else:
                 msg_status = "BLOCKED"
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _record_task_timing(
+                f"external_tool:{tool_id}",
+                t_tool,
+                matched=True,
+                status_label=msg_status,
+                detail=str(inv_res.get("status") or ""),
+            )
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": msg_status, "trace": trace}
+        _record_task_timing("external_tool_detect", t0, matched=False, status_label="MISS")
 
     # 2. Explicit knowledge teaching
     if mode in ("auto", "knowledge"):
+        t0 = time.perf_counter()
         teach_res = try_teach_knowledge(conn, prompt, user_id)
         if teach_res:
+            _record_task_timing("knowledge_ingest", t0, matched=True, status_label="VERIFIED")
             trace["engine_path"].append("knowledge_ingest")
             trace["teach"] = teach_res
             t = teach_res["triple"]
@@ -2672,18 +2761,27 @@ def handle_infer(payload: dict) -> dict:
                 content = f"ความสัมพันธ์ `{t['subject']} -> {t['relation']} -> {t['object']}` มีอยู่แล้วในหน่วยความจำภายใน"
             else:
                 content = f"บันทึกลงในกราฟความรู้ภายในแล้ว: `{t['subject']} -> {t['relation']} -> {t['object']}`"
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
+        _record_task_timing("knowledge_ingest", t0, matched=False, status_label="MISS")
 
     # 3. Multi-hop BFS Graph Path Reasoning
     if mode in ("auto", "knowledge"):
+        t0 = time.perf_counter()
         path_res = try_graph_path_query(conn, prompt)
         if path_res:
             trace["engine_path"].append("knowledge_multihop_bfs")
             trace["graph_path"] = path_res
             if path_res["found"] and path_res["path"]:
                 p = path_res["path"]
+                _record_task_timing(
+                    "knowledge_multihop_bfs",
+                    t0,
+                    matched=True,
+                    status_label="VERIFIED",
+                    detail=f"{p['hops']} hops",
+                )
                 hops_md = "\n".join(
                     f"- ขั้นที่ {idx + 1}: `{e['from']}` — *{e['relation']}* → `{e['to']}` (แหล่งที่มา: {e['source']})"
                     for idx, e in enumerate(p["edges"])
@@ -2693,23 +2791,27 @@ def handle_infer(payload: dict) -> dict:
                     f"**พบเส้นทางเชื่อมโยง {p['hops']} ช่วง (Multi-Hop BFS)**{direction_note} "
                     f"จาก `{p['start']}` ไปยัง `{p['end']}`:\n\n{hops_md}"
                 )
-                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                _finalize_trace()
                 conn.close()
                 return {"content": content, "status": "VERIFIED", "trace": trace}
             else:
+                _record_task_timing("knowledge_multihop_bfs", t0, matched=True, status_label="NOT_LEARNED")
                 content = (
                     f"**ไม่พบเส้นทางเชื่อมโยงในกราฟความรู้ภายใน (Not Learned)**\n\n"
                     f"ค้นหาแบบ BFS สูงสุด {path_res.get('max_depth', 8)} ช่วงจาก `{path_res['start']}` ไปยัง `{path_res['end']}` แล้วไม่พบความสัมพันธ์ที่เชื่อมต่อถึงกัน\n"
                     f"สามารถสอนความสัมพันธ์เชื่อมโยงเพิ่มด้วย: `สอน: {path_res['start']} -> ความสัมพันธ์ -> {path_res['end']}`"
                 )
-                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                _finalize_trace()
                 conn.close()
                 return {"content": content, "status": "NOT_LEARNED", "trace": trace}
+        _record_task_timing("knowledge_multihop_bfs", t0, matched=False, status_label="MISS")
 
     # 4. Native Statistics, Linear/Quadratic/System Algebra, AST Math, Word Math & Transitive Logic
     if mode in ("auto", "math"):
+        t0 = time.perf_counter()
         stats_res = try_statistics_reasoning(prompt)
         if stats_res:
+            _record_task_timing("statistics_native", t0, matched=True, status_label="VERIFIED")
             trace["engine_path"].append("statistics_native")
             trace["statistics"] = stats_res
             content = (
@@ -2720,12 +2822,21 @@ def handle_infer(payload: dict) -> dict:
                 f"- ต่ำสุด / สูงสุด: `{stats_res['min']}` / `{stats_res['max']}` (พิสัย `{stats_res['range']}`)\n"
                 f"- ส่วนเบี่ยงเบนมาตรฐาน (SD ตัวอย่าง / ประชากร): `{stats_res['stdev']}` / `{stats_res['pstdev']}`"
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
+        _record_task_timing("statistics_native", t0, matched=False, status_label="MISS")
 
+        t0 = time.perf_counter()
         algebra_res = try_solve_equation(prompt)
         if algebra_res:
+            _record_task_timing(
+                algebra_res.get("engine") or "algebra_solver",
+                t0,
+                matched=True,
+                status_label="VERIFIED",
+                detail=str(algebra_res.get("solution_type") or ""),
+            )
             trace["engine_path"].append(algebra_res["engine"])
             trace["algebra"] = algebra_res
             steps_md = "\n".join(f"- {s}" for s in algebra_res["steps"])
@@ -2750,12 +2861,15 @@ def handle_infer(payload: dict) -> dict:
                 f"{headline}\n\n"
                 f"**ลำดับการจัดรูปและคำนวณ (`{algebra_res['equation']}`):**\n{steps_md}"
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
+        _record_task_timing("algebra_solver", t0, matched=False, status_label="MISS")
 
+        t0 = time.perf_counter()
         math_res = try_math_reasoning(prompt)
         if math_res:
+            _record_task_timing("math_ast", t0, matched=True, status_label="VERIFIED")
             trace["engine_path"].append("math_ast")
             trace["math"] = math_res
             steps_md = "\n".join(f"- {s}" for s in math_res["steps"]) or "- ประมวลผลค่าคงที่โดยตรง"
@@ -2763,12 +2877,15 @@ def handle_infer(payload: dict) -> dict:
                 f"**ผลลัพธ์:** `{math_res['result']}`\n\n"
                 f"**ลำดับการคำนวณผ่าน AST ภายใน (`{math_res['expression']}`):**\n{steps_md}"
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
+        _record_task_timing("math_ast", t0, matched=False, status_label="MISS")
 
+        t0 = time.perf_counter()
         word_math_res = try_word_math_reasoning(prompt)
         if word_math_res:
+            _record_task_timing("word_math_native", t0, matched=True, status_label="VERIFIED")
             trace["engine_path"].append("word_math_native")
             trace["word_math"] = word_math_res
             steps_md = "\n".join(f"- {s}" for s in word_math_res["steps"])
@@ -2776,67 +2893,78 @@ def handle_infer(payload: dict) -> dict:
                 f"**คำตอบเชิงปริมาณ:** `{word_math_res['result']}`\n\n"
                 f"**ลำดับการวิเคราะห์โจทย์ (`{word_math_res['expression']}`):**\n{steps_md}"
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
+        _record_task_timing("word_math_native", t0, matched=False, status_label="MISS")
 
     if mode in ("auto", "math", "knowledge"):
+        t0 = time.perf_counter()
         logic_res = try_transitive_logic_reasoning(prompt)
         if logic_res:
             trace["engine_path"].append("transitive_logic_native")
             trace["logic"] = logic_res
             steps_md = "\n".join(f"- {s}" for s in logic_res["steps"])
             if logic_res["contradiction"]:
+                _record_task_timing("transitive_logic_native", t0, matched=True, status_label="BLOCKED")
                 content = (
                     f"**ตรวจพบข้อขัดแย้งเชิงตรรกะ (Contradiction)**\n\n"
                     f"ไม่สามารถสรุปความสัมพันธ์ระหว่าง `{logic_res['target'][0]}` และ `{logic_res['target'][1]}` ได้อย่างสอดคล้อง:\n{steps_md}"
                 )
-                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                _finalize_trace()
                 conn.close()
                 return {"content": content, "status": "BLOCKED", "trace": trace}
             if logic_res["determined"] and logic_res["derived_relation"]:
+                _record_task_timing("transitive_logic_native", t0, matched=True, status_label="VERIFIED")
                 content = (
                     f"**ข้อสรุปเชิงตรรกะถ่ายทอด:** `{logic_res['derived_relation']}`\n\n"
                     f"**ลำดับการอนุมานจากข้อตั้ง:**\n{steps_md}"
                 )
-                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                _finalize_trace()
                 conn.close()
                 return {"content": content, "status": "VERIFIED", "trace": trace}
+            _record_task_timing("transitive_logic_native", t0, matched=True, status_label="NOT_LEARNED")
             content = (
                 f"**ไม่สามารถสรุปความสัมพันธ์ได้จากข้อตั้งที่มี (Undetermined)**\n\n{steps_md}"
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "NOT_LEARNED", "trace": trace}
+        _record_task_timing("transitive_logic_native", t0, matched=False, status_label="MISS")
 
+        t0 = time.perf_counter()
         causal_res = try_causal_logic_reasoning(prompt, conn)
         if causal_res:
             trace["engine_path"].append("causal_logic_native")
             trace["causal_logic"] = causal_res
             steps_md = "\n".join(f"- {s}" for s in causal_res["steps"])
             if causal_res.get("contradiction"):
+                _record_task_timing("causal_logic_native", t0, matched=True, status_label="BLOCKED")
                 content = (
                     f"**ตรวจพบข้อขัดแย้งเชิงสาเหตุ/ตรรกศาสตร์ (Contradiction)**\n\n"
                     f"ข้อตั้งมีความขัดแย้งกันเอง จึงไม่สามารถอนุมานผลลัพธ์อย่างปลอดภัย:\n{steps_md}"
                 )
-                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                _finalize_trace()
                 conn.close()
                 return {"content": content, "status": "BLOCKED", "trace": trace}
             if causal_res.get("determined") and causal_res.get("derived_conclusion"):
                 sub_t = causal_res.get("sub_type", "causal")
+                _record_task_timing("causal_logic_native", t0, matched=True, status_label="VERIFIED", detail=str(sub_t))
                 content = (
                     f"**ข้อสรุปเชิงตรรกศาสตร์/เหตุ-ผล (`{sub_t}`):** `{causal_res['derived_conclusion']}`\n\n"
                     f"**ลำดับการอนุมาน:**\n{steps_md}"
                 )
-                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                _finalize_trace()
                 conn.close()
                 return {"content": content, "status": "VERIFIED", "trace": trace}
+            _record_task_timing("causal_logic_native", t0, matched=True, status_label="NOT_LEARNED")
             content = (
                 f"**ไม่สามารถสรุปผลจากเงื่อนไข/ข้อตั้งที่มี (Undetermined)**\n\n{steps_md}"
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "NOT_LEARNED", "trace": trace}
+        _record_task_timing("causal_logic_native", t0, matched=False, status_label="MISS")
 
     is_explicit_math_cmd = bool(
         re.match(
@@ -2848,6 +2976,7 @@ def handle_infer(payload: dict) -> dict:
 
     # 5. Knowledge Graph Query (with 2-hop & 3-hop provenance)
     if mode in ("auto", "knowledge") and not is_explicit_math_cmd:
+        t0 = time.perf_counter()
         if model_policy == "knowledge_graph_deep":
             all_triples = conn.execute("SELECT subject, relation, object FROM knowledge_triples").fetchall()
             pair_objs: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
@@ -2859,6 +2988,13 @@ def handle_infer(payload: dict) -> dict:
             }
         matches = query_knowledge_graph(conn, prompt)
         if matches:
+            _record_task_timing(
+                "knowledge_graph_query",
+                t0,
+                matched=True,
+                status_label="VERIFIED",
+                detail=f"{len(matches)} matches",
+            )
             trace["engine_path"].append("knowledge_graph")
             trace["matched_triples"] = matches
             lines = []
@@ -2876,9 +3012,10 @@ def handle_infer(payload: dict) -> dict:
                 f"ค้นพบความสัมพันธ์ที่ยืนยันแล้ว {len(matches)} รายการจากกราฟความรู้ภายใน:\n\n"
                 + "\n".join(lines)
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
+        _record_task_timing("knowledge_graph_query", t0, matched=False, status_label="MISS")
 
     # 6. Native Neural Transformer & N-Gram Sequence Checkpoint
     allow_generative_ckpt = (
@@ -2890,10 +3027,18 @@ def handle_infer(payload: dict) -> dict:
             "SELECT * FROM checkpoints WHERE eval_status LIKE 'NEURAL%' ORDER BY version DESC LIMIT 1"
         ).fetchone()
         if neural_ckpt and model_policy in ("neural_transformer_priority", "balanced_hybrid") and Path(neural_ckpt["weights_path"]).exists():
+            t0 = time.perf_counter()
             try:
                 n_model, n_tok, _ = NativeTransformerLM.load_checkpoint(Path(neural_ckpt["weights_path"]))
                 n_res = n_model.generate_continuation(n_tok, prompt)
                 if n_res.get("generated"):
+                    _record_task_timing(
+                        "neural_transformer_checkpoint",
+                        t0,
+                        matched=True,
+                        status_label="VERIFIED",
+                        detail=f"v{neural_ckpt['version']}",
+                    )
                     trace["engine_path"].append("neural_transformer_checkpoint")
                     trace["checkpoint"] = {
                         "engine": "neural_transformer",
@@ -2908,14 +3053,23 @@ def handle_infer(payload: dict) -> dict:
                         f"({n_model.parameter_count():,} params · ppl {neural_ckpt['perplexity']:.2f}):\n\n"
                         f"{prompt} **{n_res['generated']}**"
                     )
-                    trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                    _finalize_trace()
                     conn.close()
                     return {"content": content, "status": "VERIFIED", "trace": trace}
+                _record_task_timing("neural_transformer_checkpoint", t0, matched=False, status_label="MISS")
             except Exception:
-                pass
+                _record_task_timing("neural_transformer_checkpoint", t0, matched=False, status_label="ERROR")
 
+        t0 = time.perf_counter()
         ngram_res = run_ngram_continuation(conn, prompt)
         if ngram_res and ngram_res.get("generated"):
+            _record_task_timing(
+                "ngram_checkpoint",
+                t0,
+                matched=True,
+                status_label="VERIFIED",
+                detail=f"v{ngram_res['checkpoint_version']}",
+            )
             trace["engine_path"].append("ngram_checkpoint")
             trace["checkpoint"] = ngram_res
             content = (
@@ -2923,34 +3077,45 @@ def handle_infer(payload: dict) -> dict:
                 f"(perplexity {ngram_res['perplexity']:.2f}, ตรงคำศัพท์ {ngram_res['matched_vocab']} คำ):\n\n"
                 f"{prompt} **{ngram_res['generated']}**"
             )
-            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            _finalize_trace()
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
         elif ngram_res:
             trace["checkpoint"] = ngram_res
+        _record_task_timing("ngram_checkpoint", t0, matched=False, status_label="MISS")
 
     # 7. Attachment analysis (factual local statistics only)
     if attachment:
+        t0 = time.perf_counter()
         words = tokenize(attachment)
         freq = collections.Counter(words).most_common(5)
         trace["engine_path"].append("attachment_stats")
         trace["attachment_tokens"] = len(words)
+        _record_task_timing(
+            "attachment_stats",
+            t0,
+            matched=True,
+            status_label="VERIFIED",
+            detail=f"{len(words)} tokens",
+        )
         top_terms = ", ".join(f"{w} ({c})" for w, c in freq)
         content = (
             f"วิเคราะห์ไฟล์ข้อความที่แนบในเครื่องแล้ว ({len(words)} โทเคน/พยางค์, {len(set(words))} หน่วยไม่ซ้ำ)\n\n"
             f"หน่วยคำที่พบบ่อย: {top_terms or 'ไม่มี'}\n\n"
             f"หากต้องการนำไปฝึกโมเดลหรือบันทึกเป็นความรู้ถาวร สามารถนำเข้าได้ที่หน้า **ความจำและเวิร์กโฟลว์** หรือ **ตั้งค่า → นักพัฒนา**"
         )
-        trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+        _finalize_trace()
         conn.close()
         return {"content": content, "status": "VERIFIED", "trace": trace}
 
     # 8. Honest Unlearned Boundary (NEVER fabricate intelligence)
+    t0 = time.perf_counter()
     trace["engine_path"].append("unlearned_boundary")
-    trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
     triple_count = conn.execute("SELECT COUNT(*) FROM knowledge_triples").fetchone()[0]
     ckpt_count = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
     conn.close()
+    _record_task_timing("unlearned_boundary", t0, matched=True, status_label="NOT_LEARNED")
+    _finalize_trace()
 
     content = (
         f"**สถานะ: ยังไม่ได้เรียนรู้ในแกนสมองภายใน (Not Learned)**\n\n"
@@ -4016,6 +4181,33 @@ def main() -> None:
             str(payload.get("user_id", "system")),
             handle_ingest_dataset,
             name=str(payload.get("name", "verified-knowledge-corpus")),
+        )
+        conn.close()
+        print(json.dumps(res))
+    elif cmd == "synthesize_curriculum":
+        conn = get_db()
+        res = synthesize_failure_curriculum(
+            conn,
+            heldout_prompts=payload.get("heldout_prompts"),
+            limit=int(payload.get("limit", 50)),
+        )
+        conn.close()
+        print(json.dumps(res))
+    elif cmd == "run_continual_round":
+        conn = get_db()
+        res = run_continual_learning_round(
+            conn,
+            CHECKPOINT_DIR,
+            str(payload.get("user_id", "system")),
+            new_train_lines=payload.get("new_train_lines"),
+            anchor_lines=payload.get("anchor_lines"),
+            replay_ratio=float(payload.get("replay_ratio", 0.35)),
+            anchor_l2_lambda=float(payload.get("anchor_l2_lambda", 0.02)),
+            max_forgetting_loss_delta=float(payload.get("max_forgetting_loss_delta", 0.25)),
+            max_forgetting_acc_drop=float(payload.get("max_forgetting_acc_drop", 0.15)),
+            epochs=int(payload.get("epochs", 6)),
+            lr=float(payload.get("lr", 0.012)),
+            seed=int(payload.get("seed", 42)),
         )
         conn.close()
         print(json.dumps(res))
