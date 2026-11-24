@@ -376,6 +376,134 @@ class P2ReasoningAndPlanningTests(unittest.TestCase):
             self.assertEqual(last_msg["status"], "NOT_LEARNED")
             self.assertIn("INSUFFICIENT_EVIDENCE", last_msg["content"])
 
+    def test_conflicting_evidence_and_continuous_chain_resilience(self) -> None:
+        import db_bridge  # noqa: E402
+        from datetime import datetime, timezone  # noqa: E402
+
+        with isolated_core_env():
+            db_bridge.DB_PATH = zc.DB_PATH
+            db_bridge.DATA_DIR = zc.DATA_DIR
+            conn = zc.get_db()
+            fresh_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # 1a. Conflicting release year across two providers -> CONFLICTING_SOURCES (never VERIFIED)
+            conflict_num = te.analyze_tool_result(
+                conn,
+                "web_search",
+                {
+                    "ok": True,
+                    "results": [
+                        {
+                            "provider": "en.wikipedia.org",
+                            "title": "ProtoDB",
+                            "snippet": "ProtoDB engine released in 2001 for embedded analytics.",
+                            "url": "https://en.wikipedia.org/wiki/ProtoDB",
+                            "retrieved_at": fresh_ts,
+                        },
+                        {
+                            "provider": "api.duckduckgo.com",
+                            "title": "ProtoDB",
+                            "snippet": "ProtoDB engine released in 2008 for embedded analytics.",
+                            "url": "https://api.duckduckgo.com/?q=ProtoDB",
+                            "retrieved_at": fresh_ts,
+                        },
+                    ],
+                },
+                zc.tokenize, zc.extract_query_terms, zc.query_knowledge_graph,
+            )
+            self.assertEqual(conflict_num["trust_grade"], "CONFLICTING_SOURCES")
+            self.assertEqual(conflict_num["verification_status"], "CONFLICTING")
+            self.assertGreaterEqual(len(conflict_num["conflicts"]), 1)
+
+            # 1b. Conflicting polarity across providers -> CONFLICTING_SOURCES
+            conflict_pol = te.analyze_tool_result(
+                conn,
+                "web_search",
+                {
+                    "ok": True,
+                    "results": [
+                        {
+                            "provider": "en.wikipedia.org",
+                            "title": "RuntimeX",
+                            "snippet": "RuntimeX supports transactions by default.",
+                            "url": "https://en.wikipedia.org/wiki/RuntimeX",
+                            "retrieved_at": fresh_ts,
+                        },
+                        {
+                            "provider": "api.duckduckgo.com",
+                            "title": "RuntimeX",
+                            "snippet": "RuntimeX does not support transactions cleanly.",
+                            "url": "https://api.duckduckgo.com/?q=RuntimeX",
+                            "retrieved_at": fresh_ts,
+                        },
+                    ],
+                },
+                zc.tokenize, zc.extract_query_terms, zc.query_knowledge_graph,
+            )
+            self.assertEqual(conflict_pol["trust_grade"], "CONFLICTING_SOURCES")
+
+            # 1c. External claim contradicting internal KG numeric fact -> CONFLICTING_SOURCES
+            zc.handle_infer({"prompt": "สอน: คาร์บอน -> มีเลขอะตอม -> 6", "mode": "knowledge", "user_id": "u"})
+            conflict_kg = te.analyze_tool_result(
+                conn,
+                "web_search",
+                {
+                    "ok": True,
+                    "results": [
+                        {
+                            "provider": "en.wikipedia.org",
+                            "title": "คาร์บอน",
+                            "snippet": "คาร์บอน มีเลขอะตอม 12 ในตารางธาตุ",
+                            "url": "https://th.wikipedia.org/wiki/Carbon",
+                            "retrieved_at": fresh_ts,
+                        }
+                    ],
+                },
+                zc.tokenize, zc.extract_query_terms, zc.query_knowledge_graph,
+            )
+            self.assertEqual(conflict_kg["trust_grade"], "CONFLICTING_SOURCES")
+
+            # 1d. Non-overlapping attributes across providers (year vs version) -> CORROBORATED_MULTI_SOURCE
+            agree_res = te.analyze_tool_result(
+                conn,
+                "web_search",
+                {
+                    "ok": True,
+                    "results": [
+                        {
+                            "provider": "en.wikipedia.org",
+                            "title": "SQLite",
+                            "snippet": "SQLite database engine released in 2000.",
+                            "url": "https://en.wikipedia.org/wiki/SQLite",
+                            "retrieved_at": fresh_ts,
+                        },
+                        {
+                            "provider": "api.duckduckgo.com",
+                            "title": "SQLite",
+                            "snippet": "SQLite database engine version 3.46.",
+                            "url": "https://api.duckduckgo.com/?q=SQLite",
+                            "retrieved_at": fresh_ts,
+                        },
+                    ],
+                },
+                zc.tokenize, zc.extract_query_terms, zc.query_knowledge_graph,
+            )
+            self.assertEqual(agree_res["trust_grade"], "CORROBORATED_MULTI_SOURCE")
+            self.assertEqual(agree_res["conflicts"], [])
+            conn.close()
+
+            # 2. Continuous multi-module session chain on unseen domain data
+            for edge in [("A1", "A2"), ("A2", "A3"), ("A3", "A4"), ("A4", "A5"), ("A5", "A6")]:
+                self.assertEqual(
+                    zc.handle_infer({"prompt": f"สอน: {edge[0]} -> ส่งต่อ -> {edge[1]}", "mode": "knowledge", "user_id": "u"})["status"],
+                    "VERIFIED",
+                )
+            self.assertEqual(zc.handle_infer({"prompt": "เชื่อมโยง: A1 -> A6", "mode": "auto", "user_id": "u"})["trace"]["graph_path"]["path"]["hops"], 5)
+            self.assertEqual(zc.handle_infer({"prompt": "ถ้า A1 > A3 และ A3 > A6 แล้ว A1 เทียบกับ A6 เป็นอย่างไร", "mode": "auto", "user_id": "u"})["trace"]["logic"]["derived_relation"], "A1 > A6")
+            self.assertEqual(zc.handle_infer({"prompt": "แก้สมการ: x^2 - 9 = 0", "mode": "auto", "user_id": "u"})["trace"]["algebra"]["summary_tag"], "roots(-3,3)")
+            self.assertEqual(zc.handle_infer({"prompt": "มีเอกสาร 36 หน้า แบ่งอ่าน 6 วันเท่าๆ กัน จะได้วันละกี่หน้า", "mode": "auto", "user_id": "u"})["trace"]["word_math"]["result"], 6)
+            self.assertEqual(zc.handle_infer({"prompt": "สร้างระบบติดตามคำสั่งซื้อร้านค้า", "mode": "plan", "user_id": "u"})["trace"]["plan"]["domain_mode"], "general_engineering")
+
 
 if __name__ == "__main__":
     unittest.main()

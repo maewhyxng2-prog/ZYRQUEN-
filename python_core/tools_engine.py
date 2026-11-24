@@ -734,6 +734,97 @@ def _parse_iso_utc(ts_str: str | None) -> datetime | None:
         return None
 
 
+_CONFLICT_SLOTS: list[tuple[str, re.Pattern[str]]] = [
+    ("release_year", re.compile(r"(?:released|created|founded|launched|เปิดตัว|ก่อตั้ง|สร้างขึ้น)(?:\s+(?:in|on|ในปี|เมื่อปี|ปี))?\s+(\d{4})\b", re.IGNORECASE)),
+    ("version", re.compile(r"(?:version|เวอร์ชัน|รุ่น)\s+v?(\d+(?:\.\d+)+)\b", re.IGNORECASE)),
+    ("atomic_number", re.compile(r"(?:atomic\s+number|เลขอะตอม)(?:\s*(?:is|คือ|=|:))?\s+(\d+(?:\.\d+)?)\b", re.IGNORECASE)),
+    ("port", re.compile(r"(?:default\s+)?(?:port|พอร์ต)(?:\s*(?:is|คือ|=|:))?\s+(\d{2,5})\b", re.IGNORECASE)),
+    ("count_metric", re.compile(r"(?:มี|contains|consists\s+of|ทั้งหมด)\s+(\d+(?:\.\d+)?)\s+(?:คน|ผล|ชิ้น|เล่ม|pages|items|nodes|hops)\b", re.IGNORECASE)),
+]
+
+
+def _detect_source_conflicts(
+    source_chunks: dict[str, list[str]],
+    kg_matches: list[dict],
+) -> list[dict]:
+    conflicts: list[dict] = []
+    if not source_chunks:
+        return conflicts
+
+    # 1. Cross-provider same-slot numeric conflicts
+    slot_provider_vals: dict[str, dict[str, set[str]]] = collections.defaultdict(lambda: collections.defaultdict(set))
+    for prov, chunks in source_chunks.items():
+        joined = " ".join(chunks)
+        for slot_name, pattern in _CONFLICT_SLOTS:
+            for match in pattern.findall(joined):
+                slot_provider_vals[slot_name][prov].add(str(match).strip())
+
+    for slot_name, prov_map in slot_provider_vals.items():
+        single_val_provs = {p: next(iter(vs)) for p, vs in prov_map.items() if len(vs) == 1}
+        if len(single_val_provs) >= 2:
+            distinct_vals = sorted(set(single_val_provs.values()))
+            if len(distinct_vals) >= 2:
+                conflicts.append({
+                    "type": "CROSS_SOURCE_NUMERIC_CONFLICT",
+                    "slot": slot_name,
+                    "claims": single_val_provs,
+                    "detail": f"แหล่งข้อมูลระบุค่า '{slot_name}' ไม่ตรงกัน ({', '.join(f'{p}={v}' for p, v in sorted(single_val_provs.items()))})",
+                })
+
+    # 2. Cross-provider explicit affirmative vs negative polarity conflict on shared context
+    if len(source_chunks) >= 2:
+        neg_re = re.compile(r"\b(?:is\s+not|are\s+not|does\s+not\s+support|cannot|never\s+supported|no\s+longer)\b|(?:ไม่รองรับ|ไม่ใช่|ไม่ได้ใช้|ยกเลิกแล้ว)", re.IGNORECASE)
+        pos_re = re.compile(r"\b(?:supports|is\s+supported|is\s+compatible|enabled\s+by\s+default)\b|(?:รองรับอย่างเป็นทางการ|ใช้งานร่วมกันได้|เปิดใช้งานเป็นค่าเริ่มต้น)", re.IGNORECASE)
+        neg_provs: list[str] = []
+        pos_provs: list[str] = []
+        for prov, chunks in source_chunks.items():
+            joined = " ".join(chunks)
+            has_neg = bool(neg_re.search(joined))
+            has_pos = bool(pos_re.search(joined))
+            if has_neg and not has_pos:
+                neg_provs.append(prov)
+            elif has_pos and not has_neg:
+                pos_provs.append(prov)
+        if neg_provs and pos_provs:
+            conflicts.append({
+                "type": "CROSS_SOURCE_POLARITY_CONFLICT",
+                "slot": "assertion_polarity",
+                "claims": {**{p: "affirmative" for p in pos_provs}, **{p: "negative" for p in neg_provs}},
+                "detail": f"แหล่งข้อมูลให้ข้อสรุปขัดแย้งกัน ({', '.join(pos_provs)} ยืนยัน vs {', '.join(neg_provs)} ปฏิเสธ)",
+            })
+
+    # 3. External source numeric contradiction against verified internal KG slot
+    for kg in kg_matches:
+        subj = str(kg.get("subject", "")).strip()
+        rel = str(kg.get("relation", "")).strip()
+        obj = str(kg.get("object", "")).strip()
+        if not subj or not re.fullmatch(r"\d+(?:\.\d+)?", obj):
+            continue
+        subj_l = subj.lower()
+        rel_l = rel.lower()
+        for prov, chunks in source_chunks.items():
+            joined = " ".join(chunks)
+            joined_l = joined.lower()
+            if subj_l in joined_l and any(k in joined_l for k in [rel_l, "atomic number", "เลขอะตอม", "port", "พอร์ต", "version", "เวอร์ชัน"]):
+                for slot_name, pattern in _CONFLICT_SLOTS:
+                    found_vals = set(pattern.findall(joined))
+                    if len(found_vals) == 1:
+                        ext_val = next(iter(found_vals))
+                        if ext_val != obj and (
+                            ("เลขอะตอม" in rel_l and slot_name == "atomic_number")
+                            or ("พอร์ต" in rel_l or "port" in rel_l) and slot_name == "port"
+                            or ("เวอร์ชัน" in rel_l or "version" in rel_l) and slot_name == "version"
+                        ):
+                            conflicts.append({
+                                "type": "EXTERNAL_VS_KG_CONFLICT",
+                                "slot": slot_name,
+                                "claims": {prov: ext_val, "internal_kg": obj},
+                                "detail": f"แหล่งภายนอก {prov} ระบุ {subj} ({slot_name}={ext_val}) ขัดแย้งกับกราฟความรู้ภายใน ({obj})",
+                            })
+
+    return conflicts
+
+
 def analyze_tool_result(
     conn: sqlite3.Connection,
     tool_id: str,
@@ -804,6 +895,7 @@ def analyze_tool_result(
 
     text_chunks: list[str] = []
     source_terms: dict[str, set[str]] = collections.defaultdict(set)
+    source_chunks: dict[str, list[str]] = collections.defaultdict(list)
     evidence_items: list[dict] = []
     rejected_sources: list[dict] = []
     observed_timestamps: list[datetime] = []
@@ -830,6 +922,7 @@ def analyze_tool_result(
                 observed_timestamps.append(item_ts)
             chunk = f"{item.get('title', '')} {item.get('snippet', '')}"
             text_chunks.append(chunk)
+            source_chunks[prov].append(chunk)
             item_terms = set(extract_terms_fn(chunk))
             source_terms[prov].update(item_terms)
             evidence_items.append(
@@ -856,6 +949,7 @@ def analyze_tool_result(
         else:
             chunk = f"{raw_output.get('title', '')}\n{' '.join(raw_output.get('headings', []))}\n{raw_output.get('excerpt', '')}"
             text_chunks.append(chunk)
+            source_chunks[prov].append(chunk)
             source_terms[prov].update(extract_terms_fn(chunk[:1500]))
             evidence_items.append(
                 {
@@ -903,6 +997,7 @@ def analyze_tool_result(
 
     kg_matches = query_kg_fn(conn, " ".join(terms[:8])) if terms else []
     numbers = re.findall(r"\b\d+(?:\.\d+)?\b", combined[:1500])[:6]
+    conflicts = _detect_source_conflicts(source_chunks, kg_matches) if tool_id in {"web_search", "doc_fetch"} else []
 
     if tool_id == "workspace_file_read":
         trust_grade = "SANDBOX_LOCAL_FILE"
@@ -917,6 +1012,9 @@ def analyze_tool_result(
     elif freshness_status == "STALE":
         trust_grade = "STALE"
         verification_status = "STALE"
+    elif conflicts:
+        trust_grade = "CONFLICTING_SOURCES"
+        verification_status = "CONFLICTING"
     elif len(distinct_providers) >= 2 and len(shared_terms) >= 1:
         trust_grade = "CORROBORATED_MULTI_SOURCE"
         verification_status = "VERIFIED"
@@ -933,6 +1031,9 @@ def analyze_tool_result(
         )
     if freshness_status == "STALE":
         limitations.append("ข้อมูลหลักฐานล้าสมัย (STALE: retrieved_at เกินระยะเวลาที่กำหนด ควรสืบค้นใหม่ก่อนอ้างอิง)")
+    if conflicts:
+        for cf in conflicts[:3]:
+            limitations.append(f"ข้อขัดแย้งของหลักฐาน: {cf['detail']}")
     if trust_grade == "UNCORROBORATED_SINGLE_SOURCE":
         limitations.append("พบหลักฐานจากแหล่งเดียวหรือยังไม่มีคำสำคัญยืนยันข้ามหลายแหล่ง ควรตรวจสอบเอกสารต้นทางเพิ่มเติม")
     if trust_grade in {"INSUFFICIENT_EVIDENCE", "UNVERIFIED", "BLOCKED"} and not evidence_items:
@@ -964,6 +1065,7 @@ def analyze_tool_result(
             for m in kg_matches[:4]
         ],
         "numeric_values": numbers,
+        "conflicts": conflicts,
         "evidence_items": evidence_items,
         "rejected_sources": rejected_sources,
         "limitations": limitations,

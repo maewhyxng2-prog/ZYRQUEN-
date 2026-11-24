@@ -6,12 +6,19 @@ export class ApiError extends Error {
   }
 }
 
+function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (err instanceof DOMException && err.name === 'AbortError') return true;
+  return err instanceof Error && err.name === 'AbortError';
+}
+
 export async function apiRequest<T>(
   path: string,
   options: {
     method?: string;
     token?: string | null;
     body?: unknown;
+    signal?: AbortSignal;
   } = {}
 ): Promise<T> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -30,9 +37,13 @@ export async function apiRequest<T>(
       method: options.method || 'GET',
       headers,
       credentials: 'include',
+      signal: options.signal,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     });
-  } catch {
+  } catch (err) {
+    if (isAbortError(err, options.signal)) {
+      throw err;
+    }
     throw new ApiError(
       'ไม่สามารถเชื่อมต่อกับ ZYRQUEN Cloud Core ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองเชื่อมต่อใหม่',
       0
@@ -54,6 +65,7 @@ export async function streamConversationMessage<TResult>(
     mode: string;
     attachment?: string;
     modelVariant: string;
+    signal?: AbortSignal;
     onDelta?: (partialText: string) => void;
   }
 ): Promise<TResult> {
@@ -75,6 +87,7 @@ export async function streamConversationMessage<TResult>(
       method: 'POST',
       headers,
       credentials: 'include',
+      signal: options.signal,
       body: JSON.stringify({
         content: options.content,
         mode: options.mode,
@@ -86,7 +99,10 @@ export async function streamConversationMessage<TResult>(
         },
       }),
     });
-  } catch {
+  } catch (err) {
+    if (isAbortError(err, options.signal)) {
+      throw err;
+    }
     throw new ApiError(
       'การเชื่อมต่อกับ ZYRQUEN Cloud Core ขาดหายระหว่างประมวลผล กรุณาลองเชื่อมต่อใหม่',
       0
@@ -108,6 +124,11 @@ export async function streamConversationMessage<TResult>(
   let buffer = '';
   let accumulated = '';
   let finalPayload: TResult | null = null;
+
+  const onAbort = () => {
+    void reader.cancel('Stream aborted').catch(() => {});
+  };
+  options.signal?.addEventListener('abort', onAbort, { once: true });
 
   const processBlock = (block: string) => {
     const lines = block.split('\n');
@@ -141,23 +162,35 @@ export async function streamConversationMessage<TResult>(
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buffer.indexOf('\n\n')) !== -1) {
-      const block = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 2);
-      if (block) processBlock(block);
+  try {
+    while (true) {
+      if (options.signal?.aborted) {
+        throw new DOMException('Stream aborted', 'AbortError');
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 2);
+        if (block) processBlock(block);
+      }
+    }
+
+    const tail = buffer.trim();
+    if (tail) processBlock(tail);
+
+    if (!finalPayload) {
+      throw new ApiError('Stream ended before completion', 500);
+    }
+    return finalPayload;
+  } finally {
+    options.signal?.removeEventListener('abort', onAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // Lock may already be released after cancel
     }
   }
-
-  const tail = buffer.trim();
-  if (tail) processBlock(tail);
-
-  if (!finalPayload) {
-    throw new ApiError('Stream ended before completion', 500);
-  }
-  return finalPayload;
 }

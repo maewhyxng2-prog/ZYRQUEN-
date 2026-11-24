@@ -1,6 +1,12 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import App from '../App';
+import App, {
+  PerformanceMonitor,
+  verifyThreadEffectCleanup,
+  type MemorySnapshot,
+  type ThreadLoadEntry,
+} from '../App';
+import { streamConversationMessage } from '../lib/api';
 
 function mockFetch(handlers: Record<string, (init?: RequestInit) => Response | Promise<Response>>) {
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -822,5 +828,320 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
       />
     );
     expect(screen.getByRole('button', { name: 'ถูกจำกัดสิทธิ์' })).toBeDisabled();
+  });
+
+  it('PerformanceMonitor ติดตามหน่วยความจำขณะสตรีมมิ่งต่อเนื่องและทำความสะอาดตัวจับเวลาเมื่อออกจากหน้าจอ', async () => {
+    vi.useFakeTimers();
+    const samples: MemorySnapshot[] = [];
+    const origPerfMemory = (performance as unknown as { memory?: unknown }).memory;
+
+    try {
+      // 1. ทดสอบเมื่อ runtime มี performance.memory (Chromium/V8)
+      Object.defineProperty(performance, 'memory', {
+        configurable: true,
+        value: {
+          usedJSHeapSize: 20 * 1024 * 1024,
+          totalJSHeapSize: 40 * 1024 * 1024,
+          jsHeapSizeLimit: 2048 * 1024 * 1024,
+        },
+      });
+
+      const { rerender, unmount } = render(
+        <PerformanceMonitor
+          active={true}
+          streaming={true}
+          streamingContent="ส่วนที่ 1"
+          messageCount={2}
+          getActiveStreamCount={() => 1}
+          getPendingThreadLoads={() => 0}
+          sampleIntervalMs={250}
+          onSample={(s) => samples.push(s)}
+        />
+      );
+
+      expect(samples.length).toBeGreaterThanOrEqual(1);
+      expect(samples[0].heapSupported).toBe(true);
+      expect(samples[0].usedJSHeapMB).toBe(20);
+      expect(samples[0].heapDeltaMB).toBe(0);
+      expect(samples[0].leakWarning).toBe(false);
+
+      // จำลองสตรีมมิ่งต่อเนื่องและหน่วยความจำเพิ่มขึ้นเกินเกณฑ์เตือน
+      Object.defineProperty(performance, 'memory', {
+        configurable: true,
+        value: {
+          usedJSHeapSize: 72 * 1024 * 1024,
+          totalJSHeapSize: 96 * 1024 * 1024,
+          jsHeapSizeLimit: 2048 * 1024 * 1024,
+        },
+      });
+
+      rerender(
+        <PerformanceMonitor
+          active={true}
+          streaming={true}
+          streamingContent={'ข้อมูลสตรีมมิ่งต่อเนื่อง '.repeat(20)}
+          messageCount={3}
+          getActiveStreamCount={() => 1}
+          getPendingThreadLoads={() => 0}
+          sampleIntervalMs={250}
+          onSample={(s) => samples.push(s)}
+        />
+      );
+
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+
+      const latest = samples[samples.length - 1];
+      expect(latest.streamBufferBytes).toBeGreaterThan(200);
+      expect(latest.heapDeltaMB).toBe(52);
+      expect(latest.leakWarning).toBe(true);
+
+      const countBeforeUnmount = samples.length;
+      unmount();
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      // หลัง unmount ต้องไม่มี interval ค้างมาเรียก onSample อีก
+      expect(samples.length).toBe(countBeforeUnmount);
+
+      // 2. เมื่อ runtime ไม่มี performance.memory ต้องรายงาน heapSupported=false อย่างตรงไปตรงมา
+      Object.defineProperty(performance, 'memory', {
+        configurable: true,
+        value: undefined,
+      });
+      const fallbackSamples: MemorySnapshot[] = [];
+      const fallbackView = render(
+        <PerformanceMonitor
+          active={true}
+          streaming={false}
+          streamingContent={null}
+          messageCount={0}
+          getActiveStreamCount={() => 0}
+          getPendingThreadLoads={() => 0}
+          onSample={(s) => fallbackSamples.push(s)}
+        />
+      );
+      expect(fallbackSamples[0].heapSupported).toBe(false);
+      expect(fallbackSamples[0].usedJSHeapMB).toBeNull();
+      fallbackView.unmount();
+    } finally {
+      Object.defineProperty(performance, 'memory', {
+        configurable: true,
+        value: origPerfMemory,
+      });
+      vi.useRealTimers();
+    }
+  });
+
+  it('verifyThreadEffectCleanup และ useEffect ใน loadConversationThread ยกเลิกคำขอค้างเมื่อสลับห้องสนทนาและป้องกัน Memory Leak', async () => {
+    // 1. ตรวจสอบหน่วยฟังก์ชัน verifyThreadEffectCleanup ทั้งกรณีสะอาดและกรณีรั่วไหล
+    const cleanCtrl = new AbortController();
+    cleanCtrl.abort();
+    const cleanEntries: ThreadLoadEntry[] = [
+      {
+        requestId: 1,
+        conversationId: 'c1',
+        controller: cleanCtrl,
+        cleanedUp: true,
+        settled: false,
+      },
+    ];
+    expect(verifyThreadEffectCleanup(cleanEntries)).toMatchObject({
+      clean: true,
+      abortedCount: 1,
+      leakedRequestIds: [],
+    });
+
+    const leakedCtrl = new AbortController();
+    const leakedEntries: ThreadLoadEntry[] = [
+      {
+        requestId: 2,
+        conversationId: 'c2',
+        controller: leakedCtrl,
+        cleanedUp: true,
+        settled: false,
+      },
+    ];
+    expect(verifyThreadEffectCleanup(leakedEntries)).toMatchObject({
+      clean: false,
+      leakedRequestIds: [2],
+    });
+
+    // 2. ทดสอบระดับ App: สลับจาก c1 ไป c2 ระหว่างที่ GET /api/conversations/c1 ยังไม่ตอบกลับ
+    const observedSignals: Record<string, AbortSignal | null | undefined> = {};
+    let resolveC1!: (resp: Response) => void;
+    const c1Deferred = new Promise<Response>((resolve) => {
+      resolveC1 = resolve;
+    });
+
+    mockFetch({
+      'GET /api/auth/status': () =>
+        new Response(
+          JSON.stringify({ initialized: true, userCount: 1, envPasscodeConfigured: false }),
+          { status: 200 }
+        ),
+      'GET /api/health': () =>
+        new Response(JSON.stringify({ ok: true, nativeCore: 'ready' }), { status: 200 }),
+      'GET /api/auth/me': () =>
+        new Response(
+          JSON.stringify({
+            user: {
+              id: 'u1',
+              email: 'admin@zyrquen.local',
+              display_name: 'ผู้ดูแล',
+              role: 'admin',
+              created_at: '2026-11-24T00:00:00Z',
+            },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/home': () =>
+        new Response(
+          JSON.stringify({
+            recent_conversations: [],
+            counts: { triples: 0, checkpoints: 0, datasets: 0, pending_approvals: 0 },
+            system: { python_version: '3.11.2' },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/conversations': () =>
+        new Response(
+          JSON.stringify({
+            conversations: [
+              { id: 'c1', title: 'ห้องที่หนึ่ง', mode: 'auto', updated_at: '2026-11-24T00:00:00Z', message_count: 1 },
+              { id: 'c2', title: 'ห้องที่สอง', mode: 'auto', updated_at: '2026-11-24T00:01:00Z', message_count: 1 },
+            ],
+          }),
+          { status: 200 }
+        ),
+      'GET /api/conversations/c1': (init) => {
+        observedSignals.c1 = init?.signal;
+        return c1Deferred;
+      },
+      'GET /api/conversations/c2': (init) => {
+        observedSignals.c2 = init?.signal;
+        return new Response(
+          JSON.stringify({
+            conversation: {
+              id: 'c2',
+              title: 'ห้องที่สอง',
+              mode: 'auto',
+              updated_at: '2026-11-24T00:01:00Z',
+              message_count: 1,
+            },
+            messages: [
+              {
+                id: 'm-c2',
+                conversation_id: 'c2',
+                role: 'assistant',
+                content: 'เนื้อหาที่ถูกต้องของห้องที่สอง',
+                mode: 'auto',
+                trace_json: null,
+                status: 'VERIFIED',
+                created_at: '2026-11-24T00:01:00Z',
+              },
+            ],
+          }),
+          { status: 200 }
+        );
+      },
+    });
+
+    window.history.replaceState({}, '', '/?view=workspace&cid=c1');
+    const view = render(<App />);
+
+    await waitFor(() => {
+      expect(observedSignals.c1).toBeDefined();
+    });
+
+    // เปิดประวัติบทสนทนาแล้วสลับไปห้อง c2 ทันทีก่อนที่ c1 จะตอบกลับ
+    fireEvent.click(await screen.findByRole('button', { name: 'เปิดประวัติบทสนทนา' }));
+    const room2Buttons = await screen.findAllByText('ห้องที่สอง');
+    fireEvent.click(room2Buttons[room2Buttons.length - 1]);
+
+    expect(await screen.findByText('เนื้อหาที่ถูกต้องของห้องที่สอง')).toBeInTheDocument();
+    expect(observedSignals.c1?.aborted).toBe(true);
+    expect(observedSignals.c2?.aborted).toBe(false);
+
+    // แม้ c1 จะตอบกลับมาทีหลัง ข้อมูลเก่าของ c1 ต้องไม่เขียนทับห้อง c2
+    await act(async () => {
+      resolveC1(
+        new Response(
+          JSON.stringify({
+            conversation: {
+              id: 'c1',
+              title: 'ห้องที่หนึ่ง',
+              mode: 'auto',
+              updated_at: '2026-11-24T00:00:00Z',
+              message_count: 1,
+            },
+            messages: [
+              {
+                id: 'm-c1-stale',
+                conversation_id: 'c1',
+                role: 'assistant',
+                content: 'ข้อมูลเก่าที่ควรโดนยกเลิก',
+                mode: 'auto',
+                trace_json: null,
+                status: 'VERIFIED',
+                created_at: '2026-11-24T00:00:00Z',
+              },
+            ],
+          }),
+          { status: 200 }
+        )
+      );
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText('ข้อมูลเก่าที่ควรโดนยกเลิก')).not.toBeInTheDocument();
+    expect(screen.getByText('เนื้อหาที่ถูกต้องของห้องที่สอง')).toBeInTheDocument();
+    const perfState = (
+      window as unknown as {
+        __ZYRQUEN_PERF_MONITOR__?: { cleanupVerification?: { clean: boolean } | null };
+      }
+    ).__ZYRQUEN_PERF_MONITOR__;
+    expect(perfState?.cleanupVerification?.clean).toBe(true);
+
+    // 3. ทดสอบการยกเลิก stream reader ใน streamConversationMessage
+    const cancelSpy = vi.fn(async () => {});
+    const encoder = new TextEncoder();
+    let reads = 0;
+    const mockBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        if (reads === 1) {
+          controller.enqueue(encoder.encode('event: delta\ndata: {"delta":"กำลังคิด..."}\n\n'));
+        }
+      },
+      cancel: cancelSpy,
+    });
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(mockBody, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as unknown as typeof fetch;
+
+    const streamAbort = new AbortController();
+    const deltas: string[] = [];
+    const streamPromise = streamConversationMessage('c2', {
+      token: 't1',
+      content: 'ทดสอบสตรีม',
+      mode: 'auto',
+      modelVariant: 'zyrquen-omega-v1',
+      signal: streamAbort.signal,
+      onDelta: (partial) => {
+        deltas.push(partial);
+        streamAbort.abort();
+      },
+    });
+
+    await expect(streamPromise).rejects.toThrow();
+    expect(deltas).toEqual(['กำลังคิด...']);
+    expect(cancelSpy).toHaveBeenCalled();
+
+    view.unmount();
   });
 });

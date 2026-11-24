@@ -631,7 +631,7 @@ def handle_action(action: str, payload: dict) -> dict:
             t_grade = analysis_obj.get("trust_grade")
             if res.get("status") != "COMPLETED":
                 msg_status = "BLOCKED" if res.get("status") == "BLOCKED" else "FAILED"
-            elif t_grade == "INSUFFICIENT_EVIDENCE":
+            elif t_grade in {"INSUFFICIENT_EVIDENCE", "CONFLICTING_SOURCES"}:
                 msg_status = "NOT_LEARNED"
             elif t_grade == "BLOCKED":
                 msg_status = "BLOCKED"

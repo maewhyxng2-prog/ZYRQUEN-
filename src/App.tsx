@@ -58,6 +58,246 @@ function buildUrl(
   return qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
 }
 
+export interface MemorySnapshot {
+  timestamp: number;
+  heapSupported: boolean;
+  usedJSHeapMB: number | null;
+  totalJSHeapMB: number | null;
+  jsHeapLimitMB: number | null;
+  streamBufferBytes: number;
+  messageCount: number;
+  activeStreamCount: number;
+  pendingThreadLoads: number;
+  heapDeltaMB: number | null;
+  leakWarning: boolean;
+}
+
+export interface ThreadLoadEntry {
+  requestId: number;
+  conversationId: string;
+  controller: AbortController;
+  cleanedUp: boolean;
+  settled: boolean;
+}
+
+export interface ThreadCleanupVerification {
+  clean: boolean;
+  activeCount: number;
+  abortedCount: number;
+  leakedRequestIds: number[];
+  checkedAt: number;
+}
+
+interface BrowserPerformanceMemory {
+  usedJSHeapSize: number;
+  totalJSHeapSize: number;
+  jsHeapSizeLimit: number;
+}
+
+const PERF_SAMPLE_LIMIT = 60;
+const HEAP_LEAK_THRESHOLD_MB = 48;
+const textByteEncoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+
+export function verifyThreadEffectCleanup(
+  entries: Iterable<ThreadLoadEntry>
+): ThreadCleanupVerification {
+  const leakedRequestIds: number[] = [];
+  let activeCount = 0;
+  let abortedCount = 0;
+
+  for (const entry of entries) {
+    if (entry.controller.signal.aborted) {
+      abortedCount += 1;
+    }
+    if (!entry.settled && !entry.cleanedUp) {
+      activeCount += 1;
+    }
+    if (entry.cleanedUp && !entry.controller.signal.aborted && !entry.settled) {
+      leakedRequestIds.push(entry.requestId);
+    }
+  }
+
+  return {
+    clean: leakedRequestIds.length === 0,
+    activeCount,
+    abortedCount,
+    leakedRequestIds,
+    checkedAt: Date.now(),
+  };
+}
+
+export function readRuntimeMemorySnapshot(params: {
+  streamingContent: string | null;
+  messageCount: number;
+  activeStreamCount: number;
+  pendingThreadLoads: number;
+  baselineHeapMB: number | null;
+}): MemorySnapshot {
+  const perf =
+    typeof performance !== 'undefined'
+      ? (performance as unknown as { memory?: BrowserPerformanceMemory })
+      : undefined;
+  const mem = perf?.memory;
+  const heapSupported = Boolean(
+    mem &&
+      typeof mem.usedJSHeapSize === 'number' &&
+      typeof mem.totalJSHeapSize === 'number' &&
+      typeof mem.jsHeapSizeLimit === 'number'
+  );
+
+  const toMB = (bytes: number) => Math.round((bytes / (1024 * 1024)) * 100) / 100;
+  const usedJSHeapMB = heapSupported && mem ? toMB(mem.usedJSHeapSize) : null;
+  const totalJSHeapMB = heapSupported && mem ? toMB(mem.totalJSHeapSize) : null;
+  const jsHeapLimitMB = heapSupported && mem ? toMB(mem.jsHeapSizeLimit) : null;
+  const heapDeltaMB =
+    usedJSHeapMB !== null && params.baselineHeapMB !== null
+      ? Math.round((usedJSHeapMB - params.baselineHeapMB) * 100) / 100
+      : null;
+
+  const content = params.streamingContent || '';
+  const streamBufferBytes = textByteEncoder
+    ? textByteEncoder.encode(content).byteLength
+    : content.length * 2;
+
+  return {
+    timestamp: Date.now(),
+    heapSupported,
+    usedJSHeapMB,
+    totalJSHeapMB,
+    jsHeapLimitMB,
+    streamBufferBytes,
+    messageCount: params.messageCount,
+    activeStreamCount: params.activeStreamCount,
+    pendingThreadLoads: params.pendingThreadLoads,
+    heapDeltaMB,
+    leakWarning:
+      (heapDeltaMB !== null && heapDeltaMB >= HEAP_LEAK_THRESHOLD_MB) ||
+      params.pendingThreadLoads > 1,
+  };
+}
+
+export interface PerformanceMonitorProps {
+  active: boolean;
+  streaming: boolean;
+  streamingContent: string | null;
+  messageCount: number;
+  getActiveStreamCount: () => number;
+  getPendingThreadLoads: () => number;
+  getCleanupVerification?: () => ThreadCleanupVerification | null;
+  sampleIntervalMs?: number;
+  onSample?: (snapshot: MemorySnapshot) => void;
+}
+
+export function PerformanceMonitor({
+  active,
+  streaming,
+  streamingContent,
+  messageCount,
+  getActiveStreamCount,
+  getPendingThreadLoads,
+  getCleanupVerification,
+  sampleIntervalMs = 1000,
+  onSample,
+}: PerformanceMonitorProps) {
+  const samplesRef = useRef<MemorySnapshot[]>([]);
+  const baselineHeapRef = useRef<number | null>(null);
+  const latestMetricsRef = useRef({
+    streamingContent,
+    messageCount,
+    getActiveStreamCount,
+    getPendingThreadLoads,
+    getCleanupVerification,
+  });
+  const onSampleRef = useRef(onSample);
+
+  useEffect(() => {
+    latestMetricsRef.current = {
+      streamingContent,
+      messageCount,
+      getActiveStreamCount,
+      getPendingThreadLoads,
+      getCleanupVerification,
+    };
+  }, [
+    streamingContent,
+    messageCount,
+    getActiveStreamCount,
+    getPendingThreadLoads,
+    getCleanupVerification,
+  ]);
+
+  useEffect(() => {
+    onSampleRef.current = onSample;
+  }, [onSample]);
+
+  const recordSample = useCallback(() => {
+    const cur = latestMetricsRef.current;
+    const snap = readRuntimeMemorySnapshot({
+      streamingContent: cur.streamingContent,
+      messageCount: cur.messageCount,
+      activeStreamCount: cur.getActiveStreamCount(),
+      pendingThreadLoads: cur.getPendingThreadLoads(),
+      baselineHeapMB: baselineHeapRef.current,
+    });
+    if (baselineHeapRef.current === null && snap.usedJSHeapMB !== null) {
+      baselineHeapRef.current = snap.usedJSHeapMB;
+      snap.heapDeltaMB = 0;
+    }
+
+    const nextSamples = [...samplesRef.current, snap];
+    if (nextSamples.length > PERF_SAMPLE_LIMIT) {
+      nextSamples.splice(0, nextSamples.length - PERF_SAMPLE_LIMIT);
+    }
+    samplesRef.current = nextSamples;
+
+    if (typeof window !== 'undefined') {
+      (
+        window as unknown as {
+          __ZYRQUEN_PERF_MONITOR__?: {
+            active: boolean;
+            streaming: boolean;
+            latest: MemorySnapshot;
+            samplesCount: number;
+            cleanupVerification: ThreadCleanupVerification | null;
+          };
+        }
+      ).__ZYRQUEN_PERF_MONITOR__ = {
+        active,
+        streaming,
+        latest: snap,
+        samplesCount: nextSamples.length,
+        cleanupVerification: cur.getCleanupVerification?.() ?? null,
+      };
+    }
+
+    onSampleRef.current?.(snap);
+  }, [active, streaming]);
+
+  useEffect(() => {
+    if (!active) {
+      baselineHeapRef.current = null;
+      samplesRef.current = [];
+      return;
+    }
+
+    recordSample();
+    if (!streaming) return;
+
+    const timer = window.setInterval(recordSample, Math.max(200, sampleIntervalMs));
+    return () => {
+      window.clearInterval(timer);
+      baselineHeapRef.current = null;
+    };
+  }, [active, streaming, sampleIntervalMs, recordSample]);
+
+  useEffect(() => {
+    if (!active || !streaming) return;
+    recordSample();
+  }, [active, streaming, streamingContent, recordSample]);
+
+  return null;
+}
+
 export default function App() {
   const initialRoute = readRouteFromUrl();
 
@@ -100,6 +340,10 @@ export default function App() {
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
   const skipNextLoadCidRef = useRef<string | null>(null);
+  const activeThreadRequestsRef = useRef<Map<number, ThreadLoadEntry>>(new Map());
+  const threadRequestSeqRef = useRef(0);
+  const activeStreamControllerRef = useRef<AbortController | null>(null);
+  const lastCleanupVerificationRef = useRef<ThreadCleanupVerification | null>(null);
 
   const pushRoute = useCallback(
     (nextScreen: AppScreen, nextCid: string | null = null, nextTab: SettingsTab = 'account') => {
@@ -214,22 +458,75 @@ export default function App() {
   }, [loadHomeAndConversations, token, user]);
 
   const loadConversationThread = useCallback(
-    async (cid: string) => {
+    async (
+      cid: string,
+      options?: {
+        signal?: AbortSignal;
+        isActive?: () => boolean;
+      }
+    ) => {
       if (!token) return;
+      const controller = new AbortController();
+      const requestId = ++threadRequestSeqRef.current;
+      const entry: ThreadLoadEntry = {
+        requestId,
+        conversationId: cid,
+        controller,
+        cleanedUp: false,
+        settled: false,
+      };
+      activeThreadRequestsRef.current.set(requestId, entry);
+
+      const onExternalAbort = () => {
+        entry.cleanedUp = true;
+        controller.abort();
+      };
+      if (options?.signal) {
+        if (options.signal.aborted) {
+          onExternalAbort();
+        } else {
+          options.signal.addEventListener('abort', onExternalAbort, { once: true });
+        }
+      }
+
+      const canCommit = () =>
+        !controller.signal.aborted && (!options?.isActive || options.isActive());
+
       await Promise.resolve();
+      if (!canCommit()) {
+        entry.settled = true;
+        activeThreadRequestsRef.current.delete(requestId);
+        options?.signal?.removeEventListener('abort', onExternalAbort);
+        return;
+      }
+
       setLoadingThread(true);
       setWorkspaceError(null);
       try {
         const res = await apiRequest<{
           conversation: ConversationSummary;
           messages: MessageItem[];
-        }>(`/api/conversations/${cid}`, { token });
+        }>(`/api/conversations/${cid}`, {
+          token,
+          signal: controller.signal,
+        });
+        if (!canCommit()) return;
         setActiveTitle(res.conversation.title);
         setMessages(res.messages);
       } catch (err) {
-        setWorkspaceError(err instanceof ApiError ? err.message : 'Failed to load conversation');
+        if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          return;
+        }
+        if (canCommit()) {
+          setWorkspaceError(err instanceof ApiError ? err.message : 'Failed to load conversation');
+        }
       } finally {
-        setLoadingThread(false);
+        entry.settled = true;
+        activeThreadRequestsRef.current.delete(requestId);
+        options?.signal?.removeEventListener('abort', onExternalAbort);
+        if (canCommit()) {
+          setLoadingThread(false);
+        }
       }
     },
     [token]
@@ -241,13 +538,45 @@ export default function App() {
       skipNextLoadCidRef.current = null;
       return;
     }
+
     let active = true;
     const cid = activeConversationId;
+    const controller = new AbortController();
+    const threadRequests = activeThreadRequestsRef.current;
+
     Promise.resolve().then(() => {
-      if (active) void loadConversationThread(cid);
+      if (active && !controller.signal.aborted) {
+        void loadConversationThread(cid, {
+          signal: controller.signal,
+          isActive: () => active,
+        });
+      }
     });
+
     return () => {
       active = false;
+      controller.abort();
+      for (const entry of threadRequests.values()) {
+        if (entry.conversationId === cid && !entry.settled) {
+          entry.cleanedUp = true;
+          entry.controller.abort();
+        }
+      }
+      const verification = verifyThreadEffectCleanup(threadRequests.values());
+      lastCleanupVerificationRef.current = verification;
+      if (typeof window !== 'undefined') {
+        const win = window as unknown as {
+          __ZYRQUEN_PERF_MONITOR__?: { cleanupVerification?: ThreadCleanupVerification | null };
+        };
+        if (win.__ZYRQUEN_PERF_MONITOR__) {
+          win.__ZYRQUEN_PERF_MONITOR__.cleanupVerification = verification;
+        }
+      }
+      for (const [reqId, entry] of threadRequests.entries()) {
+        if (entry.settled || entry.controller.signal.aborted) {
+          threadRequests.delete(reqId);
+        }
+      }
     };
   }, [activeConversationId, loadConversationThread, screen, token]);
 
@@ -283,6 +612,10 @@ export default function App() {
     modelVariant: ModelVariantId = selectedModelVariant
   ) {
     if (!token) return;
+    activeStreamControllerRef.current?.abort();
+    const streamController = new AbortController();
+    activeStreamControllerRef.current = streamController;
+
     setSending(true);
     setStreamingContent(null);
     setWorkspaceError(null);
@@ -294,6 +627,7 @@ export default function App() {
         const created = await apiRequest<{ conversation: ConversationSummary }>('/api/conversations', {
           method: 'POST',
           token,
+          signal: streamController.signal,
           body: { title: content ? content.slice(0, 48) : 'Attached Context', mode },
         });
         targetCid = created.conversation.id;
@@ -312,26 +646,53 @@ export default function App() {
         mode,
         attachment,
         modelVariant,
-        onDelta: (partial) => setStreamingContent(partial),
+        signal: streamController.signal,
+        onDelta: (partial) => {
+          if (!streamController.signal.aborted) {
+            setStreamingContent(partial);
+          }
+        },
       });
 
+      if (streamController.signal.aborted) return;
       setActiveTitle(res.title);
       setNativeReady(true);
       setMessages((prev) => [...prev, res.user_message, res.assistant_message]);
       void loadHomeAndConversations();
     } catch (err) {
+      if (streamController.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        return;
+      }
       if (err instanceof ApiError && err.status === 0) {
         setNativeReady(false);
       }
       setLastFailedPrompt({ content, mode, attachment, modelVariant });
       setWorkspaceError(err instanceof ApiError ? err.message : 'Native inference failed');
     } finally {
-      setSending(false);
-      setStreamingContent(null);
+      if (activeStreamControllerRef.current === streamController) {
+        activeStreamControllerRef.current = null;
+        setSending(false);
+        setStreamingContent(null);
+      }
     }
   }
 
+  useEffect(() => {
+    const threadRequests = activeThreadRequestsRef.current;
+    return () => {
+      activeStreamControllerRef.current?.abort();
+      activeStreamControllerRef.current = null;
+      for (const entry of threadRequests.values()) {
+        entry.cleanedUp = true;
+        entry.controller.abort();
+      }
+      threadRequests.clear();
+    };
+  }, []);
+
   const handleNewConversation = useCallback(() => {
+    activeStreamControllerRef.current?.abort();
+    activeStreamControllerRef.current = null;
     setActiveTitle('เซสชันใหม่');
     setMessages([]);
     setWorkspaceError(null);
@@ -386,6 +747,13 @@ export default function App() {
   }
 
   async function handleLogout() {
+    activeStreamControllerRef.current?.abort();
+    activeStreamControllerRef.current = null;
+    for (const entry of activeThreadRequestsRef.current.values()) {
+      entry.cleanedUp = true;
+      entry.controller.abort();
+    }
+    activeThreadRequestsRef.current.clear();
     if (token) {
       await apiRequest('/api/auth/logout', { method: 'POST', token }).catch(() => {});
     }
@@ -534,45 +902,62 @@ export default function App() {
           )}
 
           {screen === 'workspace' && (
-            <WorkspaceView
-              token={token}
-              conversations={conversations}
-              activeConversationId={activeConversationId}
-              activeTitle={activeTitle}
-              messages={messages}
-              loadingThread={loadingThread}
-              sending={sending}
-              streamingContent={streamingContent}
-              error={workspaceError}
-              autoExpandTrace={autoExpandTrace}
-              defaultMode={defaultMode}
-              defaultModelVariant={selectedModelVariant}
-              onSelectConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
-              onNewConversation={() => void handleNewConversation()}
-              onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
-              onSendMessage={(content, mode, attachment, variant) =>
-                sendMessageToConversation(
-                  activeConversationId,
-                  content,
-                  mode,
-                  attachment,
-                  variant || selectedModelVariant
-                )
-              }
-              onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
-              onRetryLast={
-                lastFailedPrompt
-                  ? () =>
-                      void sendMessageToConversation(
-                        activeConversationId,
-                        lastFailedPrompt.content,
-                        lastFailedPrompt.mode,
-                        lastFailedPrompt.attachment,
-                        lastFailedPrompt.modelVariant || selectedModelVariant
-                      )
-                  : undefined
-              }
-            />
+            <>
+              <PerformanceMonitor
+                active={screen === 'workspace'}
+                streaming={sending || streamingContent !== null}
+                streamingContent={streamingContent}
+                messageCount={messages.length}
+                getActiveStreamCount={() => (activeStreamControllerRef.current ? 1 : 0)}
+                getPendingThreadLoads={() => activeThreadRequestsRef.current.size}
+                getCleanupVerification={() => lastCleanupVerificationRef.current}
+              />
+              <WorkspaceView
+                token={token}
+                conversations={conversations}
+                activeConversationId={activeConversationId}
+                activeTitle={activeTitle}
+                messages={messages}
+                loadingThread={loadingThread}
+                sending={sending}
+                streamingContent={streamingContent}
+                error={workspaceError}
+                autoExpandTrace={autoExpandTrace}
+                defaultMode={defaultMode}
+                defaultModelVariant={selectedModelVariant}
+                onSelectConversation={(cid) => {
+                  if (cid !== activeConversationId) {
+                    activeStreamControllerRef.current?.abort();
+                    activeStreamControllerRef.current = null;
+                  }
+                  pushRoute('workspace', cid, settingsTab);
+                }}
+                onNewConversation={() => void handleNewConversation()}
+                onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
+                onSendMessage={(content, mode, attachment, variant) =>
+                  sendMessageToConversation(
+                    activeConversationId,
+                    content,
+                    mode,
+                    attachment,
+                    variant || selectedModelVariant
+                  )
+                }
+                onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
+                onRetryLast={
+                  lastFailedPrompt
+                    ? () =>
+                        void sendMessageToConversation(
+                          activeConversationId,
+                          lastFailedPrompt.content,
+                          lastFailedPrompt.mode,
+                          lastFailedPrompt.attachment,
+                          lastFailedPrompt.modelVariant || selectedModelVariant
+                        )
+                    : undefined
+                }
+              />
+            </>
           )}
 
           {screen === 'memory' && <MemoryWorkflowsView token={token} user={user} />}

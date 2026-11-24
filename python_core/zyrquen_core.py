@@ -2202,7 +2202,7 @@ def handle_infer(payload: dict) -> dict:
             )
             t_grade = analysis_obj.get("trust_grade")
             if inv_res.get("status") == "COMPLETED":
-                if t_grade == "INSUFFICIENT_EVIDENCE":
+                if t_grade in {"INSUFFICIENT_EVIDENCE", "CONFLICTING_SOURCES"}:
                     msg_status = "NOT_LEARNED"
                 elif t_grade == "BLOCKED":
                     msg_status = "BLOCKED"
