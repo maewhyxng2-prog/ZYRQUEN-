@@ -301,4 +301,3 @@ class ZyrquenTokenizer:
         if tok.fingerprint() != data.get("sha256") or tok.vocab_size != data.get("vocab_size"):
             raise ValueError("tokenizer integrity check failed")
         return tok
-
