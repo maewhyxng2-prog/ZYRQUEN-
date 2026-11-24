@@ -854,7 +854,18 @@ class RealCapabilityLedgerTests(unittest.TestCase):
             self.assertEqual(ledger["domains"]["research"]["status"], "PARTIAL")
 
             by_id = {c["id"]: c for c in rep["cases"]}
-            for cid in ("RES-05", "NEU-03", "NEU-05", "LRN-01", "E2E-01"):
+            for cid in (
+                "RSN-13",
+                "RSN-14",
+                "RSN-15",
+                "MEM-07",
+                "RES-05",
+                "RES-06",
+                "NEU-03",
+                "NEU-05",
+                "LRN-01",
+                "E2E-01",
+            ):
                 self.assertIn(cid, by_id)
                 self.assertTrue(by_id[cid]["passed"], f"{cid} failed: {by_id[cid]}")
 
@@ -863,6 +874,121 @@ class RealCapabilityLedgerTests(unittest.TestCase):
             count = conn.execute("SELECT COUNT(*) FROM capability_baselines").fetchone()[0]
             conn.close()
             self.assertEqual(count, 6)
+
+
+class ExpandedNativeCapabilitiesTests(unittest.TestCase):
+    def test_causal_contradiction_kg_root_cause_and_categorical_exclusion(self) -> None:
+        with isolated_core_env():
+            # 1. Causal contradiction -> BLOCKED
+            contra = zc.handle_infer({
+                "prompt": "ถ้า เปิดวาล์ว แล้ว น้ำไหล และ ถ้า น้ำไหล แล้ว ไม่น้ำไหล หาก เปิดวาล์ว จะเกิดอะไรขึ้น",
+                "mode": "auto",
+                "user_id": "u",
+            })
+            self.assertEqual(contra["status"], "BLOCKED")
+            self.assertTrue(contra["trace"]["causal_logic"]["contradiction"])
+
+            # 2. Categorical universal negative exclusion -> VERIFIED NO
+            neg_cat = zc.handle_infer({
+                "prompt": "ทุก จระเข้ เป็น สัตว์เลื้อยคลาน และ ไม่มี สัตว์เลื้อยคลาน เป็น สัตว์เลือดอุ่น ดังนั้น จระเข้ เป็น สัตว์เลือดอุ่น หรือไม่",
+                "mode": "auto",
+                "user_id": "u",
+            })
+            self.assertEqual(neg_cat["status"], "VERIFIED")
+            self.assertEqual(neg_cat["trace"]["causal_logic"]["verdict"], "NO")
+            self.assertIn("ไม่เป็น", neg_cat["trace"]["causal_logic"]["derived_conclusion"])
+
+            # 3. KG backward root-cause trace
+            zc.handle_infer({"prompt": "สอน: ดิสก์เต็ม -> ทำให้เกิด -> เขียน Log ไม่ได้", "mode": "knowledge", "user_id": "u"})
+            zc.handle_infer({"prompt": "สอน: เขียน Log ไม่ได้ -> ส่งผลให้ -> บริการหยุดชะงัก", "mode": "knowledge", "user_id": "u"})
+            root = zc.handle_infer({"prompt": "สาเหตุของ บริการหยุดชะงัก", "mode": "auto", "user_id": "u"})
+            self.assertEqual(root["status"], "VERIFIED")
+            self.assertEqual(root["trace"]["causal_logic"]["sub_type"], "kg_root_cause")
+            self.assertTrue(any("ดิสก์เต็ม" in rc for rc in root["trace"]["causal_logic"]["root_causes"]))
+
+    def test_percentage_and_multistep_word_math(self) -> None:
+        with isolated_core_env():
+            disc = zc.handle_infer({
+                "prompt": "สินค้า 800 บาท ลดราคา 25% จะเหลือราคาเท่าไร",
+                "mode": "auto",
+                "user_id": "u",
+            })
+            self.assertEqual(disc["status"], "VERIFIED")
+            self.assertEqual(disc["trace"]["word_math"]["operation"], "percentage_discount")
+            self.assertEqual(disc["trace"]["word_math"]["result"], 600)
+
+            inc = zc.handle_infer({
+                "prompt": "ราคา 1000 บาท บวกเพิ่มภาษี 7% จะเป็นเงินกี่บาท",
+                "mode": "auto",
+                "user_id": "u",
+            })
+            self.assertEqual(inc["status"], "VERIFIED")
+            self.assertEqual(inc["trace"]["word_math"]["operation"], "percentage_increase")
+            self.assertEqual(inc["trace"]["word_math"]["result"], 1070)
+
+            add_unit = zc.handle_infer({
+                "prompt": "ซื้อปากกา 4 ด้าม ด้ามละ 15 บาท ซื้อเพิ่มอีก 40 บาท จะรวมเป็นเงินกี่บาท",
+                "mode": "auto",
+                "user_id": "u",
+            })
+            self.assertEqual(add_unit["status"], "VERIFIED")
+            self.assertEqual(add_unit["trace"]["word_math"]["result"], 100)
+
+    def test_3hop_semantic_kg_retrieval_and_claim_to_triple(self) -> None:
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        with isolated_core_env():
+            zc.handle_infer({"prompt": "สอน: ANode -> ต่อถึง -> BNode", "mode": "knowledge", "user_id": "u"})
+            zc.handle_infer({"prompt": "สอน: BNode -> ต่อถึง -> CNode", "mode": "knowledge", "user_id": "u"})
+            zc.handle_infer({"prompt": "สอน: CNode -> ต่อถึง -> DNode", "mode": "knowledge", "user_id": "u"})
+
+            conn = zc.get_db()
+            hits = zc.query_knowledge_graph(conn, "ANode")
+            self.assertTrue(any(h.get("provenance") == "inferred_3hop" and h["object"] == "DNode" for h in hits))
+            self.assertTrue(any(isinstance(h.get("semantic_score"), float) for h in hits if h.get("provenance") == "direct"))
+            # Unrelated Thai physics query must strictly abstain
+            self.assertEqual(zc.query_knowledge_graph(conn, "ทฤษฎีสัมพัทธภาพทั่วไปคืออะไร"), [])
+
+            # Claim-to-triple synthesis from corroborated research
+            conn.execute("UPDATE external_tools SET permission_mode='auto' WHERE id='web_search'")
+            conn.execute("UPDATE external_tools SET enabled=0 WHERE id='doc_fetch'")
+            conn.commit()
+            conn.close()
+
+            fresh_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            mock_payload = {
+                "ok": True,
+                "query": "DuckDB",
+                "results": [
+                    {
+                        "provider": "en.wikipedia.org",
+                        "title": "DuckDB",
+                        "snippet": "DuckDB supports vectorized execution for analytics.",
+                        "url": "https://en.wikipedia.org/wiki/DuckDB",
+                        "retrieved_at": fresh_ts,
+                    },
+                    {
+                        "provider": "api.duckduckgo.com",
+                        "title": "DuckDB",
+                        "snippet": "DuckDB provides columnar storage and SQL analytics.",
+                        "url": "https://api.duckduckgo.com/?q=DuckDB",
+                        "retrieved_at": fresh_ts,
+                    },
+                ],
+            }
+            with patch.object(te, "_run_web_search", return_value=mock_payload):
+                m_res = zc.run_autonomous_mission({
+                    "goal": "ค้นคว้าเรื่อง DuckDB",
+                    "user_id": "u",
+                    "enable_research": True,
+                    "enable_knowledge_dev": True,
+                    "enable_execution": False,
+                })
+            self.assertEqual(m_res["mission"]["status"], "COMPLETED")
+            dev_json = m_res["mission"]["knowledge_developed_json"]
+            self.assertIn("DuckDB", dev_json)
+            self.assertTrue("supports" in dev_json or "provides" in dev_json)
 
 
 if __name__ == "__main__":

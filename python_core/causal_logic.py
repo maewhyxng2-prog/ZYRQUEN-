@@ -95,19 +95,26 @@ def _try_causal_forward_chain(prompt: str) -> dict[str, Any] | None:
     if not body:
         return None
 
-    # Check explicit "หาก/ถ้า/สมมติ/เมื่อ/given <observed_fact>" segment right before question
+    # Check explicit trailing "หาก/ถ้า/สมมติ/เมื่อ/given <observed_fact>" segment right before question
     obs_facts: list[str] = []
-    m_tail_obs = re.search(
-        r"(?:^|[.;,\n]\s*|\s+)(?:หาก|ถ้า|สมมติว่า|สมมติ|เมื่อ|พบว่า|ปรากฏว่า|given(?:\s+that)?|suppose|if)\s+([^.;,\n]+?)(?:\s*(?:เกิดขึ้น|เป็นจริง|occurred|happens))?\s*$",
-        body,
-        flags=re.IGNORECASE,
+    cue_iter = list(
+        re.finditer(
+            r"(?:^|[.;,\n]\s*|\s+)(?:หาก|ถ้า|สมมติว่า|สมมติ|เมื่อ|พบว่า|ปรากฏว่า|given(?:\s+that)?|suppose|if)\s+",
+            body,
+            flags=re.IGNORECASE,
+        )
     )
     rules_raw = body
-    if m_tail_obs and "แล้ว" not in m_tail_obs.group(0) and "then" not in m_tail_obs.group(0).lower():
-        obs_candidate = _strip_clause(m_tail_obs.group(1))
-        if obs_candidate and not _parse_causal_rule(obs_candidate):
-            obs_facts.append(obs_candidate)
-            rules_raw = body[: m_tail_obs.start()].strip()
+    for m_cue in reversed(cue_iter):
+        tail = body[m_cue.end() :].strip()
+        tail_clean = re.sub(r"\s*(?:เกิดขึ้น|เป็นจริง|occurred|happens)\s*$", "", tail, flags=re.IGNORECASE)
+        tail_clean = _strip_clause(tail_clean)
+        if not tail_clean:
+            continue
+        if "แล้ว" not in tail_clean and "then" not in tail_clean.lower() and not _parse_causal_rule(tail_clean):
+            obs_facts.append(tail_clean)
+            rules_raw = body[: m_cue.start()].strip()
+            break
 
     clauses = _split_clauses(rules_raw)
     rules: list[tuple[str, str]] = []

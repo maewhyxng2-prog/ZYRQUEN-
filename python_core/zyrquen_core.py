@@ -1289,7 +1289,7 @@ def try_word_math_reasoning(prompt: str) -> dict | None:
     if len(nums_raw) == 3:
         n0, n1, n2 = float(nums_raw[0]), float(nums_raw[1]), float(nums_raw[2])
         f0, f1, f2 = _fmt_num(n0), _fmt_num(n1), _fmt_num(n2)
-        has_rate = bool(re.search(r"(?:เล่มละ|ชิ้นละ|กล่องละ|อันละ|ใบละ|ถุงละ|ขวดละ|คนละ|ต่อหน่วย|each|per)", cleaned, re.IGNORECASE))
+        has_rate = bool(re.search(r"(?:[\u0E00-\u0E7F]{1,8}ละ(?=\s*[-+]?\d)|เล่มละ|ชิ้นละ|กล่องละ|อันละ|ใบละ|ถุงละ|ขวดละ|คนละ|ด้ามละ|แท่งละ|ต่อหน่วย|each|per)", cleaned, re.IGNORECASE))
         has_change_cue = any(k in cleaned.lower() for k in ["ทอน", "เหลือ", "จ่าย", "change", "remain", "left"])
         has_add_extra = any(k in cleaned.lower() for k in ["เพิ่ม", "ซื้อเพิ่ม", "อีก", "plus", "more"])
 
@@ -1798,7 +1798,7 @@ def query_knowledge_graph(conn: sqlite3.Connection, prompt: str) -> list[dict]:
         semantic_score = round(0.65 * tfidf_sim + 0.35 * ent_char_sim, 4)
 
         has_direct_grounding = entity_hits >= 1 and (strong_entity_hits >= 1 or entity_hits >= 2) and score >= 2.5
-        has_high_char_entity_match = ent_char_sim >= 0.52 and len("".join(tokens)) >= 4
+        has_high_char_entity_match = ent_char_sim >= 0.72 and len("".join(tokens)) >= 6
         if has_direct_grounding or has_high_char_entity_match:
             total_score = score + (1.2 if rel_fam_overlap else 0.0) + (1.5 * semantic_score)
             if has_high_char_entity_match and not has_direct_grounding:
@@ -3470,6 +3470,8 @@ def _finalize_mission_record(
         "verdict": r_out.get("verdict"),
         "trust_grade": r_out.get("trust_grade") or r_analysis.get("trust_grade"),
         "invocation_id": r_out.get("invocation_id"),
+        "queries": r_out.get("queries", []),
+        "sub_queries_executed": r_out.get("sub_queries_executed", []),
         "providers": r_analysis.get("distinct_providers", []),
         "shared_terms": r_analysis.get("cross_source_shared_terms", []),
         "claims_count": len(r_out.get("claims") or []),

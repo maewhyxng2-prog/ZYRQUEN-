@@ -87,6 +87,20 @@ HELD_OUT_NEGATIVE_PROMPTS: list[dict] = [
         "expected_status": "NOT_LEARNED",
         "description": "Unlearned Thai prompt with partial stopword/syllable vocab overlap in model mode must abstain",
     },
+    {
+        "id": "NEG-08",
+        "prompt": "ถ้า ฝนตก แล้ว ถนนลื่น หาก แดดออก จะเกิดอะไรขึ้น",
+        "mode": "auto",
+        "expected_status": "NOT_LEARNED",
+        "description": "Undetermined causal forward-chaining when observed fact does not match rule antecedent",
+    },
+    {
+        "id": "NEG-09",
+        "prompt": "ทุก นก เป็น สัตว์มีปีก และ ค้างคาว เป็น สัตว์มีปีก ดังนั้น ค้างคาว เป็น นก หรือไม่",
+        "mode": "auto",
+        "expected_status": "NOT_LEARNED",
+        "description": "Undetermined categorical syllogism (affirming the consequent fallacy must abstain)",
+    },
 ]
 
 

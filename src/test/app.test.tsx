@@ -100,6 +100,86 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(screen.getByText(/แกนสมองภายในพร้อมใช้งาน/i)).toBeInTheDocument();
   });
 
+  it('อนุญาตให้สมัครสมาชิกใหม่ (role=user) ทั้งก่อนและหลังตั้งค่าผู้ดูแล พร้อมตรวจสอบยืนยันรหัสผ่าน', async () => {
+    let registerPayloads: Array<Record<string, unknown>> = [];
+    mockFetch({
+      'GET /api/auth/status': () =>
+        new Response(
+          JSON.stringify({ initialized: false, userCount: 0, envPasscodeConfigured: false }),
+          { status: 200 }
+        ),
+      'GET /api/health': () =>
+        new Response(JSON.stringify({ ok: true, nativeCore: 'ready' }), { status: 200 }),
+      'POST /api/auth/register': (init) => {
+        const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+        registerPayloads.push(body);
+        return new Response(
+          JSON.stringify({
+            token: 'member-token-1',
+            user: {
+              id: 'u-mem-1',
+              email: 'newmember@zyrquen.local',
+              display_name: 'สมาชิกใหม่',
+              role: 'user',
+              created_at: '2026-11-24T00:00:00Z',
+            },
+          }),
+          { status: 201 }
+        );
+      },
+      'GET /api/home': () =>
+        new Response(
+          JSON.stringify({
+            recent_conversations: [],
+            counts: { triples: 0, checkpoints: 0, datasets: 0, pending_approvals: 0 },
+            system: { python_version: '3.11.2' },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/conversations': () =>
+        new Response(JSON.stringify({ conversations: [] }), { status: 200 }),
+    });
+
+    render(<App />);
+
+    // Default shows admin claim, while สมัครสมาชิก tab is immediately accessible
+    expect(await screen.findByText('ตั้งค่าผู้ดูแลระบบเริ่มต้น')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'สมัครสมาชิก' }));
+
+    expect(await screen.findByText('สมัครสมาชิกใหม่ (บัญชีผู้ใช้งานทั่วไป)')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('ชื่อที่แสดง'), {
+      target: { value: 'สมาชิกใหม่' },
+    });
+    fireEvent.change(screen.getByLabelText('อีเมล'), {
+      target: { value: 'newmember@zyrquen.local' },
+    });
+    fireEvent.change(screen.getByLabelText('รหัสผ่าน'), {
+      target: { value: 'memberpass123' },
+    });
+    fireEvent.change(screen.getByLabelText('ยืนยันรหัสผ่าน'), {
+      target: { value: 'wrongconfirm123' },
+    });
+
+    const submitButtons = screen.getAllByRole('button', { name: 'สมัครสมาชิก' });
+    fireEvent.click(submitButtons[submitButtons.length - 1]);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('รหัสผ่านและยืนยันรหัสผ่านไม่ตรงกัน');
+    expect(registerPayloads).toHaveLength(0);
+
+    fireEvent.change(screen.getByLabelText('ยืนยันรหัสผ่าน'), {
+      target: { value: 'memberpass123' },
+    });
+    fireEvent.click(submitButtons[submitButtons.length - 1]);
+
+    expect(await screen.findByText(/สวัสดี, สมาชิกใหม่/i)).toBeInTheDocument();
+    expect(registerPayloads).toHaveLength(1);
+    expect(registerPayloads[0]).toMatchObject({
+      email: 'newmember@zyrquen.local',
+      displayName: 'สมาชิกใหม่',
+    });
+  });
+
   it('นำทาง หน้าหลัก -> เวิร์กสเปซ -> ตั้งค่า -> ออกจากระบบ, รองรับประวัติเบราว์เซอร์ และตรวจสอบสิทธิ์ RBAC', async () => {
     mockFetch({
       'GET /api/auth/status': () =>

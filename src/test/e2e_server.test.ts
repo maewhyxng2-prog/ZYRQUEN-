@@ -159,4 +159,69 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
     expect(domains.autonomous_execution.status).toBe('VERIFIED');
     expect(domains.research.status).toBe('PARTIAL');
   }, 90_000);
+
+  it('Supports member registration (สมัครสมาชิก) with password confirmation, duplicate 409 check, and user RBAC over HTTP', async () => {
+    // 1. Mismatched confirmPassword rejected with 400
+    const mismatchRes = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'member-e2e@zyrquen.local',
+        displayName: 'สมาชิก E2E',
+        password: 'MemberPassword123!',
+        confirmPassword: 'DifferentPassword123!',
+      }),
+    });
+    expect(mismatchRes.status).toBe(400);
+
+    // 2. Valid member registration succeeds with 201 and role='user'
+    const regRes = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'member-e2e@zyrquen.local',
+        displayName: 'สมาชิก E2E',
+        password: 'MemberPassword123!',
+        confirmPassword: 'MemberPassword123!',
+      }),
+    });
+    expect(regRes.status).toBe(201);
+    const setCookie = regRes.headers.get('set-cookie') || '';
+    expect(setCookie).toContain('zyrquen_session=');
+    expect(setCookie).toContain('HttpOnly');
+
+    const regJson = (await regRes.json()) as {
+      token: string;
+      user: { id: string; email: string; display_name: string; role: string };
+    };
+    expect(regJson.token).toBeTruthy();
+    expect(regJson.user.role).toBe('user');
+    expect(regJson.user.email).toBe('member-e2e@zyrquen.local');
+
+    // 3. Duplicate registration returns 409 Conflict
+    const dupRes = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'member-e2e@zyrquen.local',
+        displayName: 'สมาชิกซ้ำ',
+        password: 'MemberPassword123!',
+        confirmPassword: 'MemberPassword123!',
+      }),
+    });
+    expect(dupRes.status).toBe(409);
+
+    // 4. Member can access authenticated routes, but cannot access admin routes (403)
+    const meRes = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${regJson.token}` },
+    });
+    expect(meRes.status).toBe(200);
+    const meJson = (await meRes.json()) as { user: { role: string } };
+    expect(meJson.user.role).toBe('user');
+
+    const adminOverviewRes = await fetch(`${baseUrl}/api/admin/overview`, {
+      headers: { Authorization: `Bearer ${regJson.token}` },
+    });
+    expect(adminOverviewRes.status).toBe(403);
+  }, 30_000);
 });

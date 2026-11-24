@@ -158,6 +158,9 @@ def run_capability_benchmark(
             ("RSN-10", "แก้สมการ: x + y = 10, x - y = 2", "system(x=6,y=4)", "system"),
             ("RSN-11", "ถ้า A > B และ B > C แล้ว A เทียบกับ C เป็นอย่างไร", "A > C", "logic"),
             ("RSN-12", "ถ้ามีแอปเปิ้ล 12 ผล แบ่งให้ 3 คนเท่าๆ กัน จะได้คนละกี่ผล", 4, "word_math"),
+            ("RSN-13", "ถ้า ฝนตก แล้ว ถนนลื่น และ ถ้า ถนนลื่น แล้ว รถชะลอตัว หาก ฝนตก จะเกิดอะไรขึ้น", "รถชะลอตัว", "causal_logic"),
+            ("RSN-14", "ทุก ไพรเมต เป็น สัตว์เลี้ยงลูกด้วยนม และ ทุก สัตว์เลี้ยงลูกด้วยนม เป็น สัตว์มีกระดูกสันหลัง และ ชิมแปนซี เป็น ไพรเมต ดังนั้น ชิมแปนซี เป็น สัตว์มีกระดูกสันหลัง หรือไม่", "ชิมแปนซี เป็น สัตว์มีกระดูกสันหลัง", "causal_logic"),
+            ("RSN-15", "มีเงิน 500 บาท ซื้อสมุด 3 เล่ม เล่มละ 45 บาท จะเหลือเงินกี่บาท", 365, "word_math"),
         ]
         for cid, prompt, expected_val, kind in reasoning_specs:
             res = infer(prompt)
@@ -175,6 +178,8 @@ def run_capability_benchmark(
                 actual_val = trace.get("statistics", {}).get("mean")
             elif kind == "logic":
                 actual_val = trace.get("logic", {}).get("derived_relation")
+            elif kind == "causal_logic":
+                actual_val = trace.get("causal_logic", {}).get("derived_conclusion")
             elif kind == "word_math":
                 actual_val = trace.get("word_math", {}).get("result")
             passed = res["status"] == "VERIFIED" and actual_val == expected_val
@@ -275,6 +280,29 @@ def run_capability_benchmark(
             polarity="positive", failure_type="FALSE_NEGATIVE_RETRIEVAL_DROP",
             engine_path=mem_para["trace"]["engine_path"],
             detail=mem_para["content"][:140].replace("\n", " "),
+        )
+
+        # 3-hop transitive expansion + TF-IDF semantic score provenance
+        mem_3hop_ok = (
+            mem_direct["status"] == "VERIFIED"
+            and any(
+                m.get("provenance") == "inferred_3hop"
+                and m.get("object") == "ศูนย์ปฏิบัติการโอเมก้า"
+                and bool(m.get("inferred_chain"))
+                for m in mem_direct["trace"].get("matched_triples", [])
+            )
+            and any(
+                isinstance(m.get("semantic_score"), (int, float))
+                for m in mem_direct["trace"].get("matched_triples", [])
+                if m.get("provenance") == "direct"
+            )
+        )
+        _record(
+            cases, "MEM-07", "memory_retrieval", "ZYRQUEN ใช้งานอะไร [3-hop + semantic score]", mem_3hop_ok,
+            "3-hop inferred_3hop -> ศูนย์ปฏิบัติการโอเมก้า + semantic_score on direct hit",
+            f"inferred_3hop_found={mem_3hop_ok}",
+            polarity="positive", failure_type="FALSE_NEGATIVE_RETRIEVAL_DROP",
+            engine_path=mem_direct["trace"]["engine_path"],
         )
 
         # ------------------------------------------------------------------
@@ -944,6 +972,73 @@ def run_capability_benchmark(
         finally:
             srv.shutdown()
             srv.server_close()
+
+        # RES-06: Multi-query comparative research + claim-to-triple knowledge integration
+        with isolated_core_env():
+            c_mq = zc.get_db()
+            c_mq.execute("UPDATE external_tools SET permission_mode='auto' WHERE id='web_search'")
+            c_mq.execute("UPDATE external_tools SET enabled=0 WHERE id='doc_fetch'")
+            c_mq.commit()
+            c_mq.close()
+            fresh_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            def _mock_multi_search(q: str, _allowlist: Any = None) -> dict[str, Any]:
+                if "postgresql" in q.lower():
+                    return {
+                        "ok": True,
+                        "providers_queried": ["api.duckduckgo.com"],
+                        "query": q,
+                        "retrieved_at": fresh_ts,
+                        "results": [
+                            {
+                                "provider": "api.duckduckgo.com",
+                                "title": "PostgreSQL MVCC",
+                                "snippet": "PostgreSQL uses MVCC to isolate concurrent transactions.",
+                                "url": "https://api.duckduckgo.com/?q=PostgreSQL+MVCC",
+                                "retrieved_at": fresh_ts,
+                            }
+                        ],
+                    }
+                return {
+                    "ok": True,
+                    "providers_queried": ["en.wikipedia.org"],
+                    "query": q,
+                    "retrieved_at": fresh_ts,
+                    "results": [
+                        {
+                            "provider": "en.wikipedia.org",
+                            "title": "SQLite WAL",
+                            "snippet": "SQLite supports WAL concurrent readers cleanly.",
+                            "url": "https://en.wikipedia.org/wiki/SQLite",
+                            "retrieved_at": fresh_ts,
+                        }
+                    ],
+                }
+
+            with patch.object(te, "_run_web_search", side_effect=_mock_multi_search):
+                mq_m = zc.run_autonomous_mission({
+                    "goal": "เปรียบเทียบ SQLite WAL เทียบกับ PostgreSQL MVCC",
+                    "user_id": "p1-bench-user",
+                    "enable_research": True,
+                    "enable_knowledge_dev": True,
+                    "enable_execution": False,
+                })
+            mq_rs = json.loads(mq_m["mission"]["research_summary_json"])
+            mq_dev = json.loads(mq_m["mission"]["knowledge_developed_json"])
+            sub_qs = mq_rs.get("sub_queries_executed") or []
+            res_mq_ok = (
+                mq_m["mission"]["status"] == "COMPLETED"
+                and len(sub_qs) >= 2
+                and mq_rs.get("trust_grade") == "CORROBORATED_MULTI_SOURCE"
+                and len(mq_dev) >= 1
+            )
+            _record(
+                cases, "RES-06", "research_pipeline", "Multi-Query Comparative Research & Claim-to-Triple Integration",
+                res_mq_ok,
+                "sub_queries_executed>=2, CORROBORATED_MULTI_SOURCE, verified triples learned",
+                f"status={mq_m['mission']['status']}, sub_q={len(sub_qs)}, grade={mq_rs.get('trust_grade')}, triples={len(mq_dev)}",
+                polarity="positive", failure_type="MULTI_QUERY_RESEARCH_FAIL",
+            )
 
         if not live_net_enabled:
             live_net_blocked_reasons.append(

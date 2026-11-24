@@ -155,7 +155,7 @@ function setSessionCookie(req: Request, res: Response, token: string): void {
     'HttpOnly',
     'Path=/',
     `Max-Age=${Math.floor(TOKEN_TTL_MS / 1000)}`,
-    isHttps ? 'SameSite=None; Secure' : 'SameSite=Lax',
+    isHttps ? 'SameSite=None; Secure; Partitioned' : 'SameSite=Lax',
   ];
   res.setHeader('Set-Cookie', attrs.join('; '));
 }
@@ -167,7 +167,7 @@ function clearSessionCookie(req: Request, res: Response): void {
     'HttpOnly',
     'Path=/',
     'Max-Age=0',
-    isHttps ? 'SameSite=None; Secure' : 'SameSite=Lax',
+    isHttps ? 'SameSite=None; Secure; Partitioned' : 'SameSite=Lax',
   ];
   res.setHeader('Set-Cookie', attrs.join('; '));
 }
@@ -184,6 +184,24 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
   if (!token) {
     res.status(401).json({ error: 'Authentication required' });
     return;
+  }
+  const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase());
+  if (!bearerToken && cookieToken && isMutation) {
+    const requestedWith = String(req.headers['x-requested-with'] || '');
+    const originHeader = String(req.headers.origin || '');
+    const expectedHost = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+    let originMatches = false;
+    if (originHeader && expectedHost) {
+      try {
+        originMatches = new URL(originHeader).host === expectedHost;
+      } catch {
+        originMatches = false;
+      }
+    }
+    if (!requestedWith && !originMatches) {
+      res.status(403).json({ error: 'CSRF check failed for cookie-authenticated mutation' });
+      return;
+    }
   }
   const decoded = verifyToken(token);
   if (!decoded) {
@@ -286,8 +304,8 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
     const password = String(req.body?.password || '');
     const passcode = String(req.body?.passcode || '');
 
-    if (!isValidEmail(email) || displayName.length < 2 || password.length < 8) {
-      res.status(400).json({ error: 'Provide a valid email, display name (2+ chars), and password (8+ chars).' });
+    if (!isValidEmail(email) || displayName.length < 2 || displayName.length > 80 || password.length < 8 || password.length > 256) {
+      res.status(400).json({ error: 'Provide a valid email, display name (2+ chars), and password (8-256 chars).' });
       return;
     }
 
@@ -320,7 +338,10 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
       },
     });
     if (!created.ok || !created.user) {
-      res.status(400).json({ error: created.error || 'Failed to claim admin account' });
+      const isDup = created.error?.includes('UNIQUE');
+      res.status(isDup ? 409 : 400).json({
+        error: isDup ? 'อีเมลนี้ถูกใช้งานแล้ว กรุณาใช้อีเมลอื่น' : created.error || 'Failed to claim admin account',
+      });
       return;
     }
 
@@ -344,9 +365,31 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const displayName = String(req.body?.displayName || '').trim();
     const password = String(req.body?.password || '');
+    const confirmPassword = req.body?.confirmPassword !== undefined ? String(req.body.confirmPassword) : undefined;
 
-    if (!isValidEmail(email) || displayName.length < 2 || password.length < 8) {
-      res.status(400).json({ error: 'Provide a valid email, display name (2+ chars), and password (8+ chars).' });
+    if (!isValidEmail(email)) {
+      res.status(400).json({ error: 'รูปแบบอีเมลไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง' });
+      return;
+    }
+    if (displayName.length < 2 || displayName.length > 80) {
+      res.status(400).json({ error: 'ชื่อที่แสดงต้องมีความยาว 2–80 ตัวอักษร' });
+      return;
+    }
+    if (password.length < 8 || password.length > 256) {
+      res.status(400).json({ error: 'รหัสผ่านต้องมีความยาว 8–256 ตัวอักษร' });
+      return;
+    }
+    if (confirmPassword !== undefined && password !== confirmPassword) {
+      res.status(400).json({ error: 'รหัสผ่านและยืนยันรหัสผ่านไม่ตรงกัน' });
+      return;
+    }
+
+    const existing = await runPythonScript<{ ok: boolean; user: AuthUser | null }>('db_bridge.py', {
+      action: 'auth_find_by_email',
+      payload: { email },
+    });
+    if (existing.user) {
+      res.status(409).json({ error: 'อีเมลนี้ถูกสมัครสมาชิกแล้ว กรุณาเข้าสู่ระบบหรือใช้อีเมลอื่น' });
       return;
     }
 
@@ -360,9 +403,24 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
       },
     });
     if (!created.ok || !created.user) {
-      res.status(400).json({ error: created.error?.includes('UNIQUE') ? 'Email already registered' : created.error || 'Registration failed' });
+      const isDup = created.error?.includes('UNIQUE');
+      res.status(isDup ? 409 : 400).json({
+        error: isDup ? 'อีเมลนี้ถูกสมัครสมาชิกแล้ว กรุณาเข้าสู่ระบบหรือใช้อีเมลอื่น' : created.error || 'สมัครสมาชิกไม่สำเร็จ',
+      });
       return;
     }
+
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: created.user.id,
+        actor_email: created.user.email,
+        action: 'AUTH_REGISTER',
+        target: created.user.id,
+        outcome: 'SUCCESS',
+      },
+    });
+
     const token = signToken(created.user);
     setSessionCookie(req, res, token);
     res.status(201).json({ token, user: created.user });
@@ -371,8 +429,8 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
   app.post('/api/auth/login', async (req, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const password = String(req.body?.password || '');
-    if (!isValidEmail(email) || !password) {
-      res.status(400).json({ error: 'Email and password are required.' });
+    if (!isValidEmail(email) || !password || password.length > 256) {
+      res.status(400).json({ error: 'กรุณากรอกอีเมลและรหัสผ่านให้ถูกต้อง' });
       return;
     }
 
@@ -385,7 +443,7 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
     });
 
     if (!found.user || !verifyPassword(password, found.user.password_hash)) {
-      res.status(401).json({ error: 'Invalid email or password.' });
+      res.status(401).json({ error: 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' });
       return;
     }
 

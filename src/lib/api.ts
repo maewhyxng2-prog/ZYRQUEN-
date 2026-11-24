@@ -26,6 +26,7 @@ export async function apiRequest<T>(
   }
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
   };
   if (options.token && options.token !== '__cookie__') {
     headers.Authorization = `Bearer ${options.token}`;
@@ -76,6 +77,7 @@ export async function streamConversationMessage<TResult>(
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'text/event-stream, application/json',
+    'X-Requested-With': 'XMLHttpRequest',
   };
   if (options.token && options.token !== '__cookie__') {
     headers.Authorization = `Bearer ${options.token}`;

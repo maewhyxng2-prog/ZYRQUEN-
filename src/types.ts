@@ -94,12 +94,35 @@ export interface NativeTrace {
     result: number;
     steps: string[];
   };
+  word_math?: {
+    engine: string;
+    operation: string;
+    operands: Array<number | string>;
+    expression: string;
+    result: number;
+    steps: string[];
+  };
+  causal_logic?: {
+    engine: string;
+    sub_type: string;
+    determined: boolean;
+    contradiction: boolean;
+    derived_conclusion: string | null;
+    conclusions?: string[];
+    verdict?: string;
+    root_causes?: string[];
+    steps: string[];
+  };
   matched_triples?: Array<{
     id: string;
     subject: string;
     relation: string;
     object: string;
     source: string;
+    hop?: number;
+    provenance?: string;
+    inferred_chain?: string;
+    semantic_score?: number;
   }>;
   teach?: {
     triple: { subject: string; relation: string; object: string };
