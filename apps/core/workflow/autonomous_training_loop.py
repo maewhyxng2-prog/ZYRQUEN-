@@ -411,4 +411,3 @@ class AutonomousTrainingLoop:
             if res.evidence.get("error_code") in ("loop_timeout", "ram_hard_limit", "ram_hard_stop"):
                 break
         return results
-
