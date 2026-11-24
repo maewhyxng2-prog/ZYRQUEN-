@@ -206,4 +206,3 @@ def test_concurrent_threads_allocate_and_register_distinct_versions(tmp_path):
         assert check_reg.verify(version)
         expected_parent = None if i == 0 else f"ZYRQUEN-Native-0.1.{i - 1}"
         assert check_reg.get(version)["parent"] == expected_parent
-
