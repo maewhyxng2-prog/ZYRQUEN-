@@ -515,4 +515,3 @@ class WorkflowResourceGuard:
             blocked=False,
             snapshot=snap,
         )
-
