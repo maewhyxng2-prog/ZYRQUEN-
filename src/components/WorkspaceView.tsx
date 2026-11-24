@@ -19,12 +19,14 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { detectPendingToolActivity, type ToolId } from '../lib/tools';
-import type {
-  ConversationSmartSummary,
-  ConversationSummary,
-  MessageItem,
-  NativeTrace,
-  ReasoningMode,
+import {
+  MODEL_VARIANTS,
+  type ConversationSmartSummary,
+  type ConversationSummary,
+  type MessageItem,
+  type ModelVariantId,
+  type NativeTrace,
+  type ReasoningMode,
 } from '../types';
 import { SafeMessageText } from './SafeMessageText';
 import { ZyrquenEmblem } from './ZyrquenEmblem';
@@ -37,13 +39,21 @@ interface WorkspaceViewProps {
   messages: MessageItem[];
   loadingThread: boolean;
   sending: boolean;
+  streamingContent?: string | null;
   error: string | null;
   autoExpandTrace: boolean;
   defaultMode: ReasoningMode;
+  defaultModelVariant?: ModelVariantId;
   onSelectConversation: (id: string) => void;
   onNewConversation: () => void;
   onDeleteConversation: (id: string) => void;
-  onSendMessage: (content: string, mode: ReasoningMode, attachment?: string) => Promise<void>;
+  onSendMessage: (
+    content: string,
+    mode: ReasoningMode,
+    attachment?: string,
+    modelVariant?: ModelVariantId
+  ) => Promise<void>;
+  onModelVariantChange?: (variant: ModelVariantId) => void;
   onRetryLast?: () => void;
 }
 
@@ -96,13 +106,16 @@ export function WorkspaceView({
   messages,
   loadingThread,
   sending,
+  streamingContent,
   error,
   autoExpandTrace,
   defaultMode,
+  defaultModelVariant = 'zyrquen-omega-v1',
   onSelectConversation,
   onNewConversation,
   onDeleteConversation,
   onSendMessage,
+  onModelVariantChange,
   onRetryLast,
 }: WorkspaceViewProps) {
   const [input, setInput] = useState('');
@@ -111,6 +124,14 @@ export function WorkspaceView({
   if (prevDefaultMode !== defaultMode) {
     setPrevDefaultMode(defaultMode);
     setMode(defaultMode);
+  }
+  const [selectedModelVariant, setSelectedModelVariant] =
+    useState<ModelVariantId>(defaultModelVariant);
+  const [prevDefaultVariant, setPrevDefaultVariant] =
+    useState<ModelVariantId>(defaultModelVariant);
+  if (prevDefaultVariant !== defaultModelVariant) {
+    setPrevDefaultVariant(defaultModelVariant);
+    setSelectedModelVariant(defaultModelVariant);
   }
   const [attachment, setAttachment] = useState<{ name: string; content: string } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -192,7 +213,7 @@ export function WorkspaceView({
       textareaRef.current.style.height = 'auto';
     }
     try {
-      await onSendMessage(contentToSend, mode, attachmentContent);
+      await onSendMessage(contentToSend, mode, attachmentContent, selectedModelVariant);
     } finally {
       setActiveToolStatus(null);
     }
@@ -423,7 +444,7 @@ export function WorkspaceView({
                     onClick={async () => {
                       setActiveToolStatus(detectPendingToolActivity(q.text, q.m));
                       try {
-                        await onSendMessage(q.text, q.m);
+                        await onSendMessage(q.text, q.m, undefined, selectedModelVariant);
                       } finally {
                         setActiveToolStatus(null);
                       }
@@ -493,7 +514,7 @@ export function WorkspaceView({
           )}
 
           {sending && (
-            <div className="flex items-start" role="status" aria-live="polite">
+            <div className="flex flex-col items-start gap-2" role="status" aria-live="polite">
               <div className="inline-flex items-center gap-2 rounded-2xl border border-slate-800/90 bg-[#0E172B] px-3.5 py-2.5 text-xs font-medium text-cyan-300">
                 {activeToolStatus?.toolId === 'web_search' ? (
                   <Globe className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
@@ -510,6 +531,11 @@ export function WorkspaceView({
                   {activeToolStatus?.label || 'กำลังประมวลผลผ่านแกนสมอง Python ภายใน...'}
                 </span>
               </div>
+              {streamingContent && (
+                <div className="max-w-[92%] sm:max-w-[85%] rounded-2xl border border-blue-500/30 bg-[#0E172B] px-4 py-3.5 text-slate-100">
+                  <SafeMessageText content={streamingContent} />
+                </div>
+              )}
             </div>
           )}
 
@@ -662,6 +688,50 @@ export function WorkspaceView({
               <Send className="h-4 w-4" />
             </button>
           </div>
+
+          {/* Composer Footer: Consistent Model Variant Selector across Mobile & Desktop */}
+          <footer
+            aria-label="ส่วนท้ายช่องข้อความ"
+            className="flex items-center justify-between gap-2 border-t border-slate-800/70 pt-2"
+          >
+            <div className="relative flex min-w-0 items-center">
+              <Cpu
+                className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-blue-400"
+                aria-hidden="true"
+              />
+              <select
+                aria-label="เลือกรุ่นโมเดล (Model Variant)"
+                value={selectedModelVariant}
+                onChange={(e) => {
+                  const nextVariant = e.target.value as ModelVariantId;
+                  setSelectedModelVariant(nextVariant);
+                  onModelVariantChange?.(nextVariant);
+                }}
+                className="h-9 max-w-[230px] cursor-pointer appearance-none rounded-xl border border-blue-500/35 bg-[#060A14] pl-8 pr-8 font-mono text-xs font-medium text-slate-100 transition-colors hover:border-blue-400/60 hover:bg-[#0E172B] focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-600/30 sm:max-w-none"
+              >
+                {MODEL_VARIANTS.map((variant) => (
+                  <option
+                    key={variant.id}
+                    value={variant.id}
+                    className="bg-[#0E172B] text-slate-100"
+                  >
+                    {variant.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown
+                className="pointer-events-none absolute right-2.5 h-3.5 w-3.5 text-blue-400"
+                aria-hidden="true"
+              />
+            </div>
+
+            <span className="truncate font-mono text-[11px] text-blue-300/80">
+              <span className="sm:hidden">{selectedModelVariant}</span>
+              <span className="hidden sm:inline">
+                {selectedModelVariant} · Enter ส่ง
+              </span>
+            </span>
+          </footer>
         </form>
       </div>
 

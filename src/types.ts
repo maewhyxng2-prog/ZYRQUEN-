@@ -1,6 +1,43 @@
 export type AppScreen = 'home' | 'workspace' | 'memory' | 'settings';
 export type SettingsTab = 'account' | 'developer' | 'admin';
 export type ReasoningMode = 'auto' | 'math' | 'knowledge' | 'model' | 'plan';
+export type ModelVariantId =
+  | 'zyrquen-omega-v1'
+  | 'zyrquen-ast-pro'
+  | 'zyrquen-kg-v2'
+  | 'zyrquen-ngram-ckpt';
+
+export const MODEL_VARIANTS: ReadonlyArray<{
+  id: ModelVariantId;
+  label: string;
+  shortLabel: string;
+  description: string;
+}> = [
+  {
+    id: 'zyrquen-omega-v1',
+    label: 'ZYRQUEN Ω∞ Core v1',
+    shortLabel: 'Ω∞ Core v1',
+    description: 'แกนสมองผสมผสานมาตรฐาน (AST + Graph + N-Gram)',
+  },
+  {
+    id: 'zyrquen-ast-pro',
+    label: 'ZYRQUEN AST Pro v1.2',
+    shortLabel: 'AST Pro v1.2',
+    description: 'เน้นการคำนวณเชิงสัญลักษณ์และสมการเชิงเส้น',
+  },
+  {
+    id: 'zyrquen-kg-v2',
+    label: 'ZYRQUEN Graph v2.0',
+    shortLabel: 'Graph v2.0',
+    description: 'เน้นกราฟความรู้หลายช่วงและตรวจความสอดคล้อง',
+  },
+  {
+    id: 'zyrquen-ngram-ckpt',
+    label: 'ZYRQUEN Checkpoint N-Gram',
+    shortLabel: 'N-Gram Ckpt',
+    description: 'เน้นการต่อข้อความจาก Checkpoint ล่าสุด',
+  },
+];
 
 export interface User {
   id: string;
@@ -36,6 +73,11 @@ export interface ConversationSmartSummary {
 
 export interface NativeTrace {
   mode?: string;
+  model_version?: string;
+  metadata?: {
+    modelVersion?: string;
+    [key: string]: unknown;
+  };
   engine_path?: string[];
   latency_ms?: number;
   python_version?: string;

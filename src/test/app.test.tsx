@@ -164,10 +164,13 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
           }),
           { status: 200 }
         ),
-      'POST /api/conversations/c1/messages': (() => {
+      'POST /api/conversations/c1/stream': (() => {
         let msgSeq = 0;
-        return () => {
+        return (init?: RequestInit) => {
           msgSeq += 1;
+          const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+          const meta = (body.metadata || {}) as Record<string, unknown>;
+          (globalThis as unknown as { __lastStreamMeta?: Record<string, unknown> }).__lastStreamMeta = meta;
           return new Response(
             JSON.stringify({
               title: 'คำนวณ (2^12 - 96) / 16',
@@ -189,6 +192,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
                 mode: 'math',
                 trace_json: JSON.stringify({
                   engine_path: ['math_ast'],
+                  model_version: meta.modelVersion || 'zyrquen-omega-v1',
                   latency_ms: 4.2,
                   external_models_used: false,
                 }),
@@ -196,7 +200,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
                 created_at: '2026-11-24T00:00:02Z',
               },
             }),
-            { status: 201 }
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
           );
         };
       })(),
@@ -327,12 +331,18 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(await screen.findByText('250')).toBeInTheDocument();
     expect(window.location.search).toContain('view=workspace');
 
+    const variantSelect = screen.getByLabelText('เลือกรุ่นโมเดล (Model Variant)');
+    fireEvent.change(variantSelect, { target: { value: 'zyrquen-ast-pro' } });
+
     const composer = screen.getByLabelText('ช่องพิมพ์ข้อความ');
     fireEvent.change(composer, { target: { value: 'คำนวณ 10 + 15' } });
     fireEvent.keyDown(composer, { key: 'Enter', shiftKey: false });
     await waitFor(() => {
       expect(screen.getAllByText('250').length).toBeGreaterThan(0);
     });
+    expect(
+      (globalThis as unknown as { __lastStreamMeta?: Record<string, unknown> }).__lastStreamMeta?.modelVersion
+    ).toBe('zyrquen-ast-pro');
 
     // Smart Summary collapsible panel
     fireEvent.click(screen.getByRole('button', { name: /สรุปสำคัญ/i }));
@@ -782,5 +792,35 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     await act(async () => {
       resolveSend();
     });
+
+    // 5. ToolRegistry enforces role & system policy restrictions in developer mode
+    render(
+      <ToolRegistry
+        token="user-tok"
+        userRole="user"
+        mode="developer"
+        toolsData={{
+          tools: [
+            {
+              id: 'web_search',
+              name: 'ค้นหาเว็บสาธารณะ',
+              category: 'web',
+              description: 'ปิดโดยผู้ดูแล',
+              endpoint_allowlist_json: '[]',
+              permission_mode: 'disabled',
+              enabled: 0,
+              quota_daily: 50,
+              calls_today: 0,
+              last_reset_date: '2026-11-24',
+              updated_at: '2026-11-24T00:00:00Z',
+            },
+          ],
+          invocations: [],
+          workspace_files: [],
+        }}
+        onRefresh={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('button', { name: 'ถูกจำกัดสิทธิ์' })).toBeDisabled();
   });
 });

@@ -8,13 +8,14 @@ import { HomeView } from './components/HomeView';
 import { MemoryWorkflowsView } from './components/MemoryWorkflowsView';
 import { SettingsView } from './components/SettingsView';
 import { WorkspaceView } from './components/WorkspaceView';
-import { apiRequest, ApiError } from './lib/api';
+import { apiRequest, ApiError, streamConversationMessage } from './lib/api';
 import type {
   AppScreen,
   AuthStatus,
   ConversationSummary,
   HomeSummary,
   MessageItem,
+  ModelVariantId,
   ReasoningMode,
   SettingsTab,
   User,
@@ -80,14 +81,18 @@ export default function App() {
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [loadingThread, setLoadingThread] = useState(false);
   const [sending, setSending] = useState(false);
+  const [streamingContent, setStreamingContent] = useState<string | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [lastFailedPrompt, setLastFailedPrompt] = useState<{
     content: string;
     mode: ReasoningMode;
     attachment?: string;
+    modelVariant?: ModelVariantId;
   } | null>(null);
 
   const [defaultMode, setDefaultMode] = useState<ReasoningMode>('auto');
+  const [selectedModelVariant, setSelectedModelVariant] =
+    useState<ModelVariantId>('zyrquen-omega-v1');
   const [autoExpandTrace, setAutoExpandTrace] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean>(() =>
@@ -258,7 +263,7 @@ export default function App() {
       setActiveTitle(created.conversation.title);
       setMessages([]);
       pushRoute('workspace', cid, settingsTab);
-      await sendMessageToConversation(cid, prompt, mode);
+      await sendMessageToConversation(cid, prompt, mode, undefined, selectedModelVariant);
     } catch (err) {
       setWorkspaceError(err instanceof ApiError ? err.message : 'Failed to start conversation');
     }
@@ -268,10 +273,12 @@ export default function App() {
     cid: string | null,
     content: string,
     mode: ReasoningMode,
-    attachment?: string
+    attachment?: string,
+    modelVariant: ModelVariantId = selectedModelVariant
   ) {
     if (!token) return;
     setSending(true);
+    setStreamingContent(null);
     setWorkspaceError(null);
     setLastFailedPrompt(null);
 
@@ -289,24 +296,28 @@ export default function App() {
         pushRoute('workspace', targetCid, settingsTab);
       }
 
-      const res = await apiRequest<{
+      const res = await streamConversationMessage<{
         title: string;
         user_message: MessageItem;
         assistant_message: MessageItem;
-      }>(`/api/conversations/${targetCid}/messages`, {
-        method: 'POST',
+      }>(targetCid, {
         token,
-        body: { content, mode, attachment },
+        content,
+        mode,
+        attachment,
+        modelVariant,
+        onDelta: (partial) => setStreamingContent(partial),
       });
 
       setActiveTitle(res.title);
       setMessages((prev) => [...prev, res.user_message, res.assistant_message]);
       void loadHomeAndConversations();
     } catch (err) {
-      setLastFailedPrompt({ content, mode, attachment });
+      setLastFailedPrompt({ content, mode, attachment, modelVariant });
       setWorkspaceError(err instanceof ApiError ? err.message : 'Native inference failed');
     } finally {
       setSending(false);
+      setStreamingContent(null);
     }
   }
 
@@ -498,15 +509,24 @@ export default function App() {
               messages={messages}
               loadingThread={loadingThread}
               sending={sending}
+              streamingContent={streamingContent}
               error={workspaceError}
               autoExpandTrace={autoExpandTrace}
               defaultMode={defaultMode}
+              defaultModelVariant={selectedModelVariant}
               onSelectConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
               onNewConversation={() => void handleNewConversation()}
               onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
-              onSendMessage={(content, mode, attachment) =>
-                sendMessageToConversation(activeConversationId, content, mode, attachment)
+              onSendMessage={(content, mode, attachment, variant) =>
+                sendMessageToConversation(
+                  activeConversationId,
+                  content,
+                  mode,
+                  attachment,
+                  variant || selectedModelVariant
+                )
               }
+              onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
               onRetryLast={
                 lastFailedPrompt
                   ? () =>
@@ -514,7 +534,8 @@ export default function App() {
                         activeConversationId,
                         lastFailedPrompt.content,
                         lastFailedPrompt.mode,
-                        lastFailedPrompt.attachment
+                        lastFailedPrompt.attachment,
+                        lastFailedPrompt.modelVariant || selectedModelVariant
                       )
                   : undefined
               }

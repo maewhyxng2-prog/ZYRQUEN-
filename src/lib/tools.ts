@@ -103,26 +103,60 @@ function validatePublicNonAiUrl(rawUrl: string): { ok: boolean; error?: string; 
   return { ok: true, normalized: parsed.toString() };
 }
 
+export interface RoleToolPolicyDecision {
+  allowed: boolean;
+  requiresApproval: boolean;
+  policyBadge: string;
+  modeLabel: string;
+}
+
 export function canRoleExecuteTool(
   tool: ExternalToolItem,
   userRole: 'admin' | 'user'
-): { allowed: boolean; modeLabel: string } {
+): RoleToolPolicyDecision {
   if (!tool.enabled || tool.permission_mode === 'disabled') {
-    return { allowed: false, modeLabel: 'ปิดการใช้งานโดยนโยบายระบบ' };
+    return {
+      allowed: false,
+      requiresApproval: false,
+      policyBadge: 'BLOCKED',
+      modeLabel: 'ปิดการใช้งานโดยนโยบายระบบ',
+    };
   }
   if (tool.calls_today >= tool.quota_daily) {
-    return { allowed: false, modeLabel: 'ใช้ครบโควตารายวันแล้ว' };
+    return {
+      allowed: false,
+      requiresApproval: false,
+      policyBadge: 'QUOTA_EXCEEDED',
+      modeLabel: 'ใช้ครบโควตารายวันแล้ว',
+    };
   }
   if (tool.permission_mode === 'approval_required') {
     return {
       allowed: true,
+      requiresApproval: true,
+      policyBadge: 'P5_GATE',
       modeLabel:
         userRole === 'admin'
           ? 'ต้องส่งคำขอผ่าน P5 Approval Gate (Admin สามารถอนุมัติได้)'
-          : 'ส่งคำขอรอผู้ดูแลระบบอนุมัติ (P5 Gate)',
+          : 'ต้องส่งคำขอรอผู้ดูแลระบบอนุมัติ (P5 Gate)',
     };
   }
-  return { allowed: true, modeLabel: 'พร้อมเรียกใช้ภายใต้การตรวจสอบของ Core' };
+  return {
+    allowed: true,
+    requiresApproval: false,
+    policyBadge: 'AUTO',
+    modeLabel: 'พร้อมเรียกใช้ภายใต้การตรวจสอบของ Core',
+  };
+}
+
+export function getAllowedToolsForRole(
+  tools: ExternalToolItem[],
+  userRole: 'admin' | 'user'
+): Array<ExternalToolItem & { policyDecision: RoleToolPolicyDecision }> {
+  return tools.map((tool) => ({
+    ...tool,
+    policyDecision: canRoleExecuteTool(tool, userRole),
+  }));
 }
 
 export function createExternalToolAdapter(): ExternalToolAdapter {

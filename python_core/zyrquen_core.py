@@ -1314,6 +1314,9 @@ def handle_infer(payload: dict) -> dict:
     user_id = str(payload.get("user_id", ""))
     conversation_id = payload.get("conversation_id")
     attachment = str(payload.get("attachment", "")).strip()
+    model_version = str(
+        payload.get("model_version") or payload.get("model_variant") or "zyrquen-omega-v1"
+    ).strip()[:64] or "zyrquen-omega-v1"
 
     if attachment:
         prompt_with_ctx = f"{prompt}\n[Attached Context]: {attachment[:800]}"
@@ -1322,6 +1325,8 @@ def handle_infer(payload: dict) -> dict:
 
     trace: dict = {
         "mode": mode,
+        "model_version": model_version,
+        "metadata": {"modelVersion": model_version},
         "engine_path": [],
         "latency_ms": 0.0,
         "python_version": platform.python_version(),

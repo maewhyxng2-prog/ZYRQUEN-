@@ -510,6 +510,12 @@ async function startServer() {
     const mode = ['auto', 'math', 'knowledge', 'model', 'plan'].includes(req.body?.mode)
       ? req.body.mode
       : 'auto';
+    const rawModelVersion =
+      req.body?.metadata?.modelVersion ||
+      req.body?.metadata?.model_version ||
+      req.body?.modelVariant ||
+      'zyrquen-omega-v1';
+    const modelVersion = String(rawModelVersion).trim().slice(0, 64) || 'zyrquen-omega-v1';
 
     if (!prompt && !attachment) {
       res.status(400).json({ error: 'Message content or attachment is required.' });
@@ -539,6 +545,7 @@ async function startServer() {
         user_id: req.user!.id,
         conversation_id: req.params.id,
         attachment,
+        model_version: modelVersion,
       },
     });
 
@@ -564,6 +571,107 @@ async function startServer() {
       return;
     }
     res.status(201).json(saved);
+  });
+
+  app.post('/api/conversations/:id/stream', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const prompt = String(req.body?.content || '').trim();
+    const attachment = String(req.body?.attachment || '').slice(0, 8000);
+    const mode = ['auto', 'math', 'knowledge', 'model', 'plan'].includes(req.body?.mode)
+      ? req.body.mode
+      : 'auto';
+    const rawModelVersion =
+      req.body?.metadata?.modelVersion ||
+      req.body?.metadata?.model_version ||
+      req.body?.modelVariant ||
+      'zyrquen-omega-v1';
+    const modelVersion = String(rawModelVersion).trim().slice(0, 64) || 'zyrquen-omega-v1';
+
+    if (!prompt && !attachment) {
+      res.status(400).json({ error: 'Message content or attachment is required.' });
+      return;
+    }
+
+    const convCheck = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+      action: 'conv_get',
+      payload: { user_id: req.user!.id, conversation_id: req.params.id },
+    });
+    if (!convCheck.ok) {
+      res.status(404).json({ error: 'Conversation not found' });
+      return;
+    }
+
+    const inference = await runPythonScript<{
+      ok: boolean;
+      content: string;
+      status: string;
+      trace: Record<string, unknown>;
+    }>('zyrquen_core.py', {
+      cmd: 'infer',
+      payload: {
+        prompt: prompt || 'Analyze attached context',
+        mode,
+        user_id: req.user!.id,
+        conversation_id: req.params.id,
+        attachment,
+        model_version: modelVersion,
+      },
+    });
+
+    const userDisplay = attachment
+      ? `${prompt || 'Attached snippet'}\n\n[Attachment: ${attachment.length} chars]`
+      : prompt;
+
+    const saved = await runPythonScript<{
+      ok: boolean;
+      error?: string;
+      title?: string;
+      user_message?: Record<string, unknown>;
+      assistant_message?: Record<string, unknown>;
+    }>('db_bridge.py', {
+      action: 'conv_save_exchange',
+      payload: {
+        user_id: req.user!.id,
+        conversation_id: req.params.id,
+        user_content: userDisplay,
+        mode,
+        assistant_content: inference.content,
+        assistant_status: inference.status,
+        trace: inference.trace,
+      },
+    });
+
+    if (!saved.ok) {
+      res.status(500).json({ error: saved.error || 'Failed to persist message' });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+
+    const writeEvent = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    writeEvent('meta', {
+      title: saved.title,
+      modelVersion,
+      user_message: saved.user_message,
+    });
+
+    const fullText = inference.content || '';
+    const chunkSize = 48;
+    for (let i = 0; i < fullText.length; i += chunkSize) {
+      writeEvent('delta', { delta: fullText.slice(i, i + chunkSize) });
+    }
+
+    writeEvent('done', {
+      title: saved.title,
+      modelVersion,
+      user_message: saved.user_message,
+      assistant_message: saved.assistant_message,
+    });
+    res.end();
   });
 
   app.get('/api/knowledge', requireAuth, async (req: AuthedRequest, res: Response) => {

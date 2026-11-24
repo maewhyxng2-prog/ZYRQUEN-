@@ -1,7 +1,13 @@
-import React, { useState } from 'react';
-import { Check, ShieldCheck, Wrench, X } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Check, Lock, ShieldCheck, Wrench, X } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
-import { canRoleExecuteTool, externalToolAdapter, type ToolAuditEntry, type ToolId } from '../lib/tools';
+import {
+  canRoleExecuteTool,
+  externalToolAdapter,
+  getAllowedToolsForRole,
+  type ToolAuditEntry,
+  type ToolId,
+} from '../lib/tools';
 import type { ExternalToolItem, ToolInvocationItem, ToolsOverview } from '../types';
 
 interface ToolRegistryProps {
@@ -14,6 +20,13 @@ interface ToolRegistryProps {
   onRefresh: () => Promise<void> | void;
   onError?: (message: string) => void;
 }
+
+const TOOL_OPTION_LABELS: Record<ToolId, string> = {
+  web_search: 'web_search (ค้นหาเว็บ)',
+  doc_fetch: 'doc_fetch (อ่าน URL)',
+  calc_ast: 'calc_ast (คำนวณ AST)',
+  workspace_file_read: 'workspace_file_read (อ่านไฟล์)',
+};
 
 export function ToolRegistry({
   token,
@@ -33,11 +46,25 @@ export function ToolRegistry({
   const [wsContent, setWsContent] = useState('');
   const [adapterAudit, setAdapterAudit] = useState<ToolAuditEntry[]>([]);
 
-  const devTools = toolsData?.tools || [];
+  const devTools = useMemo(() => toolsData?.tools || [], [toolsData?.tools]);
+  const evaluatedTools = useMemo(
+    () => getAllowedToolsForRole(devTools, userRole),
+    [devTools, userRole]
+  );
+  const policyById = useMemo(
+    () => new Map(evaluatedTools.map((t) => [t.id, t])),
+    [evaluatedTools]
+  );
   const selectedTool = devTools.find((t) => t.id === selectedToolId);
+  const selectedPolicy = selectedTool ? canRoleExecuteTool(selectedTool, userRole) : null;
+  const allowedCount = evaluatedTools.filter((t) => t.policyDecision.allowed).length;
 
   async function handleInvokeTool(e: React.FormEvent) {
     e.preventDefault();
+    if (selectedPolicy && !selectedPolicy.allowed) {
+      setToolMessage(selectedPolicy.modeLabel);
+      return;
+    }
     setInvokingTool(true);
     setToolMessage(null);
     try {
@@ -126,7 +153,11 @@ export function ToolRegistry({
 
   async function handleUpdateToolPolicy(
     toolId: string,
-    patch: { permission_mode?: ExternalToolItem['permission_mode']; quota_daily?: number }
+    patch: {
+      permission_mode?: ExternalToolItem['permission_mode'];
+      enabled?: boolean;
+      quota_daily?: number;
+    }
   ) {
     try {
       await apiRequest(`/api/admin/tools/${toolId}`, {
@@ -195,6 +226,7 @@ export function ToolRegistry({
           <div className="mt-4 divide-y divide-slate-800/80 border-t border-slate-800/80 pt-3">
             {adminTools.map((tl) => {
               const roleStatus = canRoleExecuteTool(tl, userRole);
+              const isEnabled = Boolean(tl.enabled);
               return (
                 <div
                   key={tl.id}
@@ -206,20 +238,36 @@ export function ToolRegistry({
                       {tl.id} · โควตา {tl.calls_today}/{tl.quota_daily} · {roleStatus.modeLabel}
                     </p>
                   </div>
-                  <select
-                    aria-label={`สิทธิ์ ${tl.id}`}
-                    value={tl.permission_mode}
-                    onChange={(e) =>
-                      void handleUpdateToolPolicy(tl.id, {
-                        permission_mode: e.target.value as ExternalToolItem['permission_mode'],
-                      })
-                    }
-                    className="h-9 rounded-lg border border-slate-700 bg-[#070C18] px-2.5 text-xs text-slate-100 focus:border-cyan-400 focus:outline-none"
-                  >
-                    <option value="approval_required">ต้องอนุมัติ (approval_required)</option>
-                    <option value="auto">อัตโนมัติ (auto)</option>
-                    <option value="disabled">ปิดการใช้งาน (disabled)</option>
-                  </select>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void handleUpdateToolPolicy(tl.id, { enabled: !isEnabled })
+                      }
+                      aria-pressed={isEnabled}
+                      className={`h-9 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+                        isEnabled
+                          ? 'border-blue-500/40 bg-[#070C18] text-cyan-300 hover:border-blue-400'
+                          : 'border-rose-500/40 bg-rose-950/30 text-rose-200 hover:bg-rose-950/50'
+                      }`}
+                    >
+                      {isEnabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน'}
+                    </button>
+                    <select
+                      aria-label={`สิทธิ์ ${tl.id}`}
+                      value={tl.permission_mode}
+                      onChange={(e) =>
+                        void handleUpdateToolPolicy(tl.id, {
+                          permission_mode: e.target.value as ExternalToolItem['permission_mode'],
+                        })
+                      }
+                      className="h-9 rounded-lg border border-slate-700 bg-[#070C18] px-2.5 text-xs text-slate-100 focus:border-cyan-400 focus:outline-none"
+                    >
+                      <option value="approval_required">ต้องอนุมัติ (approval_required)</option>
+                      <option value="auto">อัตโนมัติ (auto)</option>
+                      <option value="disabled">ปิดการใช้งาน (disabled)</option>
+                    </select>
+                  </div>
                 </div>
               );
             })}
@@ -238,16 +286,17 @@ export function ToolRegistry({
             Tool Registry & โควตาเครื่องมือภายนอก
           </h3>
         </div>
-        <span className="font-mono text-[11px] text-slate-400">
-          บทบาทปัจจุบัน: {userRole}
+        <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+          บทบาท: {userRole}
+          {devTools.length > 0 ? ` · อนุญาต ${allowedCount}/${devTools.length} เครื่องมือ` : ''}
         </span>
       </div>
       <p className="mt-1 text-xs text-slate-400">
-        เครื่องมือเสริมที่ทำงานผ่านสัญญา ExternalToolAdapter ภายใต้การควบคุมสิทธิ์ของ Native AI Core (ไม่เชื่อมต่อ LLM ภายนอก)
+        เครื่องมือเสริมที่ทำงานผ่านสัญญา ExternalToolAdapter ภายใต้การควบคุมสิทธิ์ของ Native AI Core และ P5 Approval Gate (ไม่เชื่อมต่อ LLM ภายนอก)
       </p>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        {devTools.map((tl) => {
+        {evaluatedTools.map((tl) => {
           const allowlist = (() => {
             try {
               return JSON.parse(tl.endpoint_allowlist_json || '[]') as string[];
@@ -255,12 +304,27 @@ export function ToolRegistry({
               return [];
             }
           })();
-          const roleStatus = canRoleExecuteTool(tl, userRole);
+          const roleStatus = tl.policyDecision;
           return (
-            <div key={tl.id} className="rounded-2xl border border-slate-800 bg-[#070C18] p-3.5">
+            <div
+              key={tl.id}
+              className={`rounded-2xl border p-3.5 ${
+                roleStatus.allowed
+                  ? 'border-slate-800 bg-[#070C18]'
+                  : 'border-rose-500/30 bg-[#070C18]/70 opacity-85'
+              }`}
+            >
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-slate-100">{tl.name}</span>
-                <span className="rounded-md border border-slate-700 px-2 py-0.5 font-mono text-[10px] text-cyan-300">
+                <span
+                  className={`rounded-md border px-2 py-0.5 font-mono text-[10px] ${
+                    !roleStatus.allowed
+                      ? 'border-rose-500/40 text-rose-300'
+                      : roleStatus.requiresApproval
+                        ? 'border-amber-500/40 text-amber-300'
+                        : 'border-slate-700 text-cyan-300'
+                  }`}
+                >
                   {tl.permission_mode}
                 </span>
               </div>
@@ -269,7 +333,14 @@ export function ToolRegistry({
                 โควตาวันนี้: {tl.calls_today}/{tl.quota_daily}
                 {allowlist.length > 0 ? ` · allow: ${allowlist.join(', ')}` : ''}
               </p>
-              <p className="mt-1 text-[11px] text-cyan-300/90">{roleStatus.modeLabel}</p>
+              <p
+                className={`mt-1 flex items-center gap-1.5 text-[11px] ${
+                  roleStatus.allowed ? 'text-cyan-300/90' : 'text-rose-300'
+                }`}
+              >
+                {!roleStatus.allowed && <Lock className="h-3 w-3 shrink-0" />}
+                <span>{roleStatus.modeLabel}</span>
+              </p>
             </div>
           );
         })}
@@ -282,10 +353,16 @@ export function ToolRegistry({
           onChange={(e) => setSelectedToolId(e.target.value as ToolId)}
           className="h-11 rounded-xl border border-slate-800 bg-[#070C18] px-3 text-xs text-slate-100 focus:border-cyan-400 focus:outline-none"
         >
-          <option value="web_search">web_search (ค้นหาเว็บ)</option>
-          <option value="doc_fetch">doc_fetch (อ่าน URL)</option>
-          <option value="calc_ast">calc_ast (คำนวณ AST)</option>
-          <option value="workspace_file_read">workspace_file_read (อ่านไฟล์)</option>
+          {(Object.keys(TOOL_OPTION_LABELS) as ToolId[]).map((tid) => {
+            const matched = policyById.get(tid);
+            const blocked = matched ? !matched.policyDecision.allowed : false;
+            return (
+              <option key={tid} value={tid} disabled={blocked}>
+                {TOOL_OPTION_LABELS[tid]}
+                {blocked ? ' [ถูกปิด/เต็มโควตา]' : ''}
+              </option>
+            );
+          })}
         </select>
         <input
           type="text"
@@ -304,13 +381,27 @@ export function ToolRegistry({
         />
         <button
           type="submit"
-          disabled={invokingTool}
+          disabled={invokingTool || Boolean(selectedPolicy && !selectedPolicy.allowed)}
           className="h-11 rounded-xl bg-blue-600 px-5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 whitespace-nowrap"
         >
-          {invokingTool ? 'กำลังเรียก...' : 'เรียกเครื่องมือ'}
+          {invokingTool
+            ? 'กำลังเรียก...'
+            : selectedPolicy && !selectedPolicy.allowed
+              ? 'ถูกจำกัดสิทธิ์'
+              : 'เรียกเครื่องมือ'}
         </button>
       </form>
 
+      {selectedPolicy && !selectedPolicy.allowed && (
+        <p className="mt-2 text-xs text-rose-300">
+          ไม่สามารถเรียกใช้ `{selectedToolId}` ได้: {selectedPolicy.modeLabel}
+        </p>
+      )}
+      {selectedPolicy && selectedPolicy.allowed && selectedPolicy.requiresApproval && (
+        <p className="mt-2 text-xs text-amber-300/90">
+          เครื่องมือนี้ควบคุมโดย P5 Approval Gate ({selectedPolicy.modeLabel})
+        </p>
+      )}
       {toolMessage && <p className="mt-2.5 text-xs text-cyan-300">{toolMessage}</p>}
 
       <form
@@ -350,6 +441,21 @@ export function ToolRegistry({
                 <span className="text-slate-400">· {inv.analysis_summary || inv.input_json}</span>
               </div>
               <span className="shrink-0 font-mono text-[11px] text-slate-300">{inv.status}</span>
+            </div>
+          ))}
+          {adapterAudit.slice(0, 3).map((entry, idx) => (
+            <div
+              key={`${entry.timestamp}-${idx}`}
+              className="flex items-center justify-between gap-3 py-2 text-xs"
+            >
+              <div className="min-w-0 flex-1">
+                <span className="font-mono text-blue-300">{entry.toolId}</span>{' '}
+                <span className="text-slate-400">
+                  · {entry.action}
+                  {entry.trustGrade ? ` · ระดับความน่าเชื่อถือ ${entry.trustGrade}` : ''}
+                </span>
+              </div>
+              <span className="shrink-0 font-mono text-[11px] text-slate-400">{entry.outcome}</span>
             </div>
           ))}
         </div>
