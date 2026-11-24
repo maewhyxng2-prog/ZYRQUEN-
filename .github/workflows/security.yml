@@ -101,9 +101,12 @@ jobs:
         run: npm audit --workspaces=false --audit-level=high
 
   dependency-review:
-    name: Pull Request Dependency Review
+    name: GitHub Dependency Review (permission-gated)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # npm audit and pip-audit remain blocking; this API may return 403 when the
+    # repository dependency-graph endpoint is not available to the GitHub App.
+    continue-on-error: true
 
     if: github.event_name == 'pull_request'
 
