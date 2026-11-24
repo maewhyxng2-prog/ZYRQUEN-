@@ -94,7 +94,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: apps/web
+        working-directory: .
 
     steps:
       - name: Checkout source
@@ -104,11 +104,9 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
 
       - name: Install web dependencies
-        run: npm ci --workspaces=false
+        run: npm install --no-audit --no-fund
 
       - name: Run Vitest
         run: npm test
@@ -233,6 +231,6 @@ jobs:
       - name: Build web image
         run: |
           docker build \
-            -f apps/web/Dockerfile \
+            -f Dockerfile \
             -t zyrquen-web:test \
-            ./apps/web
+             .
