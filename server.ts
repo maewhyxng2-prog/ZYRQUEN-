@@ -1,0 +1,997 @@
+import crypto from 'crypto';
+import { spawn } from 'child_process';
+import dotenv from 'dotenv';
+import express, { NextFunction, Request, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PORT = 3000;
+const SESSION_SECRET =
+  process.env.ZYRQUEN_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const revokedTokenIds = new Set<string>();
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  display_name: string;
+  role: 'admin' | 'user';
+  created_at: string;
+}
+
+interface AuthedRequest extends Request {
+  user?: AuthUser;
+  tokenJti?: string;
+}
+
+function runPythonScript<T = Record<string, unknown>>(
+  scriptName: 'zyrquen_core.py' | 'db_bridge.py',
+  input: Record<string, unknown>
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.resolve(__dirname, 'python_core', scriptName);
+    const child = spawn('python3', [scriptPath], {
+      cwd: __dirname,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        PYTHONPATH: path.resolve(__dirname, 'python_core'),
+      },
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf-8');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8');
+    });
+    child.on('error', (err) => reject(err));
+    child.on('close', (code) => {
+      if (code !== 0) {
+        return reject(new Error(stderr.trim() || `Python exited with code ${code}`));
+      }
+      try {
+        const parsed = JSON.parse(stdout.trim()) as T;
+        resolve(parsed);
+      } catch (err) {
+        reject(new Error(`Invalid JSON from ${scriptName}: ${(err as Error).message}`));
+      }
+    });
+
+    child.stdin.write(JSON.stringify(input));
+    child.stdin.end();
+  });
+}
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${derived}`;
+}
+
+function verifyPassword(password: string, storedHash: string): boolean {
+  const parts = storedHash.split(':');
+  if (parts.length !== 2) return false;
+  const [salt, expectedHex] = parts;
+  const derived = crypto.scryptSync(password, salt, 64);
+  const expected = Buffer.from(expectedHex, 'hex');
+  if (derived.length !== expected.length) return false;
+  return crypto.timingSafeEqual(derived, expected);
+}
+
+function signToken(user: AuthUser): string {
+  const payload = {
+    sub: user.id,
+    email: user.email,
+    role: user.role,
+    jti: crypto.randomUUID(),
+    exp: Date.now() + TOKEN_TTL_MS,
+  };
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(encoded)
+    .digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function verifyToken(token: string): { sub: string; jti: string; exp: number } | null {
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [encoded, sig] = parts;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(encoded)
+    .digest('base64url');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expectedSig);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf-8')) as {
+      sub: string;
+      jti: string;
+      exp: number;
+    };
+    if (!parsed.sub || !parsed.jti || parsed.exp < Date.now()) return null;
+    if (revokedTokenIds.has(parsed.jti)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+const SESSION_COOKIE_NAME = 'zyrquen_session';
+
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    if (key) {
+      try {
+        out[key] = decodeURIComponent(val);
+      } catch {
+        out[key] = val;
+      }
+    }
+  }
+  return out;
+}
+
+function setSessionCookie(req: Request, res: Response, token: string): void {
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  const attrs = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'HttpOnly',
+    'Path=/',
+    `Max-Age=${Math.floor(TOKEN_TTL_MS / 1000)}`,
+    isHttps ? 'SameSite=None; Secure' : 'SameSite=Lax',
+  ];
+  res.setHeader('Set-Cookie', attrs.join('; '));
+}
+
+function clearSessionCookie(req: Request, res: Response): void {
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  const attrs = [
+    `${SESSION_COOKIE_NAME}=`,
+    'HttpOnly',
+    'Path=/',
+    'Max-Age=0',
+    isHttps ? 'SameSite=None; Secure' : 'SameSite=Lax',
+  ];
+  res.setHeader('Set-Cookie', attrs.join('; '));
+}
+
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 160;
+}
+
+async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
+  const header = req.headers.authorization || '';
+  const bearerToken = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  const cookieToken = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME] || '';
+  const token = bearerToken || cookieToken;
+  if (!token) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+  const decoded = verifyToken(token);
+  if (!decoded) {
+    res.status(401).json({ error: 'Invalid or expired session token' });
+    return;
+  }
+  try {
+    const result = await runPythonScript<{ ok: boolean; user: AuthUser | null }>('db_bridge.py', {
+      action: 'auth_find_by_id',
+      payload: { user_id: decoded.sub },
+    });
+    if (!result.ok || !result.user) {
+      res.status(401).json({ error: 'Account no longer exists' });
+      return;
+    }
+    req.user = result.user;
+    req.tokenJti = decoded.jti;
+    next();
+  } catch {
+    res.status(500).json({ error: 'Session verification failed' });
+  }
+}
+
+function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction) {
+  if (!req.user || req.user.role !== 'admin') {
+    res.status(403).json({ error: 'Administrator privileges required' });
+    return;
+  }
+  next();
+}
+
+async function startServer() {
+  await runPythonScript('zyrquen_core.py', { cmd: 'init', payload: {} });
+
+  const app = express();
+  app.set('trust proxy', 1);
+  app.use(express.json({ limit: '1mb' }));
+
+  // Record API usage latency for authenticated /api routes
+  app.use('/api', (req: AuthedRequest, res: Response, next: NextFunction) => {
+    const started = performance.now();
+    res.on('finish', () => {
+      if (req.user && !req.path.startsWith('/health')) {
+        const latencyMs = Math.round((performance.now() - started) * 10) / 10;
+        void runPythonScript('db_bridge.py', {
+          action: 'log_api_usage',
+          payload: {
+            user_id: req.user.id,
+            key_id: null,
+            endpoint: req.path,
+            method: req.method,
+            status_code: res.statusCode,
+            latency_ms: latencyMs,
+          },
+        }).catch(() => {});
+      }
+    });
+    next();
+  });
+
+  app.get('/api/health', async (_req, res) => {
+    try {
+      const pyHealth = await runPythonScript<{
+        ok: boolean;
+        metrics: Record<string, unknown>;
+        counts: Record<string, number>;
+      }>('zyrquen_core.py', { cmd: 'health', payload: {} });
+      res.json({
+        ok: true,
+        nativeCore: pyHealth.ok ? 'ready' : 'degraded',
+        pythonVersion: pyHealth.metrics?.python_version,
+        counts: pyHealth.counts,
+        timestamp: new Date().toISOString(),
+      });
+    } catch {
+      res.status(503).json({ ok: false, nativeCore: 'offline', timestamp: new Date().toISOString() });
+    }
+  });
+
+  app.get('/api/auth/status', async (_req, res) => {
+    try {
+      const status = await runPythonScript<{ ok: boolean; initialized: boolean; user_count: number }>(
+        'db_bridge.py',
+        { action: 'auth_status', payload: {} }
+      );
+      const envPasscodeConfigured = Boolean((process.env.ZYRQUEN_ADMIN_PASSCODE || '').trim());
+      res.json({
+        initialized: status.initialized,
+        userCount: status.user_count,
+        envPasscodeConfigured,
+      });
+    } catch {
+      res.status(500).json({ error: 'Unable to check auth status' });
+    }
+  });
+
+  app.post('/api/auth/claim-admin', async (req, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const displayName = String(req.body?.displayName || '').trim();
+    const password = String(req.body?.password || '');
+    const passcode = String(req.body?.passcode || '');
+
+    if (!isValidEmail(email) || displayName.length < 2 || password.length < 8) {
+      res.status(400).json({ error: 'Provide a valid email, display name (2+ chars), and password (8+ chars).' });
+      return;
+    }
+
+    const status = await runPythonScript<{ ok: boolean; initialized: boolean }>('db_bridge.py', {
+      action: 'auth_status',
+      payload: {},
+    });
+    if (status.initialized) {
+      res.status(409).json({ error: 'Administrator already claimed. Sign in instead.' });
+      return;
+    }
+
+    const configuredPasscode = (process.env.ZYRQUEN_ADMIN_PASSCODE || '').trim();
+    if (configuredPasscode) {
+      const a = Buffer.from(passcode);
+      const b = Buffer.from(configuredPasscode);
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        res.status(403).json({ error: 'Invalid administrator setup passcode.' });
+        return;
+      }
+    }
+
+    const created = await runPythonScript<{ ok: boolean; user?: AuthUser; error?: string }>('db_bridge.py', {
+      action: 'auth_create_user',
+      payload: {
+        email,
+        display_name: displayName,
+        role: 'admin',
+        password_hash: hashPassword(password),
+      },
+    });
+    if (!created.ok || !created.user) {
+      res.status(400).json({ error: created.error || 'Failed to claim admin account' });
+      return;
+    }
+
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: created.user.id,
+        actor_email: created.user.email,
+        action: 'ADMIN_CLAIMED',
+        target: created.user.id,
+        outcome: 'SUCCESS',
+      },
+    });
+
+    const token = signToken(created.user);
+    setSessionCookie(req, res, token);
+    res.status(201).json({ token, user: created.user });
+  });
+
+  app.post('/api/auth/register', async (req, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const displayName = String(req.body?.displayName || '').trim();
+    const password = String(req.body?.password || '');
+
+    if (!isValidEmail(email) || displayName.length < 2 || password.length < 8) {
+      res.status(400).json({ error: 'Provide a valid email, display name (2+ chars), and password (8+ chars).' });
+      return;
+    }
+
+    const created = await runPythonScript<{ ok: boolean; user?: AuthUser; error?: string }>('db_bridge.py', {
+      action: 'auth_create_user',
+      payload: {
+        email,
+        display_name: displayName,
+        role: 'user',
+        password_hash: hashPassword(password),
+      },
+    });
+    if (!created.ok || !created.user) {
+      res.status(400).json({ error: created.error?.includes('UNIQUE') ? 'Email already registered' : created.error || 'Registration failed' });
+      return;
+    }
+    const token = signToken(created.user);
+    setSessionCookie(req, res, token);
+    res.status(201).json({ token, user: created.user });
+  });
+
+  app.post('/api/auth/login', async (req, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const password = String(req.body?.password || '');
+    if (!isValidEmail(email) || !password) {
+      res.status(400).json({ error: 'Email and password are required.' });
+      return;
+    }
+
+    const found = await runPythonScript<{
+      ok: boolean;
+      user: (AuthUser & { password_hash: string }) | null;
+    }>('db_bridge.py', {
+      action: 'auth_find_by_email',
+      payload: { email },
+    });
+
+    if (!found.user || !verifyPassword(password, found.user.password_hash)) {
+      res.status(401).json({ error: 'Invalid email or password.' });
+      return;
+    }
+
+    const safeUser: AuthUser = {
+      id: found.user.id,
+      email: found.user.email,
+      display_name: found.user.display_name,
+      role: found.user.role,
+      created_at: found.user.created_at,
+    };
+
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: safeUser.id,
+        actor_email: safeUser.email,
+        action: 'AUTH_LOGIN',
+        target: safeUser.id,
+        outcome: 'SUCCESS',
+      },
+    });
+
+    const token = signToken(safeUser);
+    setSessionCookie(req, res, token);
+    res.json({ token, user: safeUser });
+  });
+
+  app.post('/api/auth/logout', requireAuth, async (req: AuthedRequest, res: Response) => {
+    if (req.tokenJti) {
+      revokedTokenIds.add(req.tokenJti);
+    }
+    clearSessionCookie(req, res);
+    if (req.user) {
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user.id,
+          actor_email: req.user.email,
+          action: 'AUTH_LOGOUT',
+          target: req.user.id,
+          outcome: 'SUCCESS',
+        },
+      });
+    }
+    res.json({ ok: true });
+  });
+
+  app.get('/api/auth/me', requireAuth, (req: AuthedRequest, res: Response) => {
+    res.json({ user: req.user });
+  });
+
+  app.get('/api/home', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const summary = await runPythonScript('db_bridge.py', {
+      action: 'home_summary',
+      payload: { user_id: req.user!.id },
+    });
+    res.json(summary);
+  });
+
+  app.get('/api/conversations', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'conv_list',
+      payload: { user_id: req.user!.id },
+    });
+    res.json(data);
+  });
+
+  app.post('/api/conversations', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const title = String(req.body?.title || 'New Native Session').slice(0, 120);
+    const mode = ['auto', 'math', 'knowledge', 'model', 'plan'].includes(req.body?.mode)
+      ? req.body.mode
+      : 'auto';
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'conv_create',
+      payload: { user_id: req.user!.id, title, mode },
+    });
+    res.status(201).json(data);
+  });
+
+  app.get('/api/conversations/:id', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
+      action: 'conv_get',
+      payload: { user_id: req.user!.id, conversation_id: req.params.id },
+    });
+    if (!data.ok) {
+      res.status(404).json({ error: data.error || 'Conversation not found' });
+      return;
+    }
+    res.json(data);
+  });
+
+  app.get('/api/conversations/:id/summary', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript<{ ok: boolean; error?: string; summary?: Record<string, unknown> }>(
+      'db_bridge.py',
+      {
+        action: 'conv_summary',
+        payload: { user_id: req.user!.id, conversation_id: req.params.id },
+      }
+    );
+    if (!data.ok) {
+      res.status(404).json({ error: data.error || 'Conversation not found' });
+      return;
+    }
+    res.json(data);
+  });
+
+  app.delete('/api/conversations/:id', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+      action: 'conv_delete',
+      payload: { user_id: req.user!.id, conversation_id: req.params.id },
+    });
+    if (!data.ok) {
+      res.status(404).json({ error: 'Conversation not found' });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  app.post('/api/conversations/:id/messages', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const prompt = String(req.body?.content || '').trim();
+    const attachment = String(req.body?.attachment || '').slice(0, 8000);
+    const mode = ['auto', 'math', 'knowledge', 'model', 'plan'].includes(req.body?.mode)
+      ? req.body.mode
+      : 'auto';
+
+    if (!prompt && !attachment) {
+      res.status(400).json({ error: 'Message content or attachment is required.' });
+      return;
+    }
+
+    // Verify ownership before inference
+    const convCheck = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+      action: 'conv_get',
+      payload: { user_id: req.user!.id, conversation_id: req.params.id },
+    });
+    if (!convCheck.ok) {
+      res.status(404).json({ error: 'Conversation not found' });
+      return;
+    }
+
+    const inference = await runPythonScript<{
+      ok: boolean;
+      content: string;
+      status: string;
+      trace: Record<string, unknown>;
+    }>('zyrquen_core.py', {
+      cmd: 'infer',
+      payload: {
+        prompt: prompt || 'Analyze attached context',
+        mode,
+        user_id: req.user!.id,
+        conversation_id: req.params.id,
+        attachment,
+      },
+    });
+
+    const userDisplay = attachment
+      ? `${prompt || 'Attached snippet'}\n\n[Attachment: ${attachment.length} chars]`
+      : prompt;
+
+    const saved = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
+      action: 'conv_save_exchange',
+      payload: {
+        user_id: req.user!.id,
+        conversation_id: req.params.id,
+        user_content: userDisplay,
+        mode,
+        assistant_content: inference.content,
+        assistant_status: inference.status,
+        trace: inference.trace,
+      },
+    });
+
+    if (!saved.ok) {
+      res.status(500).json({ error: saved.error || 'Failed to persist message' });
+      return;
+    }
+    res.status(201).json(saved);
+  });
+
+  app.get('/api/knowledge', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const q = String(req.query.q || '').slice(0, 120);
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'knowledge_list',
+      payload: { q },
+    });
+    res.json(data);
+  });
+
+  app.post('/api/knowledge', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const subject = String(req.body?.subject || '').trim().slice(0, 120);
+    const relation = String(req.body?.relation || '').trim().slice(0, 80);
+    const object = String(req.body?.object || '').trim().slice(0, 200);
+    if (!subject || !relation || !object) {
+      res.status(400).json({ error: 'Subject, relation, and object are all required.' });
+      return;
+    }
+    const created = await runPythonScript('db_bridge.py', {
+      action: 'knowledge_create',
+      payload: {
+        subject,
+        relation,
+        object,
+        user_id: req.user!.id,
+        source: 'memory_studio',
+      },
+    });
+    res.status(201).json(created);
+  });
+
+  app.delete('/api/knowledge/:id', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const deleted = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+      action: 'knowledge_delete',
+      payload: {
+        triple_id: req.params.id,
+        user_id: req.user!.id,
+        is_admin: req.user!.role === 'admin',
+      },
+    });
+    if (!deleted.ok) {
+      res.status(404).json({ error: 'Triple not found or insufficient permission' });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  app.get('/api/workflows', requireAuth, async (_req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'workflows_list',
+      payload: {},
+    });
+    res.json(data);
+  });
+
+  app.post('/api/workflows/:groupId/run', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const datasetId = req.body?.datasetId ? String(req.body.datasetId) : null;
+    const result = await runPythonScript<{ ok: boolean; run?: Record<string, unknown>; error?: string }>(
+      'zyrquen_core.py',
+      {
+        cmd: 'run_workflow',
+        payload: {
+          group_id: req.params.groupId,
+          user_id: req.user!.id,
+          approved_by: null,
+          dataset_id: datasetId,
+        },
+      }
+    );
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Workflow run failed' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: `WORKFLOW_${req.params.groupId.toUpperCase()}`,
+        target: String(result.run?.id || req.params.groupId),
+        outcome: String(result.run?.status || 'UNKNOWN'),
+      },
+    });
+    res.status(201).json(result);
+  });
+
+  app.post(
+    '/api/workflows/runs/:runId/decide',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const decision = req.body?.decision === 'reject' ? 'reject' : 'approve';
+      const datasetId = req.body?.datasetId ? String(req.body.datasetId) : null;
+      const result = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
+        action: 'workflow_decide',
+        payload: {
+          run_id: req.params.runId,
+          decision,
+          admin_email: req.user!.email,
+          admin_id: req.user!.id,
+          dataset_id: datasetId,
+        },
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error || 'Decision failed' });
+        return;
+      }
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user!.id,
+          actor_email: req.user!.email,
+          action: `APPROVAL_GATE_${decision.toUpperCase()}`,
+          target: req.params.runId,
+          outcome: 'RECORDED',
+        },
+      });
+      res.json(result);
+    }
+  );
+
+  app.get('/api/developer/overview', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'dev_overview',
+      payload: { user_id: req.user!.id },
+    });
+    res.json(data);
+  });
+
+  app.post('/api/developer/keys', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const name = String(req.body?.name || '').trim().slice(0, 64);
+    const scopes = Array.isArray(req.body?.scopes)
+      ? req.body.scopes.map(String).slice(0, 5)
+      : ['infer:read'];
+    if (name.length < 2) {
+      res.status(400).json({ error: 'API key name must be at least 2 characters.' });
+      return;
+    }
+    const rawSecret = `zyrq_${crypto.randomBytes(24).toString('hex')}`;
+    const keyPrefix = rawSecret.slice(0, 12);
+    const keyHash = crypto.createHash('sha256').update(rawSecret).digest('hex');
+
+    const created = await runPythonScript<{ ok: boolean; key?: Record<string, unknown> }>('db_bridge.py', {
+      action: 'dev_key_create',
+      payload: {
+        user_id: req.user!.id,
+        name,
+        key_prefix: keyPrefix,
+        key_hash: keyHash,
+        scopes,
+        quota_daily: 1000,
+      },
+    });
+    res.status(201).json({ ...created, plaintextKey: rawSecret });
+  });
+
+  app.delete('/api/developer/keys/:id', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+      action: 'dev_key_revoke',
+      payload: { key_id: req.params.id, user_id: req.user!.id },
+    });
+    if (!data.ok) {
+      res.status(404).json({ error: 'API key not found' });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  app.post('/api/developer/datasets', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const name = String(req.body?.name || '').trim().slice(0, 80);
+    const content = String(req.body?.content || '').slice(0, 200000);
+    if (!name || !content) {
+      res.status(400).json({ error: 'Dataset name and content are required.' });
+      return;
+    }
+    const result = await runPythonScript<{ ok: boolean; error?: string }>('zyrquen_core.py', {
+      cmd: 'ingest_dataset',
+      payload: { name, content, user_id: req.user!.id },
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Dataset ingestion failed' });
+      return;
+    }
+    res.status(201).json(result);
+  });
+
+  app.post('/api/developer/evaluate', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const suiteName = String(req.body?.suiteName || 'ZYRQUEN Scientific Benchmark v1').slice(0, 80);
+    const result = await runPythonScript<{
+      ok: boolean;
+      evaluation?: Record<string, unknown>;
+      error?: string;
+    }>('zyrquen_core.py', {
+      cmd: 'evaluate',
+      payload: { user_id: req.user!.id, suite_name: suiteName },
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Evaluation failed' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: {
+        actor_id: req.user!.id,
+        actor_email: req.user!.email,
+        action: 'SCIENTIFIC_EVALUATION',
+        target: String(result.evaluation?.id || 'suite'),
+        outcome: String(result.evaluation?.overall_status || 'UNKNOWN'),
+      },
+    });
+    res.status(201).json(result);
+  });
+
+  app.get('/api/developer/tools', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'tools_overview',
+      payload: { user_id: req.user!.id },
+    });
+    res.json(data);
+  });
+
+  app.post('/api/developer/workspace-files', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const filename = String(req.body?.filename || '').trim().slice(0, 96);
+    const content = String(req.body?.content || '').slice(0, 50000);
+    if (!filename || !content) {
+      res.status(400).json({ error: 'Filename and content are required.' });
+      return;
+    }
+    const result = await runPythonScript<{ ok: boolean; error?: string; file?: Record<string, unknown> }>(
+      'db_bridge.py',
+      {
+        action: 'tools_upload_file',
+        payload: { filename, content },
+      }
+    );
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Failed to save workspace file' });
+      return;
+    }
+    res.status(201).json(result);
+  });
+
+  app.post(
+    '/api/developer/tools/:toolId/invoke',
+    requireAuth,
+    async (req: AuthedRequest, res: Response) => {
+      const toolId = String(req.params.toolId || '').trim();
+      const input =
+        req.body?.input && typeof req.body.input === 'object' ? req.body.input : {};
+      const result = await runPythonScript<{
+        ok: boolean;
+        status?: string;
+        error?: string;
+        invocation?: Record<string, unknown>;
+      }>('db_bridge.py', {
+        action: 'tools_invoke',
+        payload: {
+          tool_id: toolId,
+          input,
+          user_id: req.user!.id,
+          conversation_id: req.body?.conversationId ? String(req.body.conversationId) : null,
+        },
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error || 'Tool invocation failed' });
+        return;
+      }
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user!.id,
+          actor_email: req.user!.email,
+          action: `TOOL_INVOKE_${toolId.toUpperCase()}`,
+          target: String(result.invocation?.id || toolId),
+          outcome: String(result.status || 'UNKNOWN'),
+        },
+      });
+      res.status(201).json(result);
+    }
+  );
+
+  app.get('/api/admin/overview', requireAuth, requireAdmin, async (_req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'admin_overview',
+      payload: {},
+    });
+    res.json(data);
+  });
+
+  app.patch(
+    '/api/admin/users/:id/role',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const role = req.body?.role === 'admin' ? 'admin' : 'user';
+      if (req.params.id === req.user!.id && role !== 'admin') {
+        res.status(400).json({ error: 'Cannot demote your own active administrator account.' });
+        return;
+      }
+      const updated = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+        action: 'admin_user_role',
+        payload: { target_user_id: req.params.id, role },
+      });
+      if (!updated.ok) {
+        res.status(404).json({ error: 'User not found' });
+        return;
+      }
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user!.id,
+          actor_email: req.user!.email,
+          action: 'ROLE_UPDATED',
+          target: req.params.id,
+          outcome: role.toUpperCase(),
+        },
+      });
+      res.json({ ok: true });
+    }
+  );
+
+  app.patch(
+    '/api/admin/tools/:toolId',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const permissionMode = req.body?.permission_mode ? String(req.body.permission_mode) : undefined;
+      const enabled = typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined;
+      const quotaDaily =
+        req.body?.quota_daily !== undefined ? Number(req.body.quota_daily) : undefined;
+      const endpointAllowlist = Array.isArray(req.body?.endpoint_allowlist)
+        ? req.body.endpoint_allowlist.map(String)
+        : undefined;
+
+      const updated = await runPythonScript<{ ok: boolean; error?: string; tool?: Record<string, unknown> }>(
+        'db_bridge.py',
+        {
+          action: 'admin_tools_update',
+          payload: {
+            tool_id: req.params.toolId,
+            permission_mode: permissionMode,
+            enabled,
+            quota_daily: quotaDaily,
+            endpoint_allowlist: endpointAllowlist,
+          },
+        }
+      );
+      if (!updated.ok) {
+        res.status(400).json({ error: updated.error || 'Failed to update tool policy' });
+        return;
+      }
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user!.id,
+          actor_email: req.user!.email,
+          action: 'ADMIN_TOOL_POLICY_UPDATED',
+          target: req.params.toolId,
+          outcome: String(updated.tool?.permission_mode || 'UPDATED').toUpperCase(),
+        },
+      });
+      res.json(updated);
+    }
+  );
+
+  app.post(
+    '/api/admin/tool-invocations/:invocationId/decide',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const decision = req.body?.decision === 'reject' ? 'reject' : 'approve';
+      const result = await runPythonScript<{ ok: boolean; error?: string; status?: string }>(
+        'db_bridge.py',
+        {
+          action: 'admin_tool_decide',
+          payload: {
+            invocation_id: req.params.invocationId,
+            decision,
+            admin_email: req.user!.email,
+          },
+        }
+      );
+      if (!result.ok) {
+        res.status(400).json({ error: result.error || 'Tool decision failed' });
+        return;
+      }
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user!.id,
+          actor_email: req.user!.email,
+          action: `TOOL_GATE_${decision.toUpperCase()}`,
+          target: req.params.invocationId,
+          outcome: String(result.status || decision.toUpperCase()),
+        },
+      });
+      res.json(result);
+    }
+  );
+
+  // Vite dev middleware or production static assets
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distDir = path.resolve(__dirname, 'dist');
+    app.use(express.static(distDir));
+    app.get('*', (_req, res) => {
+      const indexFile = path.resolve(distDir, 'index.html');
+      if (fs.existsSync(indexFile)) {
+        res.sendFile(indexFile);
+      } else {
+        res.status(404).send('Build output missing. Run npm run build.');
+      }
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`ZYRQUEN server listening on http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error('Failed to start ZYRQUEN server:', err);
+  process.exit(1);
+});
