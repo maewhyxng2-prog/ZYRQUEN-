@@ -321,3 +321,111 @@ export interface AdminOverview {
   audit_logs: AuditLogItem[];
   system: SystemMetrics;
 }
+
+export type BenchmarkPolarity = 'positive' | 'negative' | 'invariant';
+
+export interface BenchmarkCaseItem {
+  id: string;
+  category: string;
+  polarity: BenchmarkPolarity;
+  input: string;
+  passed: boolean;
+  expected: string;
+  actual: string;
+  failure_type: string | null;
+  engine_path: string[];
+  detail: string;
+}
+
+export interface BenchmarkCategoryStats {
+  total: number;
+  passed: number;
+  failed: number;
+  score: number;
+}
+
+export interface NativeBenchmarkReport {
+  benchmark_version: string;
+  environment: {
+    python_version: string;
+    platform: string;
+    model_version: string;
+    checkpoint_version: number;
+    checkpoint_vocab_size: number;
+    external_models_used: boolean;
+  };
+  summary: {
+    total_cases: number;
+    passed: number;
+    failed: number;
+    overall_score: number;
+    false_positives: number;
+    negative_cases_total: number;
+    false_positive_rate: number;
+    false_negatives: number;
+    positive_cases_total: number;
+    false_negative_rate: number;
+  };
+  category_scores: Record<string, BenchmarkCategoryStats>;
+  leakage_detection: {
+    fixture_isolation: {
+      isolated: boolean;
+      overlaps: unknown[];
+      corpus_lines?: number;
+      seed_triples?: number;
+      negative_prompts?: number;
+    };
+    clean_split_leakage_detected: number;
+    exact_dedup_passed: boolean;
+    near_dup_leakage_caught: boolean;
+  };
+  builtin_core_eval: {
+    overall_status: string;
+    math_score: number;
+    knowledge_score: number;
+    planning_score: number;
+    test_accuracy: number | null;
+    perplexity: number | null;
+  };
+  failure_types: Record<string, number>;
+  failures: BenchmarkCaseItem[];
+  unmeasurable_limitations: string[];
+  cases: BenchmarkCaseItem[];
+}
+
+export interface SourceVerificationMetrics {
+  status: 'VERIFIED' | 'FAILED';
+  score: number;
+  passed: number;
+  total: number;
+  externalModelsUsed: boolean;
+  checks: {
+    fabricatedSourceRejected: boolean;
+    invalidUrlRejected: boolean;
+    unsupportedClaimRejected: boolean;
+    staleEvidenceFlagged: boolean;
+    missingEvidenceAbstained: boolean;
+    mockIsolationVerified: boolean;
+    falseSuccessPrevented: boolean;
+  };
+  failedCases: BenchmarkCaseItem[];
+}
+
+export interface AbstentionAccuracyMetrics {
+  status: 'VERIFIED' | 'FAILED';
+  overallAbstentionAccuracy: number;
+  negativeCasesPassed: number;
+  negativeCasesTotal: number;
+  falsePositives: number;
+  falsePositiveRate: number;
+  negativeAbstentionCategory: BenchmarkCategoryStats;
+  breaches: BenchmarkCaseItem[];
+}
+
+export interface NativeBenchmarkEvaluation {
+  executedAt: string;
+  report: NativeBenchmarkReport;
+  sourceVerification: SourceVerificationMetrics;
+  abstentionAccuracy: AbstentionAccuracyMetrics;
+  integrityVerified: boolean;
+}

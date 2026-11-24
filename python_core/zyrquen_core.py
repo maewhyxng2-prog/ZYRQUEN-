@@ -334,10 +334,24 @@ def get_system_metrics() -> dict:
     }
 
 
+def _fmt_num(v: float) -> int | float:
+    if abs(v) < 1e-11:
+        return 0
+    if abs(v - round(v)) < 1e-9:
+        return int(round(v))
+    return round(v, 8)
+
+
+_MATH_TRAILING_RE = re.compile(
+    r"(?:\s*(?:ได้เท่าไร|ได้เท่าไหร่|เป็นเท่าไร|เป็นเท่าไหร่|เท่าไร|เท่าไหร่|ให้หน่อยครับ|ให้หน่อยค่ะ|ให้หน่อย|หน่อยครับ|หน่อยค่ะ|หน่อย|ทีครับ|ทีค่ะ|นะครับ|นะคะ|ครับ|ค่ะ|นะ|please|plz|\?))+\s*$",
+    re.IGNORECASE,
+)
+
+
 def safe_eval_ast(node: ast.AST, steps: list) -> float:
     if isinstance(node, ast.Expression):
         return safe_eval_ast(node.body, steps)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
         return float(node.value)
     if isinstance(node, ast.Name):
         if node.id in SAFE_CONSTS:
@@ -351,6 +365,8 @@ def safe_eval_ast(node: ast.AST, steps: list) -> float:
         if isinstance(node.op, ast.Pow) and abs(right) > 100:
             raise ValueError("Exponent magnitude bounded to 100 for resource safety")
         res = float(SAFE_BIN_OPS[type(node.op)](left, right))
+        if not math.isfinite(res):
+            raise ValueError("Non-finite arithmetic result")
         steps.append(f"{left:g} {type(node.op).__name__} {right:g} = {res:g}")
         return res
     if isinstance(node, ast.UnaryOp) and type(node.op) in SAFE_UNARY_OPS:
@@ -366,6 +382,8 @@ def safe_eval_ast(node: ast.AST, steps: list) -> float:
         if fname == "factorial" and (arg_val < 0 or arg_val > 50 or arg_val != int(arg_val)):
             raise ValueError("factorial argument must be integer in [0, 50]")
         res = float(SAFE_FUNCS[fname](int(arg_val) if fname == "factorial" else arg_val))
+        if not math.isfinite(res):
+            raise ValueError("Non-finite function result")
         steps.append(f"{fname}({arg_val:g}) = {res:g}")
         return res
     raise ValueError("Unsupported AST expression node")
@@ -378,62 +396,258 @@ def _normalize_algebra_expr(expr: str) -> str:
     return step2.replace("^", "**")
 
 
-def _eval_linear_ast(node: ast.AST, var_name: str) -> tuple[float, float]:
-    """Return (coeff_of_var, constant_term) strictly verifying linearity."""
+def _eval_poly2_ast(node: ast.AST, var_name: str) -> tuple[float, float, float]:
+    """Return (c2, c1, c0) for c2*x^2 + c1*x + c0 strictly bounded to degree <= 2."""
     if isinstance(node, ast.Expression):
-        return _eval_linear_ast(node.body, var_name)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return (0.0, float(node.value))
+        return _eval_poly2_ast(node.body, var_name)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return (0.0, 0.0, float(node.value))
     if isinstance(node, ast.Name):
         if node.id == var_name:
-            return (1.0, 0.0)
+            return (0.0, 1.0, 0.0)
         if node.id in SAFE_CONSTS:
-            return (0.0, float(SAFE_CONSTS[node.id]))
+            return (0.0, 0.0, float(SAFE_CONSTS[node.id]))
         raise ValueError(f"Unknown symbol '{node.id}'")
     if isinstance(node, ast.UnaryOp) and type(node.op) in SAFE_UNARY_OPS:
-        a, b = _eval_linear_ast(node.operand, var_name)
+        c2, c1, c0 = _eval_poly2_ast(node.operand, var_name)
         if isinstance(node.op, ast.USub):
-            return (-a, -b)
-        return (a, b)
+            return (-c2, -c1, -c0)
+        return (c2, c1, c0)
     if isinstance(node, ast.BinOp) and type(node.op) in SAFE_BIN_OPS:
-        la, lb = _eval_linear_ast(node.left, var_name)
-        ra, rb = _eval_linear_ast(node.right, var_name)
+        a2, a1, a0 = _eval_poly2_ast(node.left, var_name)
+        b2, b1, b0 = _eval_poly2_ast(node.right, var_name)
         if isinstance(node.op, ast.Add):
-            return (la + ra, lb + rb)
+            return (a2 + b2, a1 + b1, a0 + b0)
         if isinstance(node.op, ast.Sub):
-            return (la - ra, lb - rb)
+            return (a2 - b2, a1 - b1, a0 - b0)
         if isinstance(node.op, ast.Mult):
-            if abs(la) > 1e-12 and abs(ra) > 1e-12:
-                raise ValueError("สมการไม่ใช่เชิงเส้น (พจน์ตัวแปรคูณกัน)")
-            return (la * rb + ra * lb, lb * rb)
+            c4 = a2 * b2
+            c3 = a2 * b1 + a1 * b2
+            if abs(c4) > 1e-12 or abs(c3) > 1e-12:
+                raise ValueError("สมการมีดีกรีสูงกว่า 2")
+            return (a2 * b0 + a1 * b1 + a0 * b2, a1 * b0 + a0 * b1, a0 * b0)
         if isinstance(node.op, ast.Div):
-            if abs(ra) > 1e-12:
+            if abs(b2) > 1e-12 or abs(b1) > 1e-12:
                 raise ValueError("ไม่อนุญาตให้ตัวแปรเป็นตัวหาร")
-            if abs(rb) < 1e-12:
+            if abs(b0) < 1e-12:
                 raise ValueError("หารด้วยศูนย์ไม่ได้")
-            return (la / rb, lb / rb)
+            return (a2 / b0, a1 / b0, a0 / b0)
         if isinstance(node.op, ast.Pow):
-            if abs(la) < 1e-12 and abs(ra) < 1e-12 and abs(rb) <= 100:
-                return (0.0, float(lb**rb))
-            if abs(ra) < 1e-12 and rb == 1.0:
-                return (la, lb)
-            if abs(ra) < 1e-12 and rb == 0.0:
-                return (0.0, 1.0)
-            raise ValueError("รองรับเฉพาะสมการเชิงเส้นกำลังหนึ่ง")
-        raise ValueError("ตัวดำเนินการไม่รองรับในสมการเชิงเส้น")
+            if abs(b2) > 1e-12 or abs(b1) > 1e-12:
+                raise ValueError("เลขชี้กำลังต้องเป็นค่าคงที่")
+            if abs(a2) < 1e-12 and abs(a1) < 1e-12 and abs(b0) <= 100:
+                return (0.0, 0.0, float(a0**b0))
+            if abs(b0 - round(b0)) < 1e-12:
+                exp_i = int(round(b0))
+                if exp_i == 0:
+                    return (0.0, 0.0, 1.0)
+                if exp_i == 1:
+                    return (a2, a1, a0)
+                if exp_i == 2:
+                    if abs(a2) > 1e-12:
+                        raise ValueError("สมการมีดีกรีสูงกว่า 2")
+                    return (a1 * a1, 2.0 * a1 * a0, a0 * a0)
+            raise ValueError("รองรับพหุนามไม่เกินดีกรี 2")
+        raise ValueError("ตัวดำเนินการไม่รองรับ")
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         fname = node.func.id
         if fname not in SAFE_FUNCS or len(node.args) != 1 or node.keywords:
             raise ValueError(f"Unsupported function '{fname}'")
-        aa, ab = _eval_linear_ast(node.args[0], var_name)
-        if abs(aa) > 1e-12:
-            raise ValueError("ฟังก์ชันไม่สามารถรับตัวแปรที่ไม่ทราบค่าในสมการเชิงเส้นได้")
+        a2, a1, a0 = _eval_poly2_ast(node.args[0], var_name)
+        if abs(a2) > 1e-12 or abs(a1) > 1e-12:
+            raise ValueError("ฟังก์ชันไม่สามารถรับตัวแปรที่ไม่ทราบค่าได้")
+        val = float(SAFE_FUNCS[fname](int(a0) if fname == "factorial" else a0))
+        if not math.isfinite(val):
+            raise ValueError("Non-finite function result")
+        return (0.0, 0.0, val)
+    raise ValueError("Unsupported polynomial AST node")
+
+
+def _eval_linear_ast(node: ast.AST, var_name: str) -> tuple[float, float]:
+    """Return (coeff_of_var, constant_term) strictly verifying linearity."""
+    c2, c1, c0 = _eval_poly2_ast(node, var_name)
+    if abs(c2) > 1e-12:
+        raise ValueError("รองรับเฉพาะสมการเชิงเส้นกำลังหนึ่ง")
+    return (c1, c0)
+
+
+def _eval_multilinear_ast(node: ast.AST, var_names: set[str]) -> tuple[dict[str, float], float]:
+    """Return ({var: coeff}, constant_term) strictly verifying joint linearity."""
+    if isinstance(node, ast.Expression):
+        return _eval_multilinear_ast(node.body, var_names)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return ({}, float(node.value))
+    if isinstance(node, ast.Name):
+        if node.id in var_names:
+            return ({node.id: 1.0}, 0.0)
+        if node.id in SAFE_CONSTS:
+            return ({}, float(SAFE_CONSTS[node.id]))
+        raise ValueError(f"Unknown symbol '{node.id}'")
+    if isinstance(node, ast.UnaryOp) and type(node.op) in SAFE_UNARY_OPS:
+        coeffs, const = _eval_multilinear_ast(node.operand, var_names)
+        if isinstance(node.op, ast.USub):
+            return ({k: -v for k, v in coeffs.items()}, -const)
+        return (coeffs, const)
+    if isinstance(node, ast.BinOp) and type(node.op) in SAFE_BIN_OPS:
+        lc, lb = _eval_multilinear_ast(node.left, var_names)
+        rc, rb = _eval_multilinear_ast(node.right, var_names)
+        if isinstance(node.op, ast.Add):
+            merged = dict(lc)
+            for k, v in rc.items():
+                merged[k] = merged.get(k, 0.0) + v
+            return (merged, lb + rb)
+        if isinstance(node.op, ast.Sub):
+            merged = dict(lc)
+            for k, v in rc.items():
+                merged[k] = merged.get(k, 0.0) - v
+            return (merged, lb - rb)
+        if isinstance(node.op, ast.Mult):
+            has_l = any(abs(v) > 1e-12 for v in lc.values())
+            has_r = any(abs(v) > 1e-12 for v in rc.values())
+            if has_l and has_r:
+                raise ValueError("ระบบสมการไม่ใช่เชิงเส้น")
+            if has_l:
+                return ({k: v * rb for k, v in lc.items()}, lb * rb)
+            return ({k: v * lb for k, v in rc.items()}, lb * rb)
+        if isinstance(node.op, ast.Div):
+            if any(abs(v) > 1e-12 for v in rc.values()):
+                raise ValueError("ไม่อนุญาตให้ตัวแปรเป็นตัวหาร")
+            if abs(rb) < 1e-12:
+                raise ValueError("หารด้วยศูนย์ไม่ได้")
+            return ({k: v / rb for k, v in lc.items()}, lb / rb)
+        if isinstance(node.op, ast.Pow):
+            has_l = any(abs(v) > 1e-12 for v in lc.values())
+            has_r = any(abs(v) > 1e-12 for v in rc.values())
+            if not has_l and not has_r and abs(rb) <= 100:
+                return ({}, float(lb**rb))
+            if not has_r and rb == 1.0:
+                return (lc, lb)
+            if not has_r and rb == 0.0:
+                return ({}, 1.0)
+            raise ValueError("ระบบสมการเชิงเส้นไม่รองรับเลขยกกำลังตัวแปร")
+        raise ValueError("Unsupported operator")
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        fname = node.func.id
+        if fname not in SAFE_FUNCS or len(node.args) != 1 or node.keywords:
+            raise ValueError(f"Unsupported function '{fname}'")
+        ac, ab = _eval_multilinear_ast(node.args[0], var_names)
+        if any(abs(v) > 1e-12 for v in ac.values()):
+            raise ValueError("ฟังก์ชันไม่สามารถรับตัวแปรที่ไม่ทราบค่าได้")
         val = float(SAFE_FUNCS[fname](int(ab) if fname == "factorial" else ab))
-        return (0.0, val)
-    raise ValueError("Unsupported linear AST node")
+        return ({}, val)
+    raise ValueError("Unsupported multilinear AST node")
 
 
-def try_solve_linear_equation(prompt: str) -> dict | None:
+def _try_solve_linear_system(candidate: str, eq_parts: list[str]) -> dict | None:
+    if len(eq_parts) < 2 or len(eq_parts) > 6:
+        return None
+    parsed_eqs: list[tuple[str, str, str]] = []
+    all_unknowns: set[str] = set()
+    for part in eq_parts:
+        if "=" not in part or part.count("=") != 1:
+            return None
+        lhs_raw, rhs_raw = [p.strip() for p in part.split("=", 1)]
+        if not lhs_raw or not rhs_raw:
+            return None
+        lhs_norm = _normalize_algebra_expr(lhs_raw)
+        rhs_norm = _normalize_algebra_expr(rhs_raw)
+        if not (
+            re.fullmatch(r"[0-9a-zA-Z_+\-*/%.()\s]+", lhs_norm)
+            and re.fullmatch(r"[0-9a-zA-Z_+\-*/%.()\s]+", rhs_norm)
+        ):
+            return None
+        tokens_found = re.findall(r"[a-zA-Z_]+", f"{lhs_norm} {rhs_norm}")
+        for t in tokens_found:
+            if t not in SAFE_FUNCS and t not in SAFE_CONSTS:
+                if len(t) != 1:
+                    return None
+                all_unknowns.add(t)
+        parsed_eqs.append((part, lhs_norm, rhs_norm))
+
+    unknowns = sorted(all_unknowns)
+    if len(unknowns) < 2 or len(unknowns) > 4:
+        return None
+
+    m = len(parsed_eqs)
+    n = len(unknowns)
+    mat: list[list[float]] = []
+    steps: list[str] = [f"ตรวจพบระบบสมการเชิงเส้น {m} สมการ, {n} ตัวแปร ({', '.join(unknowns)})"]
+
+    try:
+        for raw_part, lhs_norm, rhs_norm in parsed_eqs:
+            lc, lb = _eval_multilinear_ast(ast.parse(lhs_norm, mode="eval"), all_unknowns)
+            rc, rb = _eval_multilinear_ast(ast.parse(rhs_norm, mode="eval"), all_unknowns)
+            row = [round(lc.get(v, 0.0) - rc.get(v, 0.0), 10) for v in unknowns]
+            rhs_const = round(rb - lb, 10)
+            row.append(rhs_const)
+            mat.append(row)
+            terms = [f"{row[i]:g}{unknowns[i]}" for i in range(n) if abs(row[i]) > 1e-10]
+            steps.append(f"จัดรูป `{raw_part}` → {' + '.join(terms) or '0'} = {rhs_const:g}")
+    except Exception:
+        return None
+
+    # Gaussian elimination with partial pivoting (RREF)
+    pivot_cols: list[int] = []
+    r = 0
+    for c in range(n):
+        if r >= m:
+            break
+        best_row = max(range(r, m), key=lambda i: abs(mat[i][c]))
+        if abs(mat[best_row][c]) < 1e-10:
+            continue
+        mat[r], mat[best_row] = mat[best_row], mat[r]
+        piv = mat[r][c]
+        mat[r] = [val / piv for val in mat[r]]
+        for i in range(m):
+            if i != r and abs(mat[i][c]) > 1e-12:
+                factor = mat[i][c]
+                mat[i] = [mat[i][j] - factor * mat[r][j] for j in range(n + 1)]
+        pivot_cols.append(c)
+        r += 1
+
+    for i in range(m):
+        if all(abs(mat[i][j]) < 1e-9 for j in range(n)) and abs(mat[i][n]) >= 1e-9:
+            steps.append("พบแถวที่ขัดแย้งหลังกำจัดตัวแปรแบบเกาส์เซียน (0 = ค่าคงที่ที่ไม่เป็นศูนย์)")
+            return {
+                "engine": "linear_system_rref",
+                "equation": candidate,
+                "variables": unknowns,
+                "solution_type": "no_solution",
+                "solutions": {},
+                "summary_tag": "no_solution",
+                "result": None,
+                "steps": steps,
+            }
+
+    if len(pivot_cols) < n:
+        steps.append(f"อันดับเมทริกซ์ ({len(pivot_cols)}) น้อยกว่าจำนวนตัวแปร ({n}) — มีคำตอบได้หลายชุด")
+        return {
+            "engine": "linear_system_rref",
+            "equation": candidate,
+            "variables": unknowns,
+            "solution_type": "underdetermined",
+            "solutions": {},
+            "summary_tag": "underdetermined",
+            "result": None,
+            "steps": steps,
+        }
+
+    solutions = {unknowns[col]: _fmt_num(mat[idx][n]) for idx, col in enumerate(pivot_cols)}
+    summary_tag = "system(" + ",".join(f"{v}={solutions[v]}" for v in unknowns) + ")"
+    steps.append("คำตอบจาก RREF: " + ", ".join(f"{v} = {solutions[v]}" for v in unknowns))
+    return {
+        "engine": "linear_system_rref",
+        "equation": candidate,
+        "variables": unknowns,
+        "solution_type": "system",
+        "solutions": solutions,
+        "summary_tag": summary_tag,
+        "result": solutions,
+        "steps": steps,
+    }
+
+
+def try_solve_equation(prompt: str) -> dict | None:
     cleaned = prompt.strip()
     m = re.match(
         r"^(?:แก้สมการ|สมการ|solve|equation)\s*:?\s*(.+)$",
@@ -441,7 +655,16 @@ def try_solve_linear_equation(prompt: str) -> dict | None:
         re.IGNORECASE,
     )
     candidate = m.group(1).strip() if m else cleaned
-    if "=" not in candidate or candidate.count("=") != 1:
+    candidate = _MATH_TRAILING_RE.sub("", candidate).strip()
+    if "=" not in candidate:
+        return None
+
+    # Check multi-equation system first
+    eq_parts = [p.strip() for p in re.split(r"(?:[,;\n]+|\s+และ\s+|\s+and\s+)", candidate) if p.strip()]
+    if len(eq_parts) >= 2:
+        return _try_solve_linear_system(candidate, eq_parts)
+
+    if candidate.count("=") != 1:
         return None
     lhs_raw, rhs_raw = [p.strip() for p in candidate.split("=", 1)]
     if not lhs_raw or not rhs_raw:
@@ -454,7 +677,6 @@ def try_solve_linear_equation(prompt: str) -> dict | None:
     ):
         return None
 
-    # Identify unknown single-letter variable (excluding SAFE_CONSTS and SAFE_FUNCS)
     tokens_found = re.findall(r"[a-zA-Z_]+", f"{lhs_norm} {rhs_norm}")
     unknowns = sorted(
         {t for t in tokens_found if t not in SAFE_FUNCS and t not in SAFE_CONSTS}
@@ -466,49 +688,113 @@ def try_solve_linear_equation(prompt: str) -> dict | None:
     try:
         lhs_tree = ast.parse(lhs_norm, mode="eval")
         rhs_tree = ast.parse(rhs_norm, mode="eval")
-        la, lb = _eval_linear_ast(lhs_tree, var_name)
-        ra, rb = _eval_linear_ast(rhs_tree, var_name)
+        l2, l1, l0 = _eval_poly2_ast(lhs_tree, var_name)
+        r2, r1, r0 = _eval_poly2_ast(rhs_tree, var_name)
     except Exception:
         return None
 
-    net_a = round(la - ra, 10)
-    net_b = round(rb - lb, 10)
-    steps = [
-        f"ฝั่งซ้าย: {la:g}{var_name} + {lb:g}",
-        f"ฝั่งขวา: {ra:g}{var_name} + {rb:g}",
-        f"จัดรูปสมการเชิงเส้น: {net_a:g}{var_name} = {net_b:g}",
-    ]
-    if abs(net_a) < 1e-10:
-        sol_type = "identity" if abs(net_b) < 1e-10 else "no_solution"
-        steps.append(
-            "สมการเป็นจริงทุกค่าของตัวแปร (อนันต์คำตอบ)"
-            if sol_type == "identity"
-            else "ค่าคงที่ไม่เท่ากัน (สมการไม่มีคำตอบ)"
-        )
+    a = round(l2 - r2, 10)
+    b = round(l1 - r1, 10)
+    c = round(l0 - r0, 10)
+
+    # Degree <= 1 (Linear)
+    if abs(a) < 1e-10:
+        net_a = b
+        net_b = -c
+        steps = [
+            f"ฝั่งซ้าย: {l1:g}{var_name} + {l0:g}",
+            f"ฝั่งขวา: {r1:g}{var_name} + {r0:g}",
+            f"จัดรูปสมการเชิงเส้น: {net_a:g}{var_name} = {net_b:g}",
+        ]
+        if abs(net_a) < 1e-10:
+            sol_type = "identity" if abs(net_b) < 1e-10 else "no_solution"
+            steps.append(
+                "สมการเป็นจริงทุกค่าของตัวแปร (อนันต์คำตอบ)"
+                if sol_type == "identity"
+                else "ค่าคงที่ไม่เท่ากัน (สมการไม่มีคำตอบ)"
+            )
+            return {
+                "engine": "linear_algebra_ast",
+                "equation": candidate,
+                "variable": var_name,
+                "solution_type": sol_type,
+                "summary_tag": sol_type,
+                "result": None,
+                "steps": steps,
+            }
+
+        sol = _fmt_num(net_b / net_a)
+        steps.append(f"{var_name} = {net_b:g} / {net_a:g} = {sol}")
         return {
             "engine": "linear_algebra_ast",
             "equation": candidate,
             "variable": var_name,
-            "solution_type": sol_type,
-            "result": None,
+            "solution_type": "unique",
+            "summary_tag": f"{var_name}={sol}",
+            "result": sol,
             "steps": steps,
         }
 
-    sol = net_b / net_a
-    formatted = int(round(sol)) if abs(sol - round(sol)) < 1e-9 else round(sol, 8)
-    steps.append(f"{var_name} = {net_b:g} / {net_a:g} = {formatted}")
+    # Degree 2 (Quadratic): a*x^2 + b*x + c = 0
+    disc = round(b * b - 4.0 * a * c, 12)
+    steps = [
+        f"จัดรูปสมการกำลังสอง: {a:g}{var_name}^2 + ({b:g}){var_name} + ({c:g}) = 0",
+        f"คำนวณ Discriminant (Δ = b^2 - 4ac): {b:g}^2 - 4({a:g})({c:g}) = {disc:g}",
+    ]
+    if disc < -1e-10:
+        steps.append("Δ < 0: ไม่มีคำตอบที่เป็นจำนวนจริง")
+        return {
+            "engine": "quadratic_algebra_ast",
+            "equation": candidate,
+            "variable": var_name,
+            "solution_type": "no_real_solution",
+            "roots": [],
+            "summary_tag": "no_real_solution",
+            "result": None,
+            "steps": steps,
+        }
+    if abs(disc) <= 1e-10:
+        root_val = _fmt_num(-b / (2.0 * a))
+        steps.append(f"Δ = 0: มีรากซ้ำ 1 ค่า {var_name} = {root_val}")
+        return {
+            "engine": "quadratic_algebra_ast",
+            "equation": candidate,
+            "variable": var_name,
+            "solution_type": "quadratic",
+            "roots": [root_val],
+            "summary_tag": f"root({root_val})",
+            "result": root_val,
+            "steps": steps,
+        }
+
+    sq = math.sqrt(disc)
+    r1 = _fmt_num((-b - sq) / (2.0 * a))
+    r2 = _fmt_num((-b + sq) / (2.0 * a))
+    roots_sorted = sorted([r1, r2])
+    if roots_sorted[0] == roots_sorted[1]:
+        roots_sorted = [roots_sorted[0]]
+        tag = f"root({roots_sorted[0]})"
+    else:
+        tag = f"roots({roots_sorted[0]},{roots_sorted[1]})"
+    steps.append(f"รากของสมการที่เป็นจำนวนจริง: {var_name} ∈ {{{', '.join(str(x) for x in roots_sorted)}}}")
     return {
-        "engine": "linear_algebra_ast",
+        "engine": "quadratic_algebra_ast",
         "equation": candidate,
         "variable": var_name,
-        "solution_type": "unique",
-        "result": formatted,
+        "solution_type": "quadratic",
+        "roots": roots_sorted,
+        "summary_tag": tag,
+        "result": roots_sorted,
         "steps": steps,
     }
 
 
+def try_solve_linear_equation(prompt: str) -> dict | None:
+    return try_solve_equation(prompt)
+
+
 def try_statistics_reasoning(prompt: str) -> dict | None:
-    cleaned = prompt.strip()
+    cleaned = _MATH_TRAILING_RE.sub("", prompt.strip()).strip()
     m = re.match(
         r"^(?:สถิติ|วิเคราะห์ตัวเลข|ค่าเฉลี่ย|มัธยฐาน|stats|statistics|mean|median)\s*:?\s*(.+)$",
         cleaned,
@@ -520,7 +806,6 @@ def try_statistics_reasoning(prompt: str) -> dict | None:
     nums_raw = re.findall(r"[-+]?\d+(?:\.\d+)?", body)
     if len(nums_raw) < 2:
         return None
-    # Ensure text isn't a freeform non-numeric paragraph mixed with random digits
     stripped_non_num = re.sub(r"[-+]?\d+(?:\.\d+)?|[,\s;|()\[\]]", "", body)
     if len(stripped_non_num) > 12:
         return None
@@ -553,9 +838,9 @@ def try_statistics_reasoning(prompt: str) -> dict | None:
 
 
 def try_math_reasoning(prompt: str) -> dict | None:
-    cleaned = prompt.strip()
+    cleaned = _MATH_TRAILING_RE.sub("", prompt.strip()).strip()
     m = re.search(
-        r"(?:คำนวณ|หาค่า|คิดเลข|calculate|compute|eval|what is|evaluate)\s*:?\s*([0-9a-zA-Z_+\-*/%^().\s]+)\??$",
+        r"(?:คำนวณ|หาค่า|คิดเลข|calculate|compute|eval|what is|evaluate)\s*:?\s*([0-9a-zA-Z_+\-*/%^().\s]+)$",
         cleaned,
         re.IGNORECASE,
     )
@@ -578,6 +863,338 @@ def try_math_reasoning(prompt: str) -> dict | None:
         }
     except Exception:
         return None
+
+
+_LOGIC_OPS_ORDERED = [
+    ("มากกว่าหรือเท่ากับ", ">=", "order"),
+    ("น้อยกว่าหรือเท่ากับ", "<=", "order"),
+    ("ไม่น้อยกว่า", ">=", "order"),
+    ("ไม่มากกว่า", "<=", "order"),
+    ("เท่ากับ", "=", "any"),
+    ("มากกว่า", ">", "order"),
+    ("น้อยกว่า", "<", "order"),
+    ("สูงกว่า", ">", "height"),
+    ("เตี้ยกว่า", "<", "height"),
+    ("หนักกว่า", ">", "weight"),
+    ("เบากว่า", "<", "weight"),
+    ("ใหญ่กว่า", ">", "size"),
+    ("เล็กกว่า", "<", "size"),
+    ("ยาวกว่า", ">", "length"),
+    ("สั้นกว่า", "<", "length"),
+    ("เร็วกว่า", ">", "speed"),
+    ("ช้ากว่า", "<", "speed"),
+    ("แพงกว่า", ">", "price"),
+    ("ถูกกว่า", "<", "price"),
+    ("แก่กว่า", ">", "age"),
+    ("อายุน้อยกว่า", "<", "age"),
+    (">=", ">=", "order"),
+    ("<=", "<=", "order"),
+    (">", ">", "order"),
+    ("<", "<", "order"),
+    ("=", "=", "any"),
+]
+
+
+def _parse_comparison_clause(clause: str) -> tuple[str, str, str, str] | None:
+    c = clause.strip()
+    if not c:
+        return None
+    for tok, op, attr in _LOGIC_OPS_ORDERED:
+        if tok.isascii():
+            pat = rf"^(.+?)\s*{re.escape(tok)}\s*(.+)$"
+        else:
+            pat = rf"^(.+?)\s*{re.escape(tok)}\s*(.+)$"
+        m = re.match(pat, c)
+        if m:
+            lhs = m.group(1).strip(" .,:;\"'")
+            rhs = m.group(2).strip(" .,:;\"'")
+            if lhs and rhs and lhs.lower() != rhs.lower():
+                return (lhs, op, rhs, attr)
+    return None
+
+
+def try_transitive_logic_reasoning(prompt: str) -> dict | None:
+    cleaned = prompt.strip()
+    m = re.match(
+        r"^(?:ถ้า|สมมติว่า|กำหนดให้|หาก)\s*(.+?)\s*(?:แล้ว|ดังนั้น|จงหาว่า|ถามว่า)\s*(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if not m:
+        m = re.match(
+            r"^(?:if|given)\s+(.+?)\s*(?:then|,)\s*(.+)$",
+            cleaned,
+            re.IGNORECASE,
+        )
+    if not m:
+        return None
+
+    premises_raw, query_raw = m.group(1).strip(), m.group(2).strip()
+    q_clean = re.sub(
+        r"\s*(?:เป็นอย่างไร|เป็นยังไง|อย่างไร|ยังไง|คืออะไร|ครับ|ค่ะ|นะ|\?)+\s*$",
+        "",
+        query_raw,
+        flags=re.IGNORECASE,
+    ).strip()
+    qm = re.match(
+        r"^(.+?)\s*(?:เทียบกับ|เปรียบเทียบกับ|กับ|compared\s+to|vs\.?|versus)\s*(.+)$",
+        q_clean,
+        re.IGNORECASE,
+    )
+    if not qm:
+        return None
+    target_x = qm.group(1).strip(" .,:;\"'")
+    target_y = qm.group(2).strip(" .,:;\"'")
+    if not target_x or not target_y:
+        return None
+
+    clauses = [
+        cl.strip()
+        for cl in re.split(r"(?:[,;\n]+|\s+และ\s+|\s+and\s+)", premises_raw)
+        if cl.strip()
+    ]
+    if not clauses:
+        return None
+
+    parsed_edges: list[tuple[str, str, str, str]] = []
+    for cl in clauses:
+        parsed = _parse_comparison_clause(cl)
+        if not parsed:
+            return None
+        parsed_edges.append(parsed)
+
+    # Build directed greater-or-equal graph: edge u -> v means u >= v (strict=True => u > v)
+    canon: dict[str, str] = {}
+    adj: dict[str, list[dict]] = collections.defaultdict(list)
+    steps: list[str] = []
+    for u, op, v, attr in parsed_edges:
+        ul, vl = u.lower(), v.lower()
+        canon.setdefault(ul, u)
+        canon.setdefault(vl, v)
+        steps.append(f"ข้อตั้ง: `{u} {op} {v}`")
+        if op in (">", ">="):
+            adj[ul].append({"to": vl, "strict": op == ">", "attr": attr, "label": f"{u} {op} {v}"})
+        elif op in ("<", "<="):
+            adj[vl].append({"to": ul, "strict": op == "<", "attr": attr, "label": f"{v} {'>' if op == '<' else '>='} {u}"})
+        elif op == "=":
+            adj[ul].append({"to": vl, "strict": False, "attr": "any", "label": f"{u} = {v}"})
+            adj[vl].append({"to": ul, "strict": False, "attr": "any", "label": f"{v} = {u}"})
+
+    xl, yl = target_x.lower(), target_y.lower()
+    canon.setdefault(xl, target_x)
+    canon.setdefault(yl, target_y)
+
+    def _find_reach(src: str, dst: str) -> tuple[bool, bool, list[str], str]:
+        """Return (reachable, has_strict_path, chain_labels, dominant_attr)."""
+        queue: collections.deque[tuple[str, bool, str, list[str]]] = collections.deque()
+        visited: set[tuple[str, bool, str]] = set()
+        queue.append((src, False, "any", []))
+        visited.add((src, False, "any"))
+        any_path: tuple[list[str], str] | None = None
+        while queue:
+            curr, strict_seen, cur_attr, chain = queue.popleft()
+            if curr == dst and chain:
+                if strict_seen:
+                    return True, True, chain, cur_attr
+                if any_path is None:
+                    any_path = (chain, cur_attr)
+            for edge in adj.get(curr, []):
+                e_attr = edge["attr"]
+                if cur_attr != "any" and e_attr != "any" and cur_attr != e_attr:
+                    continue
+                next_attr = cur_attr if cur_attr != "any" else e_attr
+                next_strict = strict_seen or edge["strict"]
+                state = (edge["to"], next_strict, next_attr)
+                if state not in visited:
+                    visited.add(state)
+                    queue.append((edge["to"], next_strict, next_attr, chain + [edge["label"]]))
+        if any_path is not None:
+            return True, False, any_path[0], any_path[1]
+        return False, False, [], "any"
+
+    def _has_strict_cycle_from(start_node: str) -> bool:
+        r_self, s_self, _, _ = _find_reach(start_node, start_node)
+        return r_self and s_self
+
+    if xl == yl:
+        if _has_strict_cycle_from(xl):
+            return {
+                "engine": "transitive_logic_native",
+                "target": [target_x, target_y],
+                "determined": False,
+                "contradiction": True,
+                "derived_relation": None,
+                "steps": steps + ["ตรวจพบข้อขัดแย้งเชิงตรรกะในความสัมพันธ์ (Strict cycle)"],
+            }
+        return {
+            "engine": "transitive_logic_native",
+            "target": [target_x, target_y],
+            "determined": True,
+            "contradiction": False,
+            "derived_relation": f"{target_x} = {target_y}",
+            "steps": steps + [f"สรุป: `{target_x} = {target_y}`"],
+        }
+
+    x_ge_y, x_gt_y, x_chain, x_attr = _find_reach(xl, yl)
+    y_ge_x, y_gt_x, y_chain, y_attr = _find_reach(yl, xl)
+
+    if (x_gt_y and y_ge_x) or (y_gt_x and x_ge_y) or _has_strict_cycle_from(xl) or _has_strict_cycle_from(yl):
+        steps.append("ตรวจพบข้อขัดแย้งเชิงตรรกะระหว่างข้อตั้ง (ไม่สามารถสรุปค่าจริงที่สอดคล้องได้)")
+        return {
+            "engine": "transitive_logic_native",
+            "target": [target_x, target_y],
+            "determined": False,
+            "contradiction": True,
+            "derived_relation": None,
+            "steps": steps,
+        }
+
+    if x_gt_y:
+        rel_str = f"{target_x} > {target_y}"
+        steps.append(f"ห่วงโซ่อนุมานถ่ายทอด: {' ∧ '.join(x_chain)} ⇒ {rel_str}")
+        return {
+            "engine": "transitive_logic_native",
+            "target": [target_x, target_y],
+            "determined": True,
+            "contradiction": False,
+            "derived_relation": rel_str,
+            "attribute_family": x_attr,
+            "steps": steps,
+        }
+    if y_gt_x:
+        rel_str = f"{target_x} < {target_y}"
+        steps.append(f"ห่วงโซ่อนุมานถ่ายทอด: {' ∧ '.join(y_chain)} ⇒ {rel_str}")
+        return {
+            "engine": "transitive_logic_native",
+            "target": [target_x, target_y],
+            "determined": True,
+            "contradiction": False,
+            "derived_relation": rel_str,
+            "attribute_family": y_attr,
+            "steps": steps,
+        }
+    if x_ge_y and y_ge_x:
+        rel_str = f"{target_x} = {target_y}"
+        steps.append(f"ห่วงโซ่อนุมานสมมูล: {' ∧ '.join(x_chain)} ⇒ {rel_str}")
+        return {
+            "engine": "transitive_logic_native",
+            "target": [target_x, target_y],
+            "determined": True,
+            "contradiction": False,
+            "derived_relation": rel_str,
+            "attribute_family": x_attr,
+            "steps": steps,
+        }
+    if x_ge_y:
+        rel_str = f"{target_x} >= {target_y}"
+        steps.append(f"ห่วงโซ่อนุมานถ่ายทอด: {' ∧ '.join(x_chain)} ⇒ {rel_str}")
+        return {
+            "engine": "transitive_logic_native",
+            "target": [target_x, target_y],
+            "determined": True,
+            "contradiction": False,
+            "derived_relation": rel_str,
+            "attribute_family": x_attr,
+            "steps": steps,
+        }
+    if y_ge_x:
+        rel_str = f"{target_x} <= {target_y}"
+        steps.append(f"ห่วงโซ่อนุมานถ่ายทอด: {' ∧ '.join(y_chain)} ⇒ {rel_str}")
+        return {
+            "engine": "transitive_logic_native",
+            "target": [target_x, target_y],
+            "determined": True,
+            "contradiction": False,
+            "derived_relation": rel_str,
+            "attribute_family": y_attr,
+            "steps": steps,
+        }
+
+    steps.append(f"ไม่มีเส้นทางความสัมพันธ์เชื่อมระหว่าง `{target_x}` และ `{target_y}` ในข้อตั้งที่กำหนด")
+    return {
+        "engine": "transitive_logic_native",
+        "target": [target_x, target_y],
+        "determined": False,
+        "contradiction": False,
+        "derived_relation": None,
+        "steps": steps,
+    }
+
+
+def try_word_math_reasoning(prompt: str) -> dict | None:
+    cleaned = prompt.strip()
+    if not re.search(r"(?:กี่|เท่าไร|เท่าไหร่|how many|how much)", cleaned, re.IGNORECASE):
+        return None
+    if re.match(r"^(?:แก้สมการ|สมการ|คำนวณ|สถิติ|วางแผน|สอน|เชื่อมโยง|solve|plan|teach)\b", cleaned, re.IGNORECASE):
+        return None
+
+    nums_raw = re.findall(r"(?<![a-zA-Z_])[-+]?\d+(?:\.\d+)?(?![a-zA-Z_])", cleaned)
+    if len(nums_raw) != 2:
+        return None
+    a, b = float(nums_raw[0]), float(nums_raw[1])
+    a_fmt, b_fmt = _fmt_num(a), _fmt_num(b)
+
+    has_div_cue = any(k in cleaned for k in ["แบ่ง", "หาร", "เฉลี่ย", "เท่าๆ กัน", "เท่ากัน", "divide", "share"]) or bool(
+        re.search(r"(?:คนละ|กล่องละ|ใบละ|อันละ|กองละ|ชิ้นละ|กลุ่มละ|ถุงละ)\s*กี่", cleaned)
+    )
+    has_mul_cue = (
+        any(k in cleaned for k in ["ทั้งหมด", "รวมทั้งหมด", "รวมเป็น", "ได้ระยะทาง", "คิดเป็น", "total"])
+        and any(k in cleaned for k in ["ละ", "แต่ละ", "ทุก", "เป็นเวลา", "per", "each"])
+    )
+    has_sub_cue = any(
+        k in cleaned for k in ["เหลือ", "จ่ายไป", "ใช้ไป", "กินไป", "หัก", "ลดลง", "หายไป", "ขายไป", "ให้ไป", "ต่างกัน", "left", "remain"]
+    ) and not any(k in cleaned for k in ["เพิ่ม", "รวม"])
+    has_add_cue = any(k in cleaned for k in ["เพิ่ม", "ได้รับเพิ่ม", "ซื้อมาเพิ่ม", "รวม", "บวก", "ทั้งสอง", "ทั้งหมด", "altogether", "in total"])
+
+    op_name: str
+    expr_str: str
+    steps: list[str]
+    if has_div_cue:
+        if abs(b) < 1e-12:
+            return None
+        val = a / b
+        op_name = "division"
+        expr_str = f"{a_fmt} / {b_fmt}"
+        steps = [
+            f"ระบุปริมาณตั้งต้น {a_fmt} และตัวหาร {b_fmt} จากเงื่อนไขการแบ่งเท่ากัน",
+            f"คำนวณ {a_fmt} / {b_fmt} = {_fmt_num(val)}",
+        ]
+    elif has_mul_cue:
+        val = a * b
+        op_name = "multiplication"
+        expr_str = f"{a_fmt} * {b_fmt}"
+        steps = [
+            f"ระบุจำนวนกลุ่ม {a_fmt} และอัตราต่อหน่วย {b_fmt}",
+            f"คำนวณ {a_fmt} * {b_fmt} = {_fmt_num(val)}",
+        ]
+    elif has_sub_cue:
+        val = a - b
+        op_name = "subtraction"
+        expr_str = f"{a_fmt} - {b_fmt}"
+        steps = [
+            f"ระบุปริมาณเริ่มต้น {a_fmt} และปริมาณที่ลดลง/จ่ายไป {b_fmt}",
+            f"คำนวณ {a_fmt} - {b_fmt} = {_fmt_num(val)}",
+        ]
+    elif has_add_cue:
+        val = a + b
+        op_name = "addition"
+        expr_str = f"{a_fmt} + {b_fmt}"
+        steps = [
+            f"ระบุปริมาณสองส่วน {a_fmt} และ {b_fmt} เพื่อนำมารวมกัน",
+            f"คำนวณ {a_fmt} + {b_fmt} = {_fmt_num(val)}",
+        ]
+    else:
+        return None
+
+    res_fmt = _fmt_num(val)
+    return {
+        "engine": "word_math_native",
+        "operation": op_name,
+        "operands": [a_fmt, b_fmt],
+        "expression": expr_str,
+        "result": res_fmt,
+        "steps": steps,
+    }
 
 
 def try_teach_knowledge(conn: sqlite3.Connection, prompt: str, user_id: str) -> dict | None:
@@ -638,9 +1255,23 @@ THAI_TOKEN_RE = re.compile(
 )
 
 THAI_QUERY_STOPWORDS = {
-    "อะไร", "ไหม", "หรือไม่", "อย่างไร", "ยังไง", "บ้าง", "หรือ", "คืออะไร",
-    "เท่าไร", "เท่าไหร่", "กี่", "ครับ", "ค่ะ", "หน่อย", "what", "why", "how",
+    "อะไร", "ไหม", "หรือไม่", "อย่างไร", "ยังไง", "บ้าง", "หรือ", "คืออะไร", "คือ",
+    "เท่าไร", "เท่าไหร่", "เท่า", "กี่", "ครับ", "ค่ะ", "นะครับ", "นะคะ", "หน่อย",
+    "หน่อยครับ", "หน่อยค่ะ", "ใคร", "ไหน", "ที่ไหน", "เมื่อไร", "ทำไม", "เป็น",
+    "ได้", "มี", "ทำ", "ทำงาน", "งาน", "และ", "กับ", "ที่", "ใน", "ของ", "จาก",
+    "ไป", "มา", "ให้", "จะ", "แล้ว", "ว่า", "การ", "ความ", "เกิด", "เกิดขึ้น",
+    "เกี่ยวกับ", "เกี่ยวข้อง", "เกี่ยวข้องกับ", "ถ้า", "what", "why", "how", "who",
+    "where", "when", "is", "are", "the", "and", "or",
 }
+
+_THAI_PREFIX_STRIPS = (
+    "ใคร", "อะไร", "ทำไม", "ที่ไหน", "เมื่อไร", "อย่างไร", "ถ้า",
+)
+_THAI_SUFFIX_STRIPS = (
+    "ทำงานอย่างไร", "เกิดขึ้นได้อย่างไร", "ได้อย่างไร", "คืออะไร", "เกี่ยวข้องกับ",
+    "เกี่ยวกับ", "เท่าไหร่", "เท่าไร", "อย่างไร", "ยังไง", "หน่อยครับ", "หน่อยค่ะ",
+    "นะครับ", "นะคะ", "หรือไม่", "บ้าง", "ไหม", "หรือ", "อะไร", "คือ", "ครับ", "ค่ะ", "หน่อย",
+)
 
 
 def tokenize(text: str) -> list[str]:
@@ -648,22 +1279,56 @@ def tokenize(text: str) -> list[str]:
     return THAI_TOKEN_RE.findall(text.lower())
 
 
+def _strip_thai_affixes(span: str) -> str:
+    cur = span
+    changed = True
+    while changed and cur:
+        changed = False
+        for pref in _THAI_PREFIX_STRIPS:
+            if cur.startswith(pref) and len(cur) > len(pref) + 1:
+                cur = cur[len(pref):]
+                changed = True
+        for suf in _THAI_SUFFIX_STRIPS:
+            if cur.endswith(suf) and len(cur) > len(suf) + 1:
+                cur = cur[: -len(suf)]
+                changed = True
+    return cur
+
+
 def extract_query_terms(text: str) -> list[str]:
-    raw_words = [t for t in re.findall(r"[a-zA-Z0-9_ก-๙]+", text.lower()) if len(t) > 1]
-    syllables = [t for t in tokenize(text) if len(t) > 1 and t not in {".", ",", "!", "?", ";"}]
+    ascii_tokens = re.findall(r"[a-zA-Z0-9_]+", text.lower())
+    thai_spans = re.findall(r"[\u0E00-\u0E7F]+", text.lower())
+
+    candidates: list[str] = []
+    # Preserve standalone alphanumeric entity symbols (e.g., 'A', 'B', '6') and multi-char ASCII terms
+    for tok in ascii_tokens:
+        if len(tok) == 1:
+            if tok.isalnum() and tok not in THAI_QUERY_STOPWORDS:
+                candidates.append(tok)
+        elif tok not in THAI_QUERY_STOPWORDS:
+            candidates.append(tok)
+
+    for span in thai_spans:
+        cleaned = _strip_thai_affixes(span)
+        if len(cleaned) >= 3 and cleaned not in THAI_QUERY_STOPWORDS:
+            candidates.append(cleaned)
+        if len(span) >= 3 and span not in THAI_QUERY_STOPWORDS and span != cleaned:
+            candidates.append(span)
+        for syl in tokenize(cleaned or span):
+            # Require >=3 chars for Thai syllable tokens to avoid 1-2 char cross-word collisions
+            if len(syl) >= 3 and syl not in THAI_QUERY_STOPWORDS:
+                candidates.append(syl)
+
     seen: set[str] = set()
     terms: list[str] = []
-    filtered_terms: list[str] = []
-    for tok in raw_words + syllables:
+    for tok in candidates:
         if tok not in seen:
             seen.add(tok)
             terms.append(tok)
-            if tok not in THAI_QUERY_STOPWORDS:
-                filtered_terms.append(tok)
-    return filtered_terms if filtered_terms else terms
+    return terms
 
 
-def find_graph_path(conn: sqlite3.Connection, start_term: str, end_term: str, max_depth: int = 4) -> dict | None:
+def find_graph_path(conn: sqlite3.Connection, start_term: str, end_term: str, max_depth: int = 8) -> dict | None:
     rows = conn.execute(
         "SELECT id, subject, relation, object, source FROM knowledge_triples"
     ).fetchall()
@@ -706,8 +1371,10 @@ def find_graph_path(conn: sqlite3.Connection, start_term: str, end_term: str, ma
             }
         )
 
-    start_nodes = [k for k in nodes if start_l == k or start_l in k]
-    end_nodes = {k for k in nodes if end_l == k or end_l in k}
+    exact_starts = [k for k in nodes if start_l == k]
+    start_nodes = exact_starts or [k for k in nodes if start_l in k]
+    exact_ends = {k for k in nodes if end_l == k}
+    end_nodes = exact_ends or {k for k in nodes if end_l in k}
     if not start_nodes or not end_nodes:
         return None
 
@@ -769,17 +1436,32 @@ def try_graph_path_query(conn: sqlite3.Connection, prompt: str) -> dict | None:
     )
     if not m:
         return None
-    start_term, end_term = m.group(1).strip(), m.group(2).strip()
+    start_term = m.group(1).strip()
+    end_term = _MATH_TRAILING_RE.sub("", m.group(2).strip()).strip()
     if not start_term or not end_term:
         return None
-    result = find_graph_path(conn, start_term, end_term, max_depth=4)
+    max_depth = 8
+    result = find_graph_path(conn, start_term, end_term, max_depth=max_depth)
     return {
         "engine": "knowledge_multihop_bfs",
         "start": start_term,
         "end": end_term,
+        "max_depth": max_depth,
         "found": result is not None,
         "path": result,
     }
+
+
+def _token_matches_field(tok: str, field_l: str, field_syllables: set[str]) -> bool:
+    if not tok or not field_l:
+        return False
+    if tok.isascii():
+        return bool(re.search(rf"(?<![a-z0-9_]){re.escape(tok)}(?![a-z0-9_])", field_l))
+    if len(tok) < 3 or tok in THAI_QUERY_STOPWORDS:
+        return False
+    if len(tok) == 3:
+        return tok in field_syllables or tok == field_l
+    return tok in field_l or (len(field_l) >= 4 and field_l in tok)
 
 
 def query_knowledge_graph(conn: sqlite3.Connection, prompt: str) -> list[dict]:
@@ -791,13 +1473,40 @@ def query_knowledge_graph(conn: sqlite3.Connection, prompt: str) -> list[dict]:
     ).fetchall()
     scored = []
     for row in rows:
-        text = f"{row['subject']} {row['relation']} {row['object']}".lower()
-        hits = sum(1 for tok in tokens if tok in text)
-        if hits > 0:
+        subj_l = row["subject"].lower()
+        rel_l = row["relation"].lower()
+        obj_l = row["object"].lower()
+        subj_syls = set(tokenize(subj_l))
+        rel_syls = set(tokenize(rel_l))
+        obj_syls = set(tokenize(obj_l))
+
+        score = 0.0
+        entity_hits = 0
+        strong_entity_hits = 0
+        for tok in tokens:
+            s_hit = _token_matches_field(tok, subj_l, subj_syls)
+            o_hit = _token_matches_field(tok, obj_l, obj_syls)
+            r_hit = _token_matches_field(tok, rel_l, rel_syls)
+            if s_hit:
+                score += 3.0
+                entity_hits += 1
+                if len(tok) >= 4 or tok.isascii():
+                    strong_entity_hits += 1
+            if o_hit:
+                score += 2.5
+                entity_hits += 1
+                if len(tok) >= 4 or tok.isascii():
+                    strong_entity_hits += 1
+            if r_hit and not s_hit and not o_hit:
+                score += 1.0
+
+        # Require actual entity grounding (subject/object) to prevent relation-only or short-syllable false positives
+        if entity_hits >= 1 and (strong_entity_hits >= 1 or entity_hits >= 2) and score >= 2.5:
             item = dict(row)
             item["hop"] = 1
             item["provenance"] = "direct"
-            scored.append((hits, item))
+            item["match_score"] = round(score, 2)
+            scored.append((score, item))
     scored.sort(key=lambda x: x[0], reverse=True)
     results = [item[1] for item in scored[:5]]
     seen_ids = {item["id"] for item in results}
@@ -895,6 +1604,95 @@ def run_ngram_continuation(conn: sqlite3.Connection, prompt: str, max_tokens: in
     }
 
 
+def _build_domain_adaptive_plan(goal: str, goal_l: str, clean_datasets: list, ckpt_rows: list, triple_rows: list, pending_runs: list) -> dict:
+    has_thai = any(k in goal_l for k in ["ภาษาไทย", "ไทย", "thai"])
+    is_recommender = any(k in goal_l for k in ["แนะนำ", "recommend", "ranking", "จัดอันดับ"])
+    is_api = any(k in goal_l for k in ["api", "บริการ", "service", "backend", "เซิร์ฟเวอร์"])
+    is_ui = any(k in goal_l for k in ["แอป", "เว็บ", "หน้าจอ", "ui", "app", "web"])
+
+    data_detail = (
+        f"ออกแบบ Schema และตัวตัดคำภาษาไทย (Thai Syllable/Entity Tokenizer) สำหรับ '{goal}'"
+        if has_thai
+        else f"ออกแบบ Schema เอนทิตี ดัชนีค้นหา และข้อจำกัดความถูกต้องของข้อมูลสำหรับ '{goal}'"
+    )
+    logic_detail = (
+        "พัฒนากลไกจับคู่คุณลักษณะ จัดอันดับความเกี่ยวข้อง (Scoring/Ranking) และเหตุผลอ้างอิงที่ตรวจสอบได้"
+        if is_recommender
+        else "พัฒนาตรรกะแกนกลาง กฎการตรวจสอบเงื่อนไข และจัดการกรณี Edge Cases โดยไม่ใช้ผลลัพธ์จำลอง"
+    )
+    interface_detail = (
+        "สร้าง Endpoint/API พร้อม Input Validation และ Parameterized Query"
+        if is_api or not is_ui
+        else "สร้างส่วนติดต่อผู้ใช้เชื่อมต่อ API จริง พร้อมแสดงสถานะ Loading/Error ตรงไปตรงมา"
+    )
+
+    steps = [
+        {
+            "step_id": "S1",
+            "title": f"วิเคราะห์ขอบเขตและเกณฑ์วัดผลจริงของเป้าหมาย: {goal}",
+            "workflow_group": "domain_requirements",
+            "depends_on": [],
+            "status": "READY",
+            "requires_approval": False,
+            "detail": f"กำหนดกรณีใช้งานหลัก เงื่อนไขขอบเขต และตัวชี้วัดความถูกต้องสำหรับ '{goal}'",
+        },
+        {
+            "step_id": "S2",
+            "title": "ออกแบบโครงสร้างข้อมูลและคุณลักษณะเฉพาะโดเมน (Data Modeling)",
+            "workflow_group": "data_modeling",
+            "depends_on": ["S1"],
+            "status": "READY",
+            "requires_approval": False,
+            "detail": data_detail,
+        },
+        {
+            "step_id": "S3",
+            "title": "พัฒนาอัลกอริทึมและตรรกะแกนกลางเฉพาะทาง (Core Domain Logic)",
+            "workflow_group": "core_logic",
+            "depends_on": ["S2"],
+            "status": "READY",
+            "requires_approval": False,
+            "detail": logic_detail,
+        },
+        {
+            "step_id": "S4",
+            "title": "เชื่อมต่อส่วนติดต่อและตรวจสอบความปลอดภัยของอินพุต (Interface Integration)",
+            "workflow_group": "interface_integration",
+            "depends_on": ["S2", "S3"],
+            "status": "READY",
+            "requires_approval": False,
+            "detail": interface_detail,
+        },
+        {
+            "step_id": "S5",
+            "title": "ทดสอบเชิงประจักษ์และตรวจจับข้อผิดพลาด (Verification & Testing)",
+            "workflow_group": "verification_testing",
+            "depends_on": ["S3", "S4"],
+            "status": "READY",
+            "requires_approval": False,
+            "detail": "รันชุดทดสอบ Positive, Unseen Generalization, และ Negative Boundary ก่อนส่งมอบ",
+        },
+    ]
+
+    return {
+        "engine": "native_planner_domain_adaptive",
+        "domain_mode": "general_engineering",
+        "goal": goal,
+        "steps": steps,
+        "summary": {
+            "total_steps": len(steps),
+            "blocked_steps": 0,
+            "approval_gated_steps": 0,
+            "state_snapshot": {
+                "clean_datasets": len(clean_datasets),
+                "checkpoints": len(ckpt_rows),
+                "triples": len(triple_rows),
+                "pending_approvals": len(pending_runs),
+            },
+        },
+    }
+
+
 def try_native_planning(conn: sqlite3.Connection, prompt: str, force_plan: bool = False) -> dict | None:
     cleaned = prompt.strip()
     m = re.match(
@@ -932,10 +1730,15 @@ def try_native_planning(conn: sqlite3.Connection, prompt: str, force_plan: bool 
     clean_datasets = [d for d in ds_rows if not d["leakage_detected"] and d["total_records"] >= 5]
     leaked_datasets = [d for d in ds_rows if d["leakage_detected"]]
 
-    wants_train = any(k in goal_l for k in ["ฝึก", "โมเดล", "train", "checkpoint", "ข้อมูล", "data", "ngi"])
-    wants_eval = any(k in goal_l for k in ["ประเมิน", "ทดสอบ", "eval", "benchmark", "วัดผล", "baseline"])
-    wants_knowledge = any(k in goal_l for k in ["ความรู้", "ความจำ", "กราฟ", "knowledge", "memory", "triple"])
-    wants_ops = any(k in goal_l for k in ["ระบบ", "ปลอดภัย", "อนุมัติ", "security", "system", "ops", "audit"])
+    wants_train = any(k in goal_l for k in ["ฝึกโมเดล", "ฝึก", "โมเดล", "train", "checkpoint", "เตรียมข้อมูล", "ชุดข้อมูล", "data leakage", "ngram", "ngi"])
+    wants_eval = any(k in goal_l for k in ["ประเมินผล", "ประเมิน", "eval", "benchmark", "baseline", "held-out", "perplexity"])
+    wants_knowledge = any(k in goal_l for k in ["กราฟความรู้", "ความจำ", "knowledge graph", "triple", "zyrquen"])
+    wants_ops = any(k in goal_l for k in ["ความปลอดภัยระบบ", "audit", "approval gate", "sqlite", "zyrquen", "security"])
+
+    is_mlops_goal = wants_train or wants_eval or wants_knowledge or wants_ops
+    if not is_mlops_goal:
+        return _build_domain_adaptive_plan(goal, goal_l, clean_datasets, ckpt_rows, triple_rows, pending_runs)
+
     if not (wants_train or wants_eval or wants_knowledge or wants_ops):
         wants_train = True
         wants_eval = True
@@ -1057,6 +1860,7 @@ def try_native_planning(conn: sqlite3.Connection, prompt: str, force_plan: bool 
 
     return {
         "engine": "native_planner",
+        "domain_mode": "mlops_native",
         "goal": goal,
         "steps": steps,
         "summary": {
@@ -1301,8 +2105,9 @@ def handle_run_evaluation(payload: dict) -> dict:
 def _calc_any_for_tool(expr: str) -> dict | None:
     return (
         try_statistics_reasoning(expr)
-        or try_solve_linear_equation(expr)
+        or try_solve_equation(expr)
         or try_math_reasoning(expr)
+        or try_word_math_reasoning(expr)
     )
 
 
@@ -1395,11 +2200,18 @@ def handle_infer(payload: dict) -> dict:
                 if inv_res.get("ok")
                 else f"**ไม่สามารถเรียกใช้เครื่องมือ `{tool_id}`:** {inv_res.get('error', 'Error')}"
             )
-            msg_status = (
-                "VERIFIED"
-                if inv_res.get("status") == "COMPLETED"
-                else ("PENDING_APPROVAL" if inv_res.get("status") == "PENDING_APPROVAL" else "BLOCKED")
-            )
+            t_grade = analysis_obj.get("trust_grade")
+            if inv_res.get("status") == "COMPLETED":
+                if t_grade == "INSUFFICIENT_EVIDENCE":
+                    msg_status = "NOT_LEARNED"
+                elif t_grade == "BLOCKED":
+                    msg_status = "BLOCKED"
+                else:
+                    msg_status = "VERIFIED"
+            elif inv_res.get("status") == "PENDING_APPROVAL":
+                msg_status = "PENDING_APPROVAL"
+            else:
+                msg_status = "BLOCKED"
             trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
             conn.close()
             return {"content": content, "status": msg_status, "trace": trace}
@@ -1448,14 +2260,14 @@ def handle_infer(payload: dict) -> dict:
             else:
                 content = (
                     f"**ไม่พบเส้นทางเชื่อมโยงในกราฟความรู้ภายใน (Not Learned)**\n\n"
-                    f"ค้นหาแบบ BFS สูงสุด 4 ช่วงจาก `{path_res['start']}` ไปยัง `{path_res['end']}` แล้วไม่พบความสัมพันธ์ที่เชื่อมต่อถึงกัน\n"
+                    f"ค้นหาแบบ BFS สูงสุด {path_res.get('max_depth', 8)} ช่วงจาก `{path_res['start']}` ไปยัง `{path_res['end']}` แล้วไม่พบความสัมพันธ์ที่เชื่อมต่อถึงกัน\n"
                     f"สามารถสอนความสัมพันธ์เชื่อมโยงเพิ่มด้วย: `สอน: {path_res['start']} -> ความสัมพันธ์ -> {path_res['end']}`"
                 )
                 trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
                 conn.close()
                 return {"content": content, "status": "NOT_LEARNED", "trace": trace}
 
-    # 4. Native Statistics, Linear Equation Solver, and Safe AST Mathematical Reasoning
+    # 4. Native Statistics, Linear/Quadratic/System Algebra, AST Math, Word Math & Transitive Logic
     if mode in ("auto", "math"):
         stats_res = try_statistics_reasoning(prompt)
         if stats_res:
@@ -1473,20 +2285,31 @@ def handle_infer(payload: dict) -> dict:
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
 
-        algebra_res = try_solve_linear_equation(prompt)
+        algebra_res = try_solve_equation(prompt)
         if algebra_res:
-            trace["engine_path"].append("linear_algebra_ast")
+            trace["engine_path"].append(algebra_res["engine"])
             trace["algebra"] = algebra_res
             steps_md = "\n".join(f"- {s}" for s in algebra_res["steps"])
-            if algebra_res["solution_type"] == "unique":
+            sol_type = algebra_res["solution_type"]
+            if sol_type == "unique":
                 headline = f"**คำตอบสมการ:** `{algebra_res['variable']} = {algebra_res['result']}`"
-            elif algebra_res["solution_type"] == "identity":
+            elif sol_type == "quadratic":
+                roots_s = ", ".join(str(r) for r in algebra_res.get("roots", []))
+                headline = f"**คำตอบสมการกำลังสอง:** `{algebra_res['variable']} ∈ {{{roots_s}}}` (`{algebra_res['summary_tag']}`)"
+            elif sol_type == "system":
+                sols_s = ", ".join(f"{k} = {v}" for k, v in algebra_res.get("solutions", {}).items())
+                headline = f"**คำตอบระบบสมการเชิงเส้น:** `{sols_s}` (`{algebra_res['summary_tag']}`)"
+            elif sol_type == "identity":
                 headline = "**คำตอบสมการ:** เป็นจริงทุกค่าของตัวแปร (อนันต์คำตอบ)"
+            elif sol_type == "underdetermined":
+                headline = "**คำตอบระบบสมการ:** มีคำตอบได้หลายชุด (สมการอิสระน้อยกว่าจำนวนตัวแปร)"
+            elif sol_type == "no_real_solution":
+                headline = "**คำตอบสมการกำลังสอง:** ไม่มีคำตอบที่เป็นจำนวนจริง (Δ < 0)"
             else:
                 headline = "**คำตอบสมการ:** ไม่มีคำตอบที่สอดคล้อง"
             content = (
                 f"{headline}\n\n"
-                f"**ลำดับการจัดรูปสมการเชิงเส้น (`{algebra_res['equation']}`):**\n{steps_md}"
+                f"**ลำดับการจัดรูปและคำนวณ (`{algebra_res['equation']}`):**\n{steps_md}"
             )
             trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
             conn.close()
@@ -1505,8 +2328,58 @@ def handle_infer(payload: dict) -> dict:
             conn.close()
             return {"content": content, "status": "VERIFIED", "trace": trace}
 
+        word_math_res = try_word_math_reasoning(prompt)
+        if word_math_res:
+            trace["engine_path"].append("word_math_native")
+            trace["word_math"] = word_math_res
+            steps_md = "\n".join(f"- {s}" for s in word_math_res["steps"])
+            content = (
+                f"**คำตอบเชิงปริมาณ:** `{word_math_res['result']}`\n\n"
+                f"**ลำดับการวิเคราะห์โจทย์ (`{word_math_res['expression']}`):**\n{steps_md}"
+            )
+            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            conn.close()
+            return {"content": content, "status": "VERIFIED", "trace": trace}
+
+    if mode in ("auto", "math", "knowledge"):
+        logic_res = try_transitive_logic_reasoning(prompt)
+        if logic_res:
+            trace["engine_path"].append("transitive_logic_native")
+            trace["logic"] = logic_res
+            steps_md = "\n".join(f"- {s}" for s in logic_res["steps"])
+            if logic_res["contradiction"]:
+                content = (
+                    f"**ตรวจพบข้อขัดแย้งเชิงตรรกะ (Contradiction)**\n\n"
+                    f"ไม่สามารถสรุปความสัมพันธ์ระหว่าง `{logic_res['target'][0]}` และ `{logic_res['target'][1]}` ได้อย่างสอดคล้อง:\n{steps_md}"
+                )
+                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                conn.close()
+                return {"content": content, "status": "BLOCKED", "trace": trace}
+            if logic_res["determined"] and logic_res["derived_relation"]:
+                content = (
+                    f"**ข้อสรุปเชิงตรรกะถ่ายทอด:** `{logic_res['derived_relation']}`\n\n"
+                    f"**ลำดับการอนุมานจากข้อตั้ง:**\n{steps_md}"
+                )
+                trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+                conn.close()
+                return {"content": content, "status": "VERIFIED", "trace": trace}
+            content = (
+                f"**ไม่สามารถสรุปความสัมพันธ์ได้จากข้อตั้งที่มี (Undetermined)**\n\n{steps_md}"
+            )
+            trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+            conn.close()
+            return {"content": content, "status": "NOT_LEARNED", "trace": trace}
+
+    is_explicit_math_cmd = bool(
+        re.match(
+            r"^(?:แก้สมการ|สมการ|คำนวณ|หาค่า|คิดเลข|สถิติ|วิเคราะห์ตัวเลข|ค่าเฉลี่ย|มัธยฐาน|solve|equation|calculate|compute|eval|evaluate|stats|statistics)\b",
+            prompt.strip(),
+            re.IGNORECASE,
+        )
+    )
+
     # 5. Knowledge Graph Query (with 2-hop provenance)
-    if mode in ("auto", "knowledge"):
+    if mode in ("auto", "knowledge") and not is_explicit_math_cmd:
         matches = query_knowledge_graph(conn, prompt)
         if matches:
             trace["engine_path"].append("knowledge_graph")
@@ -1530,7 +2403,7 @@ def handle_infer(payload: dict) -> dict:
             return {"content": content, "status": "VERIFIED", "trace": trace}
 
     # 6. Native N-Gram Sequence Checkpoint
-    if mode in ("auto", "model"):
+    if mode in ("auto", "model") and not is_explicit_math_cmd:
         ngram_res = run_ngram_continuation(conn, prompt)
         if ngram_res and ngram_res.get("generated"):
             trace["engine_path"].append("ngram_checkpoint")
@@ -1583,6 +2456,32 @@ def handle_infer(payload: dict) -> dict:
     return {"content": content, "status": "NOT_LEARNED", "trace": trace}
 
 
+def _canonical_record_key(line: str) -> str:
+    stripped = re.sub(r"[^\w\u0E00-\u0E7F\s]", " ", line.lower())
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
+def _near_dup_leakage_exists(split_a: list[str], split_b: list[str], threshold: float = 0.85) -> bool:
+    if not split_a or not split_b:
+        return False
+    canon_a = {_canonical_record_key(x) for x in split_a if _canonical_record_key(x)}
+    canon_b = {_canonical_record_key(x) for x in split_b if _canonical_record_key(x)}
+    if canon_a & canon_b:
+        return True
+    toks_a = [set(tokenize(_canonical_record_key(x))) for x in split_a]
+    toks_b = [set(tokenize(_canonical_record_key(x))) for x in split_b]
+    for ta in toks_a:
+        if len(ta) < 4:
+            continue
+        for tb in toks_b:
+            if len(tb) < 4:
+                continue
+            union_sz = len(ta | tb)
+            if union_sz > 0 and (len(ta & tb) / union_sz) >= threshold:
+                return True
+    return False
+
+
 def handle_ingest_dataset(payload: dict) -> dict:
     conn = get_db()
     name = str(payload.get("name", "untitled-corpus")).strip() or "untitled-corpus"
@@ -1593,14 +2492,18 @@ def handle_ingest_dataset(payload: dict) -> dict:
         conn.close()
         return {"ok": False, "error": "Dataset requires at least 5 non-empty lines for Train/Val/Test splitting."}
 
-    # Deduplicate preserving order
+    # Deduplicate preserving order using canonical punctuation-insensitive key
     seen = set()
     unique_lines = []
     for ln in lines:
-        norm = re.sub(r"\s+", " ", ln.lower())
+        norm = _canonical_record_key(ln) or re.sub(r"\s+", " ", ln.lower())
         if norm not in seen:
             seen.add(norm)
             unique_lines.append(ln)
+
+    if len(unique_lines) < 3:
+        conn.close()
+        return {"ok": False, "error": "Dataset has fewer than 3 unique lines after near-duplicate removal."}
 
     rng = random.Random(42)
     shuffled = list(unique_lines)
@@ -1615,8 +2518,10 @@ def handle_ingest_dataset(payload: dict) -> dict:
     val_set = shuffled[train_end:val_end]
     test_set = shuffled[val_end:]
 
-    # Check exact leakage
-    leakage = 1 if (set(train_set) & set(test_set)) or (set(train_set) & set(val_set)) else 0
+    # Check exact & near-duplicate cross-split leakage
+    exact_leak = bool((set(train_set) & set(test_set)) or (set(train_set) & set(val_set)))
+    near_leak = _near_dup_leakage_exists(train_set, test_set) or _near_dup_leakage_exists(train_set, val_set)
+    leakage = 1 if (exact_leak or near_leak) else 0
     manifest_hash = hashlib.sha256("\n".join(unique_lines).encode("utf-8")).hexdigest()
     dataset_id = str(uuid.uuid4())
     records_obj = {"train": train_set, "val": val_set, "test": test_set}

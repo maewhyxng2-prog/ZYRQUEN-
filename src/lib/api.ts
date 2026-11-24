@@ -24,12 +24,20 @@ export async function apiRequest<T>(
     headers.Authorization = `Bearer ${options.token}`;
   }
 
-  const res = await fetch(path, {
-    method: options.method || 'GET',
-    headers,
-    credentials: 'include',
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: options.method || 'GET',
+      headers,
+      credentials: 'include',
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    });
+  } catch {
+    throw new ApiError(
+      'ไม่สามารถเชื่อมต่อกับ ZYRQUEN Cloud Core ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองเชื่อมต่อใหม่',
+      0
+    );
+  }
 
   const data = (await res.json().catch(() => ({}))) as { error?: string } & T;
   if (!res.ok) {
@@ -61,21 +69,29 @@ export async function streamConversationMessage<TResult>(
     headers.Authorization = `Bearer ${options.token}`;
   }
 
-  const res = await fetch(`/api/conversations/${conversationId}/stream`, {
-    method: 'POST',
-    headers,
-    credentials: 'include',
-    body: JSON.stringify({
-      content: options.content,
-      mode: options.mode,
-      attachment: options.attachment,
-      modelVariant: options.modelVariant,
-      metadata: {
-        modelVersion: options.modelVariant,
+  let res: Response;
+  try {
+    res = await fetch(`/api/conversations/${conversationId}/stream`, {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: JSON.stringify({
+        content: options.content,
+        mode: options.mode,
+        attachment: options.attachment,
         modelVariant: options.modelVariant,
-      },
-    }),
-  });
+        metadata: {
+          modelVersion: options.modelVariant,
+          modelVariant: options.modelVariant,
+        },
+      }),
+    });
+  } catch {
+    throw new ApiError(
+      'การเชื่อมต่อกับ ZYRQUEN Cloud Core ขาดหายระหว่างประมวลผล กรุณาลองเชื่อมต่อใหม่',
+      0
+    );
+  }
 
   if (!res.ok) {
     const errData = (await res.json().catch(() => ({}))) as { error?: string };

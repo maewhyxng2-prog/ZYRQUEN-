@@ -522,55 +522,73 @@ async function startServer() {
       return;
     }
 
-    // Verify ownership before inference
-    const convCheck = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
-      action: 'conv_get',
-      payload: { user_id: req.user!.id, conversation_id: req.params.id },
-    });
-    if (!convCheck.ok) {
-      res.status(404).json({ error: 'Conversation not found' });
-      return;
+    try {
+      // Verify ownership before inference
+      const convCheck = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+        action: 'conv_get',
+        payload: { user_id: req.user!.id, conversation_id: req.params.id },
+      });
+      if (!convCheck.ok) {
+        res.status(404).json({ error: 'Conversation not found' });
+        return;
+      }
+
+      const inference = await runPythonScript<{
+        ok: boolean;
+        error?: string;
+        content?: string;
+        status?: string;
+        trace?: Record<string, unknown>;
+      }>('zyrquen_core.py', {
+        cmd: 'infer',
+        payload: {
+          prompt: prompt || 'Analyze attached context',
+          mode,
+          user_id: req.user!.id,
+          conversation_id: req.params.id,
+          attachment,
+          model_version: modelVersion,
+        },
+      });
+
+      if (!inference.ok || typeof inference.content !== 'string' || !inference.status) {
+        res.status(502).json({
+          error: inference.error || 'Python Native Core failed to return a valid inference response',
+        });
+        return;
+      }
+      if (inference.trace?.external_models_used !== false) {
+        res.status(500).json({ error: 'Native integrity violation: external_models_used must be false' });
+        return;
+      }
+
+      const userDisplay = attachment
+        ? `${prompt || 'Attached snippet'}\n\n[Attachment: ${attachment.length} chars]`
+        : prompt;
+
+      const saved = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
+        action: 'conv_save_exchange',
+        payload: {
+          user_id: req.user!.id,
+          conversation_id: req.params.id,
+          user_content: userDisplay,
+          mode,
+          assistant_content: inference.content,
+          assistant_status: inference.status,
+          trace: inference.trace,
+        },
+      });
+
+      if (!saved.ok) {
+        res.status(500).json({ error: saved.error || 'Failed to persist message' });
+        return;
+      }
+      res.status(201).json(saved);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Native inference failed',
+      });
     }
-
-    const inference = await runPythonScript<{
-      ok: boolean;
-      content: string;
-      status: string;
-      trace: Record<string, unknown>;
-    }>('zyrquen_core.py', {
-      cmd: 'infer',
-      payload: {
-        prompt: prompt || 'Analyze attached context',
-        mode,
-        user_id: req.user!.id,
-        conversation_id: req.params.id,
-        attachment,
-        model_version: modelVersion,
-      },
-    });
-
-    const userDisplay = attachment
-      ? `${prompt || 'Attached snippet'}\n\n[Attachment: ${attachment.length} chars]`
-      : prompt;
-
-    const saved = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
-      action: 'conv_save_exchange',
-      payload: {
-        user_id: req.user!.id,
-        conversation_id: req.params.id,
-        user_content: userDisplay,
-        mode,
-        assistant_content: inference.content,
-        assistant_status: inference.status,
-        trace: inference.trace,
-      },
-    });
-
-    if (!saved.ok) {
-      res.status(500).json({ error: saved.error || 'Failed to persist message' });
-      return;
-    }
-    res.status(201).json(saved);
   });
 
   app.post('/api/conversations/:id/stream', requireAuth, async (req: AuthedRequest, res: Response) => {
@@ -591,87 +609,112 @@ async function startServer() {
       return;
     }
 
-    const convCheck = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
-      action: 'conv_get',
-      payload: { user_id: req.user!.id, conversation_id: req.params.id },
-    });
-    if (!convCheck.ok) {
-      res.status(404).json({ error: 'Conversation not found' });
-      return;
+    try {
+      const convCheck = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+        action: 'conv_get',
+        payload: { user_id: req.user!.id, conversation_id: req.params.id },
+      });
+      if (!convCheck.ok) {
+        res.status(404).json({ error: 'Conversation not found' });
+        return;
+      }
+
+      const inference = await runPythonScript<{
+        ok: boolean;
+        error?: string;
+        content?: string;
+        status?: string;
+        trace?: Record<string, unknown>;
+      }>('zyrquen_core.py', {
+        cmd: 'infer',
+        payload: {
+          prompt: prompt || 'Analyze attached context',
+          mode,
+          user_id: req.user!.id,
+          conversation_id: req.params.id,
+          attachment,
+          model_version: modelVersion,
+        },
+      });
+
+      if (!inference.ok || typeof inference.content !== 'string' || !inference.status) {
+        res.status(502).json({
+          error: inference.error || 'Python Native Core failed to return a valid inference response',
+        });
+        return;
+      }
+      if (inference.trace?.external_models_used !== false) {
+        res.status(500).json({ error: 'Native integrity violation: external_models_used must be false' });
+        return;
+      }
+
+      const userDisplay = attachment
+        ? `${prompt || 'Attached snippet'}\n\n[Attachment: ${attachment.length} chars]`
+        : prompt;
+
+      const saved = await runPythonScript<{
+        ok: boolean;
+        error?: string;
+        title?: string;
+        user_message?: Record<string, unknown>;
+        assistant_message?: Record<string, unknown>;
+      }>('db_bridge.py', {
+        action: 'conv_save_exchange',
+        payload: {
+          user_id: req.user!.id,
+          conversation_id: req.params.id,
+          user_content: userDisplay,
+          mode,
+          assistant_content: inference.content,
+          assistant_status: inference.status,
+          trace: inference.trace,
+        },
+      });
+
+      if (!saved.ok) {
+        res.status(500).json({ error: saved.error || 'Failed to persist message' });
+        return;
+      }
+
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+
+      const writeEvent = (event: string, data: unknown) => {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+
+      writeEvent('meta', {
+        title: saved.title,
+        modelVersion,
+        user_message: saved.user_message,
+      });
+
+      const fullText = inference.content;
+      const chunkSize = 48;
+      for (let i = 0; i < fullText.length; i += chunkSize) {
+        writeEvent('delta', { delta: fullText.slice(i, i + chunkSize) });
+      }
+
+      writeEvent('done', {
+        title: saved.title,
+        modelVersion,
+        user_message: saved.user_message,
+        assistant_message: saved.assistant_message,
+      });
+      res.end();
+    } catch (err) {
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'Native streaming inference failed',
+        });
+      } else {
+        res.write(
+          `event: error\ndata: ${JSON.stringify({ error: err instanceof Error ? err.message : 'Native streaming inference failed' })}\n\n`
+        );
+        res.end();
+      }
     }
-
-    const inference = await runPythonScript<{
-      ok: boolean;
-      content: string;
-      status: string;
-      trace: Record<string, unknown>;
-    }>('zyrquen_core.py', {
-      cmd: 'infer',
-      payload: {
-        prompt: prompt || 'Analyze attached context',
-        mode,
-        user_id: req.user!.id,
-        conversation_id: req.params.id,
-        attachment,
-        model_version: modelVersion,
-      },
-    });
-
-    const userDisplay = attachment
-      ? `${prompt || 'Attached snippet'}\n\n[Attachment: ${attachment.length} chars]`
-      : prompt;
-
-    const saved = await runPythonScript<{
-      ok: boolean;
-      error?: string;
-      title?: string;
-      user_message?: Record<string, unknown>;
-      assistant_message?: Record<string, unknown>;
-    }>('db_bridge.py', {
-      action: 'conv_save_exchange',
-      payload: {
-        user_id: req.user!.id,
-        conversation_id: req.params.id,
-        user_content: userDisplay,
-        mode,
-        assistant_content: inference.content,
-        assistant_status: inference.status,
-        trace: inference.trace,
-      },
-    });
-
-    if (!saved.ok) {
-      res.status(500).json({ error: saved.error || 'Failed to persist message' });
-      return;
-    }
-
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-
-    const writeEvent = (event: string, data: unknown) => {
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
-
-    writeEvent('meta', {
-      title: saved.title,
-      modelVersion,
-      user_message: saved.user_message,
-    });
-
-    const fullText = inference.content || '';
-    const chunkSize = 48;
-    for (let i = 0; i < fullText.length; i += chunkSize) {
-      writeEvent('delta', { delta: fullText.slice(i, i + chunkSize) });
-    }
-
-    writeEvent('done', {
-      title: saved.title,
-      modelVersion,
-      user_message: saved.user_message,
-      assistant_message: saved.assistant_message,
-    });
-    res.end();
   });
 
   app.get('/api/knowledge', requireAuth, async (req: AuthedRequest, res: Response) => {
@@ -884,6 +927,92 @@ async function startServer() {
       },
     });
     res.status(201).json(result);
+  });
+
+  const ALLOWED_BENCHMARK_MODELS = new Set([
+    'zyrquen-omega-v1',
+    'zyrquen-ast-pro',
+    'zyrquen-kg-v2',
+    'zyrquen-ngram-ckpt',
+  ]);
+
+  app.post('/api/developer/benchmark', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const requestedModel = String(req.body?.modelVersion || 'zyrquen-omega-v1').trim();
+    if (!ALLOWED_BENCHMARK_MODELS.has(requestedModel)) {
+      res.status(400).json({ error: 'Unsupported modelVersion for native benchmark' });
+      return;
+    }
+
+    try {
+      const report = await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const pyCode = [
+          'import json, sys',
+          'from tests.benchmark_suite import run_capability_benchmark',
+          'print(json.dumps(run_capability_benchmark(model_version=sys.argv[1]), ensure_ascii=False))',
+        ].join('; ');
+        const child = spawn('python3', ['-c', pyCode, requestedModel], {
+          cwd: __dirname,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            PYTHONPATH: path.resolve(__dirname, 'python_core'),
+          },
+        });
+
+        let stdout = '';
+        let stderr = '';
+        const timer = setTimeout(() => {
+          child.kill('SIGTERM');
+          reject(new Error('Native capability benchmark timed out'));
+        }, 60_000);
+
+        child.stdout.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString('utf-8');
+        });
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString('utf-8');
+        });
+        child.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          if (code !== 0) {
+            reject(new Error(stderr.trim() || `Benchmark exited with code ${code}`));
+            return;
+          }
+          try {
+            const parsed = JSON.parse(stdout.trim()) as Record<string, unknown>;
+            resolve(parsed);
+          } catch (err) {
+            reject(new Error(`Invalid JSON from benchmark_suite.py: ${(err as Error).message}`));
+          }
+        });
+      });
+
+      const summary = (report.summary || {}) as Record<string, unknown>;
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user!.id,
+          actor_email: req.user!.email,
+          action: 'CAPABILITY_BENCHMARK_RUN',
+          target: requestedModel,
+          outcome: `${String(summary.passed ?? 0)}/${String(summary.total_cases ?? 0)}`,
+        },
+      });
+
+      res.status(200).json({
+        ok: true,
+        executed_at: new Date().toISOString(),
+        report,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Native capability benchmark failed',
+      });
+    }
   });
 
   app.get('/api/developer/tools', requireAuth, async (req: AuthedRequest, res: Response) => {

@@ -10,6 +10,7 @@ P4: Local Deterministic Compute (AST/Algebra/Stats) & Sandboxed Workspace File M
 P5: Permission Enforcement, Approval Gate, & Unified Audit Trail
 """
 
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 import collections
 import ipaddress
@@ -413,6 +414,7 @@ def _query_mediawiki_source(wiki_host: str, query: str, allowlist: list[str]) ->
     except Exception as exc:
         return [], f"MediaWiki parse failed: {exc}"
 
+    retrieved_at = _now_iso()
     out = []
     for h in hits[:3]:
         title = str(h.get("title", "")).strip()
@@ -421,9 +423,11 @@ def _query_mediawiki_source(wiki_host: str, query: str, allowlist: list[str]) ->
         out.append(
             {
                 "provider": wiki_host,
+                "source_id": f"{wiki_host}:{title}",
                 "title": title,
                 "snippet": snippet,
                 "url": article_url,
+                "retrieved_at": retrieved_at,
                 "trust_status": "UNTRUSTED_WEB_EVIDENCE",
             }
         )
@@ -441,6 +445,7 @@ def _query_duckduckgo_instant(query: str, allowlist: list[str]) -> tuple[list[di
     except Exception as exc:
         return [], f"DuckDuckGo parse failed: {exc}"
 
+    retrieved_at = _now_iso()
     items: list[dict] = []
     abstract = str(data.get("AbstractText", "")).strip()
     abstract_url = str(data.get("AbstractURL", "")).strip()
@@ -449,9 +454,11 @@ def _query_duckduckgo_instant(query: str, allowlist: list[str]) -> tuple[list[di
         items.append(
             {
                 "provider": "api.duckduckgo.com",
+                "source_id": f"ddg:{heading}",
                 "title": heading,
                 "snippet": abstract[:400],
                 "url": abstract_url or f"https://duckduckgo.com/?q={encoded_q}",
+                "retrieved_at": retrieved_at,
                 "trust_status": "UNTRUSTED_WEB_EVIDENCE",
             }
         )
@@ -460,9 +467,11 @@ def _query_duckduckgo_instant(query: str, allowlist: list[str]) -> tuple[list[di
             items.append(
                 {
                     "provider": "api.duckduckgo.com",
+                    "source_id": f"ddg:{str(topic.get('Text', ''))[:40]}",
                     "title": str(topic.get("Text", ""))[:72],
                     "snippet": str(topic.get("Text", ""))[:320],
                     "url": str(topic.get("FirstURL", "")),
+                    "retrieved_at": retrieved_at,
                     "trust_status": "UNTRUSTED_WEB_EVIDENCE",
                 }
             )
@@ -513,6 +522,7 @@ def _run_web_search(query: str, allowlist: list[str]) -> dict:
         "providers_queried": queried_providers,
         "provider_errors": provider_errors,
         "query": q,
+        "retrieved_at": _now_iso(),
         "results": all_items[:6],
     }
 
@@ -542,9 +552,11 @@ def _run_doc_fetch(url: str, allowlist: list[str]) -> dict:
         "ok": True,
         "url": res["url"],
         "provider": parsed_host,
+        "source_id": parsed_host,
         "title": title,
         "headings": headings,
         "content_type": ctype,
+        "retrieved_at": _now_iso(),
         "trust_status": "UNTRUSTED_WEB_EVIDENCE",
         "excerpt": extracted,
     }
@@ -666,6 +678,62 @@ def validate_tool_input(tool_id: str, tool_input: dict) -> tuple[bool, str | Non
     return True, None
 
 
+STALE_EVIDENCE_MAX_AGE_SECONDS = 7 * 24 * 3600
+
+
+def _is_blocked_llm_host(hostname: str) -> bool:
+    h = hostname.strip().lower()
+    if not h:
+        return False
+    return any(h == b or h.endswith(f".{b}") for b in BLOCKED_EXTERNAL_LLM_HOSTS)
+
+
+def _validate_evidence_source_metadata(provider: str, url: str) -> tuple[bool, str]:
+    prov = (provider or "").strip().lower()
+    u = (url or "").strip()
+    if not u:
+        return False, "ไม่มี URL อ้างอิงแหล่งที่มา"
+    try:
+        parsed = urllib.parse.urlparse(u)
+    except Exception:
+        return False, "URL อ้างอิงไม่ถูกต้อง"
+    if parsed.scheme.lower() != "https":
+        return False, f"โปรโตคอล URL ไม่ใช่ https:// ({parsed.scheme or 'none'})"
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return False, "ไม่พบโดเมนปลายทางใน URL"
+    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
+        return False, f"ไม่อนุญาตแหล่งอ้างอิงภายใน/local ({host})"
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if not ip_obj.is_global:
+            return False, f"ไม่อนุญาต IP เครือข่ายส่วนตัว ({host})"
+    except ValueError:
+        pass
+    if _is_blocked_llm_host(host) or _is_blocked_llm_host(prov):
+        return False, f"ปฏิเสธแหล่งข้อมูลจากโฮสต์โมเดล AI ภายนอก ({prov or host})"
+    if not prov:
+        return False, "ไม่ระบุผู้ให้บริการ/แหล่งข้อมูล (provider)"
+    return True, host
+
+
+def _parse_iso_utc(ts_str: str | None) -> datetime | None:
+    if not ts_str:
+        return None
+    raw = str(ts_str).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
 def analyze_tool_result(
     conn: sqlite3.Connection,
     tool_id: str,
@@ -675,21 +743,26 @@ def analyze_tool_result(
     query_kg_fn: Callable[[sqlite3.Connection, str], list[dict]],
 ) -> dict:
     """
-    P3 Structured Evidence & Native Evaluation:
-    - Marks external web payloads as untrusted until evaluated
-    - Compares term agreement across distinct providers when multiple sources exist
+    P3 Structured Evidence & Native Evaluation + Anti-Fabrication Verification:
+    - Validates every evidence source URL and rejects missing/local/blocked-LLM sources
+    - Tracks retrieved_at timestamps and flags STALE evidence older than threshold
+    - Compares term agreement across distinct verified providers
     - Cross-checks against ZYRQUEN's internal Knowledge Graph
-    - Reports explicit evidence trust grade & limitations honestly
+    - Reports explicit verification_status, trust_grade & limitations honestly
     """
     if tool_id == "calc_ast":
         return {
             "trust_grade": "INTERNAL_DETERMINISTIC",
+            "verification_status": "VERIFIED",
+            "freshness_status": "FRESH",
+            "retrieved_at": _now_iso(),
             "token_count": 0,
             "top_terms": [],
             "kg_matches": [],
             "distinct_providers": ["zyrquen_ast"],
             "cross_source_shared_terms": [],
             "numeric_values": [raw_output.get("result")] if "result" in raw_output else [],
+            "rejected_sources": [],
             "limitations": [],
             "summary": "ZYRQUEN Native Compute ยืนยันผลคำนวณเชิงสัญลักษณ์ภายใน 100%",
         }
@@ -699,24 +772,32 @@ def analyze_tool_result(
             names = [f["name"] for f in raw_output.get("files", [])]
             return {
                 "trust_grade": "SANDBOX_LOCAL_FILE",
+                "verification_status": "VERIFIED",
+                "freshness_status": "FRESH",
+                "retrieved_at": _now_iso(),
                 "token_count": len(names),
                 "top_terms": names[:6],
                 "kg_matches": [],
                 "distinct_providers": ["workspace_files"],
                 "cross_source_shared_terms": [],
                 "numeric_values": [],
+                "rejected_sources": [],
                 "limitations": ["แสดงเฉพาะไฟล์ภายในโฟลเดอร์ Sandbox ของระบบ"],
                 "summary": f"ZYRQUEN Native Core ตรวจพบไฟล์ในพื้นที่ปลอดภัย {len(names)} รายการ",
             }
         if raw_output.get("action") == "write":
             return {
                 "trust_grade": "SANDBOX_LOCAL_FILE",
+                "verification_status": "VERIFIED",
+                "freshness_status": "FRESH",
+                "retrieved_at": _now_iso(),
                 "token_count": 0,
                 "top_terms": [str(raw_output.get("filename", ""))],
                 "kg_matches": [],
                 "distinct_providers": ["workspace_files"],
                 "cross_source_shared_terms": [],
                 "numeric_values": [str(raw_output.get("size_bytes", 0))],
+                "rejected_sources": [],
                 "limitations": [],
                 "summary": f"บันทึกไฟล์ `{raw_output.get('filename')}` สำเร็จหลังผ่าน Approval Gate",
             }
@@ -724,10 +805,29 @@ def analyze_tool_result(
     text_chunks: list[str] = []
     source_terms: dict[str, set[str]] = collections.defaultdict(set)
     evidence_items: list[dict] = []
+    rejected_sources: list[dict] = []
+    observed_timestamps: list[datetime] = []
+
+    top_ts = _parse_iso_utc(raw_output.get("retrieved_at"))
+    if top_ts:
+        observed_timestamps.append(top_ts)
 
     if tool_id == "web_search":
         for item in raw_output.get("results", []):
-            prov = str(item.get("provider", "external_web"))
+            prov = str(item.get("provider", "")).strip()
+            item_url = str(item.get("url", "")).strip()
+            src_ok, src_reason = _validate_evidence_source_metadata(prov, item_url)
+            if not src_ok:
+                rejected_sources.append({
+                    "provider": prov or "unknown",
+                    "url": item_url,
+                    "title": str(item.get("title", "")),
+                    "reason": src_reason,
+                })
+                continue
+            item_ts = _parse_iso_utc(item.get("retrieved_at")) or top_ts
+            if item_ts:
+                observed_timestamps.append(item_ts)
             chunk = f"{item.get('title', '')} {item.get('snippet', '')}"
             text_chunks.append(chunk)
             item_terms = set(extract_terms_fn(chunk))
@@ -735,28 +835,53 @@ def analyze_tool_result(
             evidence_items.append(
                 {
                     "provider": prov,
+                    "source_id": item.get("source_id") or f"{prov}:{item.get('title', '')}",
                     "title": item.get("title", ""),
-                    "url": item.get("url", ""),
+                    "url": item_url,
+                    "retrieved_at": (item_ts.strftime("%Y-%m-%dT%H:%M:%SZ") if item_ts else None),
                     "trust_status": item.get("trust_status", "UNTRUSTED_WEB_EVIDENCE"),
                 }
             )
     elif tool_id == "doc_fetch":
-        prov = str(raw_output.get("provider", "external_url"))
-        chunk = f"{raw_output.get('title', '')}\n{' '.join(raw_output.get('headings', []))}\n{raw_output.get('excerpt', '')}"
-        text_chunks.append(chunk)
-        source_terms[prov].update(extract_terms_fn(chunk[:1500]))
-        evidence_items.append(
-            {
-                "provider": prov,
-                "title": raw_output.get("title", ""),
-                "url": raw_output.get("url", ""),
-                "trust_status": raw_output.get("trust_status", "UNTRUSTED_WEB_EVIDENCE"),
-            }
-        )
+        prov = str(raw_output.get("provider", "")).strip()
+        doc_url = str(raw_output.get("url", "")).strip()
+        src_ok, src_reason = _validate_evidence_source_metadata(prov, doc_url)
+        if not src_ok:
+            rejected_sources.append({
+                "provider": prov or "unknown",
+                "url": doc_url,
+                "title": str(raw_output.get("title", "")),
+                "reason": src_reason,
+            })
+        else:
+            chunk = f"{raw_output.get('title', '')}\n{' '.join(raw_output.get('headings', []))}\n{raw_output.get('excerpt', '')}"
+            text_chunks.append(chunk)
+            source_terms[prov].update(extract_terms_fn(chunk[:1500]))
+            evidence_items.append(
+                {
+                    "provider": prov,
+                    "source_id": raw_output.get("source_id") or prov,
+                    "title": raw_output.get("title", ""),
+                    "url": doc_url,
+                    "retrieved_at": (top_ts.strftime("%Y-%m-%dT%H:%M:%SZ") if top_ts else None),
+                    "trust_status": raw_output.get("trust_status", "UNTRUSTED_WEB_EVIDENCE"),
+                }
+            )
     elif tool_id == "workspace_file_read":
         content = str(raw_output.get("content", ""))
         text_chunks.append(content)
         source_terms["workspace_files"].update(extract_terms_fn(content[:1500]))
+
+    now_dt = datetime.now(timezone.utc)
+    if tool_id in {"web_search", "doc_fetch"}:
+        if any((now_dt - ts).total_seconds() > STALE_EVIDENCE_MAX_AGE_SECONDS for ts in observed_timestamps):
+            freshness_status = "STALE"
+        elif observed_timestamps:
+            freshness_status = "FRESH"
+        else:
+            freshness_status = "UNKNOWN"
+    else:
+        freshness_status = "FRESH"
 
     combined = "\n".join(text_chunks).strip()
     tokens = [t for t in tokenize_fn(combined) if len(t) >= 2]
@@ -781,19 +906,36 @@ def analyze_tool_result(
 
     if tool_id == "workspace_file_read":
         trust_grade = "SANDBOX_LOCAL_FILE"
+        verification_status = "VERIFIED"
+    elif rejected_sources and not evidence_items:
+        has_blocked_llm = any("โมเดล AI ภายนอก" in r.get("reason", "") for r in rejected_sources)
+        trust_grade = "BLOCKED" if has_blocked_llm else "UNVERIFIED"
+        verification_status = trust_grade
     elif not evidence_items:
         trust_grade = "INSUFFICIENT_EVIDENCE"
+        verification_status = "NOT_FOUND"
+    elif freshness_status == "STALE":
+        trust_grade = "STALE"
+        verification_status = "STALE"
     elif len(distinct_providers) >= 2 and len(shared_terms) >= 1:
         trust_grade = "CORROBORATED_MULTI_SOURCE"
+        verification_status = "VERIFIED"
     else:
         trust_grade = "UNCORROBORATED_SINGLE_SOURCE"
+        verification_status = "UNVERIFIED"
 
     limitations: list[str] = []
     if tool_id in {"web_search", "doc_fetch"}:
         limitations.append("ข้อมูลจากเว็บไซต์ภายนอกถูกตีตราเป็นหลักฐานรอการตรวจสอบ ไม่ใช่ข้อเท็จจริงภายในที่พิสูจน์แล้ว")
+    if rejected_sources:
+        limitations.append(
+            f"คัดกรองแหล่งอ้างอิงที่ไม่ผ่านเกณฑ์ออก {len(rejected_sources)} รายการ (ไม่มี URL HTTPS ที่ถูกต้อง หรือเป็นโฮสต์ต้องห้าม)"
+        )
+    if freshness_status == "STALE":
+        limitations.append("ข้อมูลหลักฐานล้าสมัย (STALE: retrieved_at เกินระยะเวลาที่กำหนด ควรสืบค้นใหม่ก่อนอ้างอิง)")
     if trust_grade == "UNCORROBORATED_SINGLE_SOURCE":
         limitations.append("พบหลักฐานจากแหล่งเดียวหรือยังไม่มีคำสำคัญยืนยันข้ามหลายแหล่ง ควรตรวจสอบเอกสารต้นทางเพิ่มเติม")
-    if trust_grade == "INSUFFICIENT_EVIDENCE":
+    if trust_grade in {"INSUFFICIENT_EVIDENCE", "UNVERIFIED", "BLOCKED"} and not evidence_items:
         limitations.append("ไม่พบหลักฐานเพียงพอจากแหล่งสาธารณะที่อนุญาต")
 
     kg_note = (
@@ -806,8 +948,13 @@ def analyze_tool_result(
         f"คำสำคัญ: {', '.join(top_terms[:5]) or 'ไม่มี'} · {kg_note}"
     )
 
+    latest_ts = max(observed_timestamps).strftime("%Y-%m-%dT%H:%M:%SZ") if observed_timestamps else None
+
     return {
         "trust_grade": trust_grade,
+        "verification_status": verification_status,
+        "freshness_status": freshness_status,
+        "retrieved_at": latest_ts,
         "token_count": len(tokens),
         "top_terms": top_terms,
         "distinct_providers": distinct_providers,
@@ -818,6 +965,7 @@ def analyze_tool_result(
         ],
         "numeric_values": numbers,
         "evidence_items": evidence_items,
+        "rejected_sources": rejected_sources,
         "limitations": limitations,
         "summary": summary,
     }
@@ -872,6 +1020,32 @@ def detect_tool_intent(prompt: str) -> tuple[str, dict] | None:
         if not arg or arg.lower() in {"list", "ls", "all", "ทั้งหมด", "รายการ"}:
             return "workspace_file_read", {"action": "list"}
         return "workspace_file_read", {"action": "read", "filename": arg}
+
+    m_nat_th = re.match(
+        r"^(?:ช่วย|รบกวน|กรุณา)?\s*(?:สืบค้นข้อมูล|ค้นหาข้อมูล|หาข้อมูล|เช็กข้อมูล|เช็คข้อมูล|ตรวจสอบข้อมูล|ตามหาข้อมูล|สืบค้น|ค้นหา)"
+        r"(?:\s*ข้อมูล)?(?:\s*(?:ล่าสุด|เพิ่มเติม|ใหม่|ออนไลน์))?\s*(?:เกี่ยวกับ|เรื่อง|ของ|คำว่า)?\s*(?:เรื่อง|คำว่า)?\s*(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if m_nat_th:
+        q = m_nat_th.group(1).strip()
+        q = re.sub(
+            r"\s*(?:ให้หน่อยครับ|ให้หน่อยค่ะ|ให้หน่อย|หน่อยครับ|หน่อยค่ะ|หน่อย|ทีครับ|ทีค่ะ|ครับ|ค่ะ)\s*[?!.]*$",
+            "",
+            q,
+        ).strip()
+        if len(q) >= 2:
+            return "web_search", {"query": q}
+
+    m_nat_en = re.match(
+        r"^(?:please\s+)?(?:search(?:\s+the\s+web)?\s+for|look\s+up|find\s+(?:the\s+)?(?:latest\s+)?info(?:rmation)?\s+(?:on|about))\s+(.+?)\s*[?!.]*$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if m_nat_en:
+        q = m_nat_en.group(1).strip()
+        if len(q) >= 2:
+            return "web_search", {"query": q}
 
     return None
 

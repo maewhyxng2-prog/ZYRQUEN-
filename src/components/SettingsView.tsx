@@ -1,21 +1,30 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Activity,
+  AlertTriangle,
   Check,
+  CheckCircle2,
   Copy,
   Database,
   KeyRound,
   LogOut,
+  Play,
   Shield,
+  ShieldCheck,
   Terminal,
   Trash2,
   User as UserIcon,
   X,
 } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
+import { runNativeCapabilityBenchmark } from '../lib/benchmark';
+import { MODEL_VARIANTS } from '../types';
 import { ToolRegistry } from './ToolRegistry';
 import type {
   AdminOverview,
   DeveloperOverview,
+  ModelVariantId,
+  NativeBenchmarkEvaluation,
   ReasoningMode,
   SettingsTab,
   ToolsOverview,
@@ -58,6 +67,9 @@ export function SettingsView({
   const [dsMessage, setDsMessage] = useState<string | null>(null);
   const [runningEval, setRunningEval] = useState(false);
   const [requestingTrainId, setRequestingTrainId] = useState<string | null>(null);
+  const [benchmarkModel, setBenchmarkModel] = useState<ModelVariantId>('zyrquen-omega-v1');
+  const [runningBenchmark, setRunningBenchmark] = useState(false);
+  const [benchmarkEval, setBenchmarkEval] = useState<NativeBenchmarkEvaluation | null>(null);
 
   const loadDeveloper = useCallback(async () => {
     setLoading(true);
@@ -169,6 +181,24 @@ export function SettingsView({
       setError(err instanceof ApiError ? err.message : 'รันการประเมินผลไม่สำเร็จ');
     } finally {
       setRunningEval(false);
+    }
+  }
+
+  async function handleRunCapabilityBenchmark() {
+    setRunningBenchmark(true);
+    setError(null);
+    try {
+      const evaluation = await runNativeCapabilityBenchmark(token, {
+        modelVersion: benchmarkModel,
+        logToConsole: true,
+      });
+      setBenchmarkEval(evaluation);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'รัน Capability Benchmark จริงไม่สำเร็จ'
+      );
+    } finally {
+      setRunningBenchmark(false);
     }
   }
 
@@ -624,6 +654,241 @@ export function SettingsView({
                   </div>
                 </section>
               </div>
+
+              <section className="rounded-3xl border border-slate-800/90 bg-[#0E172B] p-5 sm:p-6">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Activity className="h-4 w-4 text-cyan-300" />
+                      <h3 className="text-base font-semibold text-slate-100">
+                        Capability Benchmark (Zero-Mock Native Probe)
+                      </h3>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-400">
+                      ทดสอบ Python Native AI Core จริงบนฐานข้อมูลแยกชั่วคราว ตรวจ Source Verification และ Abstention Accuracy พร้อมรายงานผลเข้า DevTools Console
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      aria-label="เลือกรุ่นโมเดลสำหรับ Benchmark"
+                      value={benchmarkModel}
+                      onChange={(e) => setBenchmarkModel(e.target.value as ModelVariantId)}
+                      className="h-10 rounded-xl border border-slate-700 bg-[#070C18] px-3 text-xs text-slate-200 focus:border-cyan-400 focus:outline-none"
+                    >
+                      {MODEL_VARIANTS.map((variant) => (
+                        <option key={variant.id} value={variant.id}>
+                          {variant.shortLabel}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={runningBenchmark}
+                      onClick={() => void handleRunCapabilityBenchmark()}
+                      className="flex h-10 items-center gap-1.5 rounded-xl bg-blue-600 px-4 text-xs font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50 whitespace-nowrap"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      <span>{runningBenchmark ? 'กำลังรัน Benchmark...' : 'รัน Benchmark จริง'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {!benchmarkEval ? (
+                  <p className="mt-4 rounded-xl border border-slate-800/80 bg-[#070C18] px-4 py-3 text-xs text-slate-400">
+                    ยังไม่มีผลทดสอบในเซสชันนี้ — กด &ldquo;รัน Benchmark จริง&rdquo; เพื่อวัดความสามารถจริงโดยไม่จำลองคะแนน
+                  </p>
+                ) : (
+                  <div className="mt-4 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-[#070C18] px-4 py-3 text-xs">
+                      <div className="flex flex-wrap items-center gap-2 text-slate-200 tabular-nums">
+                        <span className="font-semibold text-cyan-300">
+                          {benchmarkEval.report.benchmark_version}
+                        </span>
+                        <span>·</span>
+                        <span>
+                          คะแนนรวม {benchmarkEval.report.summary.passed}/{benchmarkEval.report.summary.total_cases} (
+                          {(benchmarkEval.report.summary.overall_score * 100).toFixed(1)}%)
+                        </span>
+                        {benchmarkEval.report.summary.failed > 0 && (
+                          <>
+                            <span>·</span>
+                            <span className="font-semibold text-amber-300">
+                              {benchmarkEval.report.summary.failed} FAILED
+                            </span>
+                          </>
+                        )}
+                        <span>·</span>
+                        <span className="font-mono text-[11px] text-slate-400">
+                          Python {benchmarkEval.report.environment.python_version} · {benchmarkEval.report.environment.model_version}
+                        </span>
+                      </div>
+                      <span className="inline-flex items-center gap-1 rounded-lg border border-cyan-500/30 bg-cyan-950/30 px-2.5 py-1 text-[11px] font-medium text-cyan-300">
+                        <ShieldCheck className="h-3.5 w-3.5" />
+                        <span>Zero External LLMs</span>
+                      </span>
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="rounded-2xl border border-slate-800 bg-[#070C18] p-4">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-slate-200">
+                            Source Verification (Anti-Fabrication)
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1 text-xs font-semibold ${
+                              benchmarkEval.sourceVerification.status === 'VERIFIED'
+                                ? 'text-emerald-300'
+                                : 'text-rose-300'
+                            }`}
+                          >
+                            {benchmarkEval.sourceVerification.status === 'VERIFIED' ? (
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            ) : (
+                              <AlertTriangle className="h-3.5 w-3.5" />
+                            )}
+                            <span>
+                              {benchmarkEval.sourceVerification.status} ({benchmarkEval.sourceVerification.passed}/
+                              {benchmarkEval.sourceVerification.total})
+                            </span>
+                          </span>
+                        </div>
+                        <ul className="mt-3 space-y-1.5 text-[11px] text-slate-300">
+                          <li className="flex items-center justify-between">
+                            <span>AFB-01 คัดกรองแหล่งปลอม/LLM ภายนอก</span>
+                            <span className={benchmarkEval.sourceVerification.checks.fabricatedSourceRejected ? 'text-emerald-300' : 'text-rose-300'}>
+                              {benchmarkEval.sourceVerification.checks.fabricatedSourceRejected ? 'PASS' : 'FAIL'}
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span>AFB-02 บล็อก URL ไม่ปลอดภัย / นอก Allowlist</span>
+                            <span className={benchmarkEval.sourceVerification.checks.invalidUrlRejected ? 'text-emerald-300' : 'text-rose-300'}>
+                              {benchmarkEval.sourceVerification.checks.invalidUrlRejected ? 'PASS' : 'FAIL'}
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span>AFB-04 ตรวจจับหลักฐานเก่า (STALE)</span>
+                            <span className={benchmarkEval.sourceVerification.checks.staleEvidenceFlagged ? 'text-emerald-300' : 'text-rose-300'}>
+                              {benchmarkEval.sourceVerification.checks.staleEvidenceFlagged ? 'PASS' : 'FAIL'}
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span>AFB-07 ป้องกันรายงานสำเร็จเท็จ</span>
+                            <span className={benchmarkEval.sourceVerification.checks.falseSuccessPrevented ? 'text-emerald-300' : 'text-rose-300'}>
+                              {benchmarkEval.sourceVerification.checks.falseSuccessPrevented ? 'PASS' : 'FAIL'}
+                            </span>
+                          </li>
+                        </ul>
+                      </div>
+
+                      <div className="rounded-2xl border border-slate-800 bg-[#070C18] p-4">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-slate-200">
+                            Abstention Accuracy & Leakage Guard
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1 text-xs font-semibold tabular-nums ${
+                              benchmarkEval.abstentionAccuracy.status === 'VERIFIED'
+                                ? 'text-emerald-300'
+                                : 'text-rose-300'
+                            }`}
+                          >
+                            {benchmarkEval.abstentionAccuracy.status === 'VERIFIED' ? (
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            ) : (
+                              <AlertTriangle className="h-3.5 w-3.5" />
+                            )}
+                            <span>
+                              {(benchmarkEval.abstentionAccuracy.overallAbstentionAccuracy * 100).toFixed(1)}%
+                            </span>
+                          </span>
+                        </div>
+                        <ul className="mt-3 space-y-1.5 text-[11px] text-slate-300 tabular-nums">
+                          <li className="flex items-center justify-between">
+                            <span>งดตอบเมื่อไม่รู้จริง (Negative Cases)</span>
+                            <span>
+                              {benchmarkEval.abstentionAccuracy.negativeCasesPassed}/
+                              {benchmarkEval.abstentionAccuracy.negativeCasesTotal}
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span>False Positives (ตอบมั่ว / ข้ามขอบเขต)</span>
+                            <span className={benchmarkEval.abstentionAccuracy.falsePositives === 0 ? 'text-emerald-300' : 'text-rose-300'}>
+                              {benchmarkEval.abstentionAccuracy.falsePositives} (FPR {(benchmarkEval.abstentionAccuracy.falsePositiveRate * 100).toFixed(1)}%)
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span>Negative Abstention Suite (NEG-01..07)</span>
+                            <span>
+                              {benchmarkEval.abstentionAccuracy.negativeAbstentionCategory.passed}/
+                              {benchmarkEval.abstentionAccuracy.negativeAbstentionCategory.total}
+                            </span>
+                          </li>
+                          <li className="flex items-center justify-between">
+                            <span>Leakage Isolation / Near-Dup Guard</span>
+                            <span className={benchmarkEval.report.leakage_detection.near_dup_leakage_caught ? 'text-emerald-300' : 'text-rose-300'}>
+                              {benchmarkEval.report.leakage_detection.fixture_isolation.isolated &&
+                              benchmarkEval.report.leakage_detection.near_dup_leakage_caught
+                                ? 'VERIFIED'
+                                : 'FAILED'}
+                            </span>
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                      {Object.entries(benchmarkEval.report.category_scores).map(([cat, stats]) => (
+                        <div
+                          key={cat}
+                          className="rounded-xl border border-slate-800/80 bg-[#070C18] px-3 py-2 text-xs tabular-nums"
+                        >
+                          <p className="truncate font-mono text-[11px] text-slate-400">{cat}</p>
+                          <p className="mt-0.5 font-semibold text-slate-100">
+                            {stats.passed}/{stats.total} ({(stats.score * 100).toFixed(1)}%)
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    {benchmarkEval.report.failures.length > 0 && (
+                      <div className="rounded-2xl border border-amber-500/30 bg-amber-950/15 p-4">
+                        <p className="text-xs font-semibold text-amber-200">
+                          ข้อจำกัดและรายการที่ยังไม่ผ่าน ({benchmarkEval.report.failures.length} รายการ — แสดงผลตามจริงไม่ปกปิด)
+                        </p>
+                        <div className="mt-2 max-h-48 space-y-1.5 overflow-y-auto pr-1">
+                          {benchmarkEval.report.failures.map((f) => (
+                            <div
+                              key={f.id}
+                              className="rounded-lg border border-slate-800/80 bg-[#070C18] px-3 py-2 text-[11px] text-slate-300"
+                            >
+                              <span className="font-mono font-semibold text-amber-300">[{f.id}]</span>{' '}
+                              <span className="font-mono text-slate-400">({f.failure_type})</span>{' '}
+                              <span>{f.input}</span>
+                              <p className="mt-0.5 font-mono text-[10px] text-slate-400">
+                                expected: {f.expected} | actual: {f.actual}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {benchmarkEval.report.unmeasurable_limitations.length > 0 && (
+                      <div className="rounded-2xl border border-slate-800/80 bg-[#070C18] p-4">
+                        <p className="text-xs font-semibold text-slate-300">
+                          ขอบเขตที่ยังไม่สามารถวัดผลได้ในชุดทดสอบนี้ (Unmeasurable Limitations)
+                        </p>
+                        <ul className="mt-2 space-y-1 text-[11px] text-slate-400">
+                          {benchmarkEval.report.unmeasurable_limitations.map((item, idx) => (
+                            <li key={idx}>• {item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
 
               <ToolRegistry
                 token={token}

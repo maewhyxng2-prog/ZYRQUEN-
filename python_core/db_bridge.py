@@ -625,11 +625,18 @@ def handle_action(action: str, payload: dict) -> dict:
             query_kg_fn=query_knowledge_graph,
             calc_fn=_calc_any_for_tool,
         )
-        # If originated from an active conversation, persist the approved Native-analyzed tool follow-up into the thread
         if inv["conversation_id"] and res.get("ok"):
             md = format_tool_markdown(inv["tool_id"], res)
-            msg_status = "VERIFIED" if res.get("status") == "COMPLETED" else "FAILED"
             analysis_obj = res.get("analysis") or {}
+            t_grade = analysis_obj.get("trust_grade")
+            if res.get("status") != "COMPLETED":
+                msg_status = "BLOCKED" if res.get("status") == "BLOCKED" else "FAILED"
+            elif t_grade == "INSUFFICIENT_EVIDENCE":
+                msg_status = "NOT_LEARNED"
+            elif t_grade == "BLOCKED":
+                msg_status = "BLOCKED"
+            else:
+                msg_status = "VERIFIED"
             trace_obj = {
                 "mode": "auto",
                 "engine_path": [f"external_tool:{inv['tool_id']}", "native_tool_synthesizer"],

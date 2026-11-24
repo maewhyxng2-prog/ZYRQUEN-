@@ -62,6 +62,7 @@ export default function App() {
   const initialRoute = readRouteFromUrl();
 
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [nativeReady, setNativeReady] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
@@ -129,6 +130,7 @@ export default function App() {
   }, []);
 
   const bootstrapAuthAndHealth = useCallback(async () => {
+    setConnectionError(null);
     try {
       const [status, health, meRes] = await Promise.all([
         apiRequest<AuthStatus>('/api/auth/status'),
@@ -144,9 +146,13 @@ export default function App() {
         setUser(meRes.user);
         setToken((prev) => prev || '__cookie__');
       }
-    } catch {
-      setAuthStatus({ initialized: true, userCount: 0, envPasscodeConfigured: false });
+    } catch (err) {
       setNativeReady(false);
+      setConnectionError(
+        err instanceof ApiError
+          ? err.message
+          : 'ไม่สามารถเชื่อมต่อกับ ZYRQUEN Cloud Core ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต'
+      );
     }
   }, []);
 
@@ -310,9 +316,13 @@ export default function App() {
       });
 
       setActiveTitle(res.title);
+      setNativeReady(true);
       setMessages((prev) => [...prev, res.user_message, res.assistant_message]);
       void loadHomeAndConversations();
     } catch (err) {
+      if (err instanceof ApiError && err.status === 0) {
+        setNativeReady(false);
+      }
       setLastFailedPrompt({ content, mode, attachment, modelVariant });
       setWorkspaceError(err instanceof ApiError ? err.message : 'Native inference failed');
     } finally {
@@ -419,6 +429,29 @@ export default function App() {
   }
 
   if (!authStatus) {
+    if (connectionError) {
+      return (
+        <div
+          role="alert"
+          className="flex min-h-[100dvh] flex-col items-center justify-center bg-[#060A14] px-6 text-center text-slate-100"
+        >
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-500/40 bg-amber-950/30 text-amber-300">
+            <WifiOff className="h-6 w-6" />
+          </div>
+          <h2 className="mt-4 text-xl font-bold tracking-tight text-slate-50">
+            ไม่สามารถเชื่อมต่อกับระบบออนไลน์ได้
+          </h2>
+          <p className="mt-2 max-w-sm text-sm text-slate-400">{connectionError}</p>
+          <button
+            type="button"
+            onClick={() => void bootstrapAuthAndHealth()}
+            className="mt-6 flex h-11 items-center justify-center rounded-xl bg-blue-600 px-5 text-sm font-medium text-white hover:bg-blue-500"
+          >
+            เชื่อมต่อใหม่อีกครั้ง
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="flex min-h-[100dvh] items-center justify-center bg-[#060A14] text-sm text-slate-400">
         กำลังเริ่มต้นแกนสมอง ZYRQUEN Ω∞...
