@@ -26,6 +26,7 @@ jobs:
       contents: read
       security-events: write
       pull-requests: read
+      actions: read
 
     strategy:
       fail-fast: false
@@ -82,7 +83,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: apps/web
+        working-directory: .
 
     steps:
       - name: Checkout source
@@ -92,11 +93,9 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
 
       - name: Install dependencies
-        run: npm ci --workspaces=false
+        run: npm install --no-audit --no-fund
 
       - name: Audit npm dependencies
         run: npm audit --workspaces=false --audit-level=high
