@@ -31,7 +31,10 @@ from tool_center import (  # noqa: E402
     execute_orchestrated_plan,
     get_tool_center_registry,
     init_tool_center_schema,
+    record_task_memory,
+    run_autonomous_engineering_curriculum,
     run_autonomous_repair_loop,
+    run_comprehensive_benchmark,
     run_engineering_benchmark,
     run_python_sandbox,
     run_self_improvement_evaluation,
@@ -443,9 +446,9 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
         self.assertEqual(bench["metrics"]["regression_rate"], 0.0)
         self.assertFalse(bench["external_models_used"])
 
-    def test_all_39_capabilities_orchestrated_e2e(self) -> None:
+    def test_all_75_capabilities_orchestrated_e2e(self) -> None:
         all_ids = self.registry.list_capability_ids()
-        self.assertEqual(len(all_ids), 39)
+        self.assertEqual(len(all_ids), 75)
 
         # Seed a real dataset and KG relation in the isolated test DB
         ingest = zc.handle_ingest_dataset({
@@ -476,11 +479,25 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
             {"step_id": "s04_cfg", "capability_id": "development.config_audit", "input": {"target_path": "."}, "depends_on": []},
             {"step_id": "s04_sym", "capability_id": "development.symbol_search", "input": {"query": "register_development_toolkit", "target_path": "python_core/tool_center/toolkits"}, "depends_on": []},
             {"step_id": "s04_diff", "capability_id": "development.diff_inspect", "input": {"target_path": "python_core/tool_center/toolkits/development.py"}, "depends_on": []},
+            {"step_id": "s04_scaf", "capability_id": "development.project_scaffold", "input": {"workspace": "e2e_dev", "module_name": "e2e_mod", "template": "python_module", "overwrite": True}, "depends_on": []},
+            {"step_id": "s04_patch", "capability_id": "development.code_patch_apply", "input": {"workspace": "e2e_dev", "target_file": "e2e_mod.py", "replacements": [{"old": "value * 2", "new": "value * 3"}]}, "depends_on": ["s04_scaf"]},
+            {"step_id": "s04_ref", "capability_id": "development.refactor_engine", "input": {"source": "def foo(x):\n    return x\n", "old_name": "foo", "new_name": "bar", "dry_run": True}, "depends_on": []},
+            {"step_id": "s04_diag", "capability_id": "development.error_diagnosis", "input": {"stderr": "ValueError: invalid"}, "depends_on": []},
+            {"step_id": "s04_compat", "capability_id": "development.dependency_compatibility", "input": {"target_path": "."}, "depends_on": []},
+            {"step_id": "s04_mig", "capability_id": "development.migration_analyzer", "input": {"migrations_path": "apps/api/migrations/versions"}, "depends_on": []},
+            {"step_id": "s04_api", "capability_id": "development.api_implementation", "input": {"method": "POST", "endpoint": "/api/check", "framework": "fastapi", "handler_name": "check_ep", "dry_run": True}, "depends_on": []},
+            {"step_id": "s04_a11y", "capability_id": "development.frontend_a11y_audit", "input": {"source": "<button type='button'>OK</button>"}, "depends_on": []},
             {"step_id": "s05", "capability_id": "data.leakage_check", "input": {"train": ["alpha one"], "validation": ["beta two"], "test": ["gamma three"]}, "depends_on": []},
             {"step_id": "s06", "capability_id": "data.profile_structured", "input": {"format": "csv", "content": "k,v\na,1\nb,2\n"}, "depends_on": []},
             {"step_id": "s07", "capability_id": "data.transform", "input": {"format": "csv", "content": "k,v\na,1\na,1\n", "deduplicate": True, "trim_whitespace": True}, "depends_on": []},
             {"step_id": "s08", "capability_id": "data.db_inspect", "input": {"table_limit": 10}, "depends_on": []},
             {"step_id": "s09", "capability_id": "data.calc_ast", "input": {"expression": "6 * 7"}, "depends_on": []},
+            {"step_id": "s09_sch", "capability_id": "data.schema_inference", "input": {"format": "csv", "content": "id,v\n1,10\n2,20\n"}, "depends_on": []},
+            {"step_id": "s09_dup", "capability_id": "data.duplicate_detection", "input": {"format": "csv", "content": "id,v\n1,10\n1,10\n"}, "depends_on": []},
+            {"step_id": "s09_ano", "capability_id": "data.anomaly_detection", "input": {"format": "csv", "content": "x\n1\n2\n2\n3\n99\n"}, "depends_on": []},
+            {"step_id": "s09_sem", "capability_id": "data.semantic_validation", "input": {"format": "csv", "content": "id,s\n1,80\n", "rules": {"required_fields": ["id", "s"], "ranges": {"s": {"min": 0, "max": 100}}}}, "depends_on": []},
+            {"step_id": "s09_lin", "capability_id": "data.dataset_lineage", "input": {"dataset_id": dataset_id}, "depends_on": []},
+            {"step_id": "s09_cmp", "capability_id": "data.dataset_version_compare", "input": {"format": "csv", "baseline_content": "a\n1\n", "candidate_content": "a,b\n1,2\n"}, "depends_on": []},
             {"step_id": "s10", "capability_id": "research.knowledge_retrieve", "input": {"query": "ZYRQUEN"}, "depends_on": []},
             {"step_id": "s11", "capability_id": "research.url_validate", "input": {"url": "https://en.wikipedia.org/wiki/SQLite"}, "depends_on": []},
             {
@@ -495,14 +512,31 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
                 },
                 "depends_on": [],
             },
+            {"step_id": "s12_prov", "capability_id": "research.source_provenance", "input": {"sources": [{"url": "https://www.sqlite.org/wal.html", "provider": "sqlite.org", "retrieved_at": "2026-11-20T00:00:00Z", "claim": "WAL works"}]}, "depends_on": []},
+            {"step_id": "s12_clm", "capability_id": "research.claim_verification", "input": {"claim": "WAL supports readers", "sources": [{"url": "https://www.sqlite.org/wal.html", "claim": "WAL supports readers"}]}, "depends_on": []},
+            {"step_id": "s12_tmp", "capability_id": "research.temporal_analysis", "input": {"events": [{"id": "e1", "timestamp": "2026-11-20T00:00:00Z"}]}, "depends_on": []},
+            {"step_id": "s12_gap", "capability_id": "research.knowledge_gap_detection", "input": {"topics": ["unlearned_topic"]}, "depends_on": []},
+            {"step_id": "s12_con", "capability_id": "research.contradiction_resolution", "input": {"topic": "WAL", "claims": [{"canonical_value": "yes", "credibility_score": 0.9}, {"canonical_value": "no", "credibility_score": 0.1}]}, "depends_on": []},
             {"step_id": "s13", "capability_id": "testing.toolkit_self_test", "input": {"toolkit_id": "data"}, "depends_on": []},
             {"step_id": "s14", "capability_id": "testing.dataset_verify", "input": {"dataset_id": dataset_id}, "depends_on": []},
             {"step_id": "s15", "capability_id": "testing.contract_assertion", "input": {"cases": [{"name": "ok", "op": "eq", "actual": 42, "expected": 42}]}, "depends_on": ["s09"]},
             {"step_id": "s16", "capability_id": "testing.sandbox_run", "input": {"source": "print(21 * 2)"}, "depends_on": []},
             {"step_id": "s17", "capability_id": "testing.engineering_benchmark", "input": {}, "depends_on": []},
+            {"step_id": "s17_cov", "capability_id": "testing.coverage_analysis", "input": {"module_source": "def f(x):\n    return x\n", "test_source": "assert f(1) == 1\n"}, "depends_on": []},
+            {"step_id": "s17_mut", "capability_id": "testing.mutation_testing", "input": {"module_name": "m1", "module_source": "def add(a, b):\n    return a + b\n", "test_source": "import unittest\nfrom m1 import add\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(add(2,3),5)\n"}, "depends_on": []},
+            {"step_id": "s17_prop", "capability_id": "testing.property_based", "input": {"source": "def sq(x):\n    return x*x\n", "function_name": "sq", "arg_types": ["int"], "invariant_expr": "result >= 0"}, "depends_on": []},
+            {"step_id": "s17_perf", "capability_id": "testing.performance_profile", "input": {"source": "x = sum(range(50))", "iterations": 5}, "depends_on": []},
+            {"step_id": "s17_reg", "capability_id": "testing.regression_diff", "input": {"baseline": {"pass_rate": 1.0, "tasks": []}, "candidate": {"pass_rate": 1.0, "tasks": []}}, "depends_on": []},
+            {"step_id": "s17_frc", "capability_id": "testing.failure_root_cause", "input": {"failures": [{"name": "f1", "error": "KeyError: k"}]}, "depends_on": []},
             {"step_id": "s18", "capability_id": "automation.workflow_execute", "input": {"group_id": "system_ops"}, "depends_on": []},
             {"step_id": "s19", "capability_id": "automation.task_compose", "input": {"goal": "วิเคราะห์ข้อมูลและตรวจสอบความปลอดภัย"}, "depends_on": []},
             {"step_id": "s20", "capability_id": "automation.workflow_status", "input": {"limit": 5}, "depends_on": ["s18"]},
+            {"step_id": "s20_dec", "capability_id": "automation.goal_decomposition", "input": {"goal": "ตรวจ schema แล้ววิเคราะห์ความปลอดภัย"}, "depends_on": []},
+            {"step_id": "s20_cau", "capability_id": "automation.causal_analysis", "input": {"events": [{"id": "e1", "caused_by": [], "impact_score": 1}]}, "depends_on": []},
+            {"step_id": "s20_str", "capability_id": "automation.strategy_comparison", "input": {"strategies": [{"strategy_id": "s1", "steps": ["data.calc_ast"]}]}, "depends_on": []},
+            {"step_id": "s20_unc", "capability_id": "automation.uncertainty_estimation", "input": {"evidence_count": 3, "corroborating_sources": 2, "contradictions": 0, "coverage_ratio": 1.0, "test_pass_rate": 1.0}, "depends_on": []},
+            {"step_id": "s20_opt", "capability_id": "automation.plan_optimization", "input": {"steps": [{"step_id": "a", "capability_id": "data.calc_ast", "input": {"expression": "1+1"}, "depends_on": []}]}, "depends_on": []},
+            {"step_id": "s20_lrn", "capability_id": "automation.outcome_learning", "input": {"goal": "E2E learn", "capability_sequence": ["data.calc_ast"], "outcome_status": "SUCCESS", "verified": True}, "depends_on": ["s09"]},
             {"step_id": "s21", "capability_id": "document.markdown_outline", "input": {"content": "# Header\n\n## Sub\nText\n"}, "depends_on": []},
             {
                 "step_id": "s22",
@@ -528,11 +562,16 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
             {"step_id": "s27", "capability_id": "security.dependency_audit", "input": {}, "depends_on": []},
             {"step_id": "s28", "capability_id": "security.secret_and_path_scan", "input": {"path": "safe_file.py", "content": "status = 'VERIFIED'"}, "depends_on": []},
             {"step_id": "s29", "capability_id": "security.governance_audit", "input": {"limit": 5}, "depends_on": []},
+            {"step_id": "s30", "capability_id": "security.sbom_generate", "input": {"target_path": "."}, "depends_on": []},
+            {"step_id": "s31", "capability_id": "security.license_compliance", "input": {"target_path": "."}, "depends_on": []},
+            {"step_id": "s32", "capability_id": "security.threat_model", "input": {"target_path": "."}, "depends_on": []},
+            {"step_id": "s33", "capability_id": "security.permission_audit", "input": {}, "depends_on": []},
+            {"step_id": "s34", "capability_id": "security.artifact_integrity", "input": {"artifacts": [{"path": "e2e_spec.md"}]}, "depends_on": ["s23"]},
         ]
 
         plan_res = execute_orchestrated_plan(
             self.registry,
-            "E2E verification of all 32 READY non-P5 capabilities",
+            "E2E verification of all 70 READY non-P5 capabilities",
             steps_ready_auto,
             conn=self.conn,
             data_dir=self.data_dir,
@@ -546,6 +585,7 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
         by_sid = {s["step_id"]: s for s in plan_res["steps"]}
         self.assertEqual(by_sid["s03_r"]["output"].get("content"), "# Note\nVerified")
         self.assertEqual(by_sid["s23"]["qa"]["verdict"], "SUCCESS")
+        self.assertTrue(by_sid["s34"]["output"].get("all_verified"))
 
         # Verify P5 Approval-Gated capabilities pause honestly for user role
         for cap_id, payload in (
@@ -581,7 +621,7 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
             self.assertFalse(in_dev_res["ok"])
             self.assertEqual(in_dev_res["steps"][0]["qa"]["verdict"], "UNVERIFIED")
 
-        # Confirm every single one of the 34 registered capabilities was tested above
+        # Confirm every single one of the 75 registered capabilities was tested above
         exercised = {s["capability_id"] for s in steps_ready_auto} | {
             "research.web_search",
             "research.doc_fetch",
@@ -666,6 +706,127 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
         self.assertIn("development.dependency_inventory", audit_goal["orchestration"]["capabilities_executed"])
         self.assertIn("development.test_discovery", audit_goal["orchestration"]["capabilities_executed"])
         self.assertIn("development.config_audit", audit_goal["orchestration"]["capabilities_executed"])
+
+        # 6. Goal-driven SBOM, threat model, migration & a11y auto-routing without naming tool IDs
+        sec_eng_goal = zc._try_execute_chat_autonomous_goal(
+            self.conn,
+            "ตรวจสอบ sbom threat model migration และ accessibility ของระบบ",
+            user_id="u-chat",
+        )
+        self.assertIsNotNone(sec_eng_goal)
+        assert sec_eng_goal is not None
+        self.assertEqual(sec_eng_goal["status"], "VERIFIED")
+        exec_caps = set(sec_eng_goal["orchestration"]["capabilities_executed"])
+        self.assertTrue({"security.sbom_generate", "security.threat_model", "development.migration_analyzer", "development.frontend_a11y_audit"}.issubset(exec_caps))
+
+    def test_new_capabilities_security_and_negative_boundaries(self) -> None:
+        # 1. Confined workspace blocks traversal & invalid syntax
+        esc = self.registry.execute(
+            "development.code_patch_apply",
+            {"workspace": "../outside", "edits": {"a.py": "x = 1"}},
+            user_role="admin",
+            data_dir=self.data_dir,
+        )
+        self.assertFalse(esc["ok"])
+        self.assertEqual(esc["status"], "BLOCKED")
+
+        bad_file_esc = self.registry.execute(
+            "development.code_patch_apply",
+            {"workspace": "safe_ws", "edits": {"../escape.py": "x = 1"}},
+            user_role="admin",
+            data_dir=self.data_dir,
+        )
+        self.assertFalse(bad_file_esc["ok"])
+        self.assertEqual(bad_file_esc["status"], "BLOCKED")
+
+        # 2. Refactor detects name collision honestly
+        col = self.registry.execute(
+            "development.refactor_engine",
+            {"source": "a = 1\nb = 2\n", "old_name": "a", "new_name": "b", "dry_run": True},
+            user_role="admin",
+            data_dir=self.data_dir,
+        )
+        self.assertFalse(col["ok"])
+        self.assertTrue(col["output"].get("collision_detected"))
+
+        # 3. Mutation testing catches weak tests (mutant survives!) vs strong tests
+        weak_mut = self.registry.execute(
+            "testing.mutation_testing",
+            {
+                "module_name": "weak_m",
+                "module_source": "def calc(a, b):\n    return a + b\n",
+                "test_source": "import unittest\nfrom weak_m import calc\nclass T(unittest.TestCase):\n    def test_zero(self):\n        self.assertIsNotNone(calc(0, 0))\n",
+            },
+            user_role="admin",
+            data_dir=self.data_dir,
+        )
+        self.assertTrue(weak_mut["ok"])
+        self.assertLess(weak_mut["output"]["mutation_score"], 1.0)
+        self.assertGreaterEqual(weak_mut["output"]["survived_count"], 1)
+
+        # 4. Property-based testing finds counterexample for buggy function
+        prop_bug = self.registry.execute(
+            "testing.property_based",
+            {"source": "def broken_abs(x):\n    return x\n", "function_name": "broken_abs", "arg_types": ["int"], "invariant_expr": "result >= 0", "iterations": 30, "seed": 11},
+            user_role="admin",
+            data_dir=self.data_dir,
+        )
+        self.assertTrue(prop_bug["ok"])
+        self.assertFalse(prop_bug["output"]["passed"])
+        self.assertGreaterEqual(len(prop_bug["output"]["counterexamples"]), 1)
+
+        # 5. Outcome learning improves empirical score in Task Memory without weight mutation
+        before_sel = select_tools_for_goal(self.registry, "วิเคราะห์ความครอบคลุม line coverage ของชุดทดสอบ", conn=self.conn, user_role="admin")
+        top_before = next((c["score"] for c in before_sel["selected_capabilities"] if c["capability_id"] == "testing.coverage_analysis"), 0.0)
+        learn = self.registry.execute(
+            "automation.outcome_learning",
+            {
+                "goal": "วิเคราะห์ความครอบคลุม line coverage ของชุดทดสอบ",
+                "capability_sequence": ["testing.coverage_analysis"],
+                "outcome_status": "SUCCESS",
+                "verified": True,
+            },
+            user_role="admin",
+            conn=self.conn,
+            data_dir=self.data_dir,
+        )
+        self.assertTrue(learn["ok"])
+        self.assertFalse(learn["output"]["model_weights_mutated"])
+        after_sel = select_tools_for_goal(self.registry, "วิเคราะห์ความครอบคลุม line coverage ของชุดทดสอบ", conn=self.conn, user_role="admin")
+        top_after = next((c["score"] for c in after_sel["selected_capabilities"] if c["capability_id"] == "testing.coverage_analysis"), 0.0)
+        self.assertGreater(top_after, top_before)
+
+    def test_autonomous_training_curriculum_levels_1_to_5_and_seen_unseen_benchmark(self) -> None:
+        curr = run_autonomous_engineering_curriculum(self.registry, conn=self.conn, data_dir=self.data_dir)
+        self.assertTrue(curr["ok"])
+        self.assertEqual(curr["status"], "VERIFIED", f"Curriculum partial/failed: {curr}")
+        self.assertEqual(curr["passed"], curr["total"])
+        self.assertEqual(curr["seen_split"]["pass_rate"], 1.0)
+        self.assertEqual(curr["unseen_split"]["pass_rate"], 1.0)
+        self.assertFalse(curr["model_weights_mutated"])
+        self.assertFalse(curr["external_models_used"])
+
+        m = curr["metrics"]
+        self.assertEqual(m["functional_correctness"], 1.0)
+        self.assertGreaterEqual(m["tool_selection_accuracy"], 0.75)
+        self.assertEqual(m["execution_success_rate"], 1.0)
+        self.assertEqual(m["verification_accuracy"], 1.0)
+        self.assertEqual(m["regression_rate"], 0.0)
+        self.assertEqual(m["recovery_success_rate"], 1.0)
+        self.assertEqual(m["unseen_generalization_rate"], 1.0)
+        self.assertGreater(m["resource_efficiency"]["total_execution_ms"], 0.0)
+
+        comp = self.registry.execute(
+            "testing.engineering_benchmark",
+            {"mode": "comprehensive"},
+            user_role="admin",
+            conn=self.conn,
+            data_dir=self.data_dir,
+        )
+        self.assertTrue(comp["ok"])
+        self.assertEqual(comp["output"]["status"], "VERIFIED")
+        self.assertEqual(comp["output"]["passed"], comp["output"]["total"])
+        self.assertGreaterEqual(comp["output"]["total"], 17)
 
 
 if __name__ == "__main__":

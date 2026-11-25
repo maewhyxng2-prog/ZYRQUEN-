@@ -31,13 +31,27 @@ MISSION_STATES = {
     "MISSION_CREATED",
     "GOAL_ANALYZED",
     "PLAN_READY",
+    "NEEDS_CLARIFICATION",
     "AWAITING_APPROVAL",
+    "READY",
+    "RUNNING",
     "EXECUTING",
     "AWAITING_EVIDENCE",
     "RECOVERING",
     "COMPLETED",
     "FAILED",
     "BLOCKED",
+    "CANCELLED",
+}
+
+CANONICAL_NODE_STATES = {
+    "NEEDS_CLARIFICATION",
+    "BLOCKED",
+    "READY",
+    "RUNNING",
+    "EXECUTING",
+    "COMPLETED",
+    "FAILED",
     "CANCELLED",
 }
 
@@ -261,7 +275,7 @@ def build_mission_dag(
                 "postconditions": ["sandbox_audit_completed"],
                 "retry_policy": {"max_attempts": 2, "idempotent_required": True, "retry_on": ["TRANSIENT_ERROR"]},
                 "approval_policy": "auto",
-                "execution_status": "READY",
+                "execution_status": "BLOCKED",
                 "attempts": 0,
                 "idempotency_key": _idempotency_key(mission_id, "node_workspace_audit"),
                 "evidence_refs": [],
@@ -269,6 +283,10 @@ def build_mission_dag(
                 "output_data": {},
             }
         )
+
+    for n in nodes:
+        n["execution_status"] = "READY" if not n.get("dependencies") else "BLOCKED"
+        n["status"] = n["execution_status"]
 
     return nodes
 
@@ -664,25 +682,40 @@ def execute_dag_loop(
 
         for node in nodes:
             status = node.get("execution_status")
-            if status in {"COMPLETED", "BLOCKED", "FAILED", "SKIPPED"}:
+            if status in {"COMPLETED", "FAILED", "SKIPPED", "CANCELLED"}:
                 continue
             if status == "AWAITING_APPROVAL":
                 continue
 
             deps = node.get("dependencies", [])
             dep_statuses = [node_map[d]["execution_status"] for d in deps if d in node_map]
-            if any(ds in {"BLOCKED", "FAILED"} for ds in dep_statuses):
-                # Upstream failed without recovery replacement
-                node["execution_status"] = "BLOCKED"
-                node["last_error"] = "Upstream dependency failed or blocked"
-                progressed = True
+            if any(ds in {"BLOCKED", "FAILED", "CANCELLED"} for ds in dep_statuses):
+                # Upstream failed or remains blocked without recovery replacement
+                if status != "BLOCKED" or not node.get("last_error"):
+                    node["execution_status"] = "BLOCKED"
+                    node["status"] = "BLOCKED"
+                    node["last_error"] = "Upstream dependency failed, cancelled, or blocked"
+                    progressed = True
                 continue
             if not all(ds == "COMPLETED" for ds in dep_statuses):
+                if status != "BLOCKED":
+                    node["execution_status"] = "BLOCKED"
+                    node["status"] = "BLOCKED"
                 continue
+
+            if status == "BLOCKED":
+                # Only unlock BLOCKED -> READY when it has not already executed/failed/rejected
+                if int(node.get("attempts") or 0) > 0 or node.get("last_error"):
+                    continue
+                node["execution_status"] = "READY"
+                node["status"] = "READY"
+                node["last_error"] = None
+                progressed = True
 
             pre_ok, pre_err = _check_preconditions(node, node_map)
             if not pre_ok:
                 node["execution_status"] = "BLOCKED"
+                node["status"] = "BLOCKED"
                 node["last_error"] = pre_err
                 progressed = True
                 continue
@@ -694,11 +727,13 @@ def execute_dag_loop(
             ).fetchone()
             if persisted and persisted["execution_status"] == "COMPLETED" and node["task_id"] != resume_node_id:
                 node["execution_status"] = "COMPLETED"
+                node["status"] = "COMPLETED"
                 progressed = True
                 continue
 
             progressed = True
             node["execution_status"] = "EXECUTING"
+            node["status"] = "RUNNING"
             retry_cfg = node.get("retry_policy") or {}
             max_attempts = max(1, int(retry_cfg.get("max_attempts", 1)))
             node_started_at = time.perf_counter()
@@ -741,6 +776,7 @@ def execute_dag_loop(
 
                 if out.get("status") == "PENDING_APPROVAL":
                     node["execution_status"] = "AWAITING_APPROVAL"
+                    node["status"] = "BLOCKED"
                     node["last_error"] = None
                     _save_mission_nodes(conn, mission_id, nodes)
                     return {
@@ -754,19 +790,23 @@ def execute_dag_loop(
                 post_ok, post_err = _check_postconditions(node, out)
                 if post_ok:
                     node["execution_status"] = "COMPLETED"
+                    node["status"] = "COMPLETED"
                     node["last_error"] = None
                     break
 
                 node["last_error"] = post_err
                 if node["attempts"] < max_attempts and retry_cfg.get("idempotent_required", True):
                     node["execution_status"] = "RECOVERING"
+                    node["status"] = "RUNNING"
                     recovery_events.append(
                         f"{node['task_id']}: ตรวจ Postcondition ไม่ผ่าน ({post_err}) — Retry รอบที่ {node['attempts'] + 1}"
                     )
                     continue
 
                 # Retries exhausted -> attempt replan
-                node["execution_status"] = "BLOCKED" if out.get("status") == "BLOCKED" else "FAILED"
+                final_err_state = "BLOCKED" if out.get("status") == "BLOCKED" else "FAILED"
+                node["execution_status"] = final_err_state
+                node["status"] = final_err_state
                 recovery_events.append(f"{node['task_id']}: เกิดความล้มเหลว ({post_err}) — เข้าสู่ Recovery/Replan")
                 replanned = _replan_on_failure(mission_id, node, nodes)
                 if replanned:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import shutil
 import sqlite3
 import time
 import uuid
@@ -867,6 +868,90 @@ class ToolCenterRegistry:
                 r11["ok"] and r11["output"].get("repository_modified") is False and isinstance(r11["output"].get("diff"), str),
                 "Git diff inspection is read-only and bounded",
             )
+            r12_scaffold = self.execute(
+                "development.project_scaffold",
+                {"workspace": "_probe_dev_ws", "module_name": "probe_calc", "template": "python_module", "overwrite": True},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r12_patch = self.execute(
+                "development.code_patch_apply",
+                {
+                    "workspace": "_probe_dev_ws",
+                    "target_file": "probe_calc.py",
+                    "replacements": [{"old": "value * 2", "new": "value * 3"}],
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r12_bad_syn = self.execute(
+                "development.code_patch_apply",
+                {"workspace": "_probe_dev_ws", "edits": {"bad.py": "def oops(:\n  pass\n"}},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r12_refactor = self.execute(
+                "development.refactor_engine",
+                {"source": "def calc(x):\n    return x + 1\n", "old_name": "calc", "new_name": "compute_next", "dry_run": True},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r12_diag = self.execute(
+                "development.error_diagnosis",
+                {"stderr": 'Traceback (most recent call last):\n  File "app.py", line 3, in run\nZeroDivisionError: division by zero\n'},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r12_compat = self.execute(
+                "development.dependency_compatibility",
+                {"target_path": "."},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r12_mig = self.execute(
+                "development.migration_analyzer",
+                {"migrations_path": "apps/api/migrations/versions"},
+                user_role="admin",
+                conn=conn,
+                data_dir=data_dir,
+            )
+            r12_api = self.execute(
+                "development.api_implementation",
+                {"method": "POST", "endpoint": "/api/items", "framework": "fastapi", "handler_name": "create_item", "required_fields": ["name"], "dry_run": True},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r12_a11y = self.execute(
+                "development.frontend_a11y_audit",
+                {"source": "<img src='a.png' /><div onClick={() => x()}>bad</div><div role='button' tabIndex={0} onClick={() => x()}>ok</div><button type='button'>go</button>"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            if data_dir is not None:
+                probe_dev_ws = Path(data_dir) / "sandbox_workspaces" / "_probe_dev_ws"
+                if probe_dev_ws.exists():
+                    shutil.rmtree(probe_dev_ws, ignore_errors=True)
+            record(
+                "dev_patch_scaffold_refactor_confined",
+                bool(
+                    r12_scaffold["ok"] and r12_scaffold["output"].get("created") is True
+                    and r12_patch["ok"] and r12_patch["output"].get("applied") is True
+                    and not r12_bad_syn["ok"]
+                    and r12_refactor["ok"] and "def compute_next" in r12_refactor["output"].get("refactored_source", "")
+                ),
+                "Scaffold, confined code patch, syntax rejection, and AST refactor work deterministically",
+            )
+            record(
+                "dev_diag_compat_mig_api_a11y",
+                bool(
+                    r12_diag["ok"] and r12_diag["output"].get("exception_type") == "ZeroDivisionError"
+                    and r12_compat["ok"] and "conflicts" in r12_compat["output"]
+                    and r12_mig["ok"] and "migration_count" in r12_mig["output"]
+                    and r12_api["ok"] and r12_api["output"].get("syntax_valid") is True
+                    and r12_a11y["ok"] and r12_a11y["output"].get("issue_count") == 2
+                ),
+                "Error diagnosis, dependency compatibility, migration analyzer, API impl, and JSX a11y audit succeed accurately",
+            )
 
         elif tid == "data":
             r1 = self.execute(
@@ -906,6 +991,58 @@ class ToolCenterRegistry:
                 r3["ok"] and r3["output"].get("result") == 100,
                 "Deterministic AST calculator returns exact result 100",
             )
+            r4 = self.execute(
+                "data.schema_inference",
+                {"format": "csv", "content": "id,email,score\n1,a@example.com,9.5\n2,b@example.com,8.0\n"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r5 = self.execute(
+                "data.duplicate_detection",
+                {"format": "csv", "content": "id,name\n1,alpha node\n1,alpha node\n2,alpha node beta\n", "key_fields": ["id"]},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r6 = self.execute(
+                "data.anomaly_detection",
+                {"format": "csv", "content": "x\n10\n11\n10\n12\n9\n950\n"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r7 = self.execute(
+                "data.semantic_validation",
+                {
+                    "format": "csv",
+                    "content": "id,score\n1,90\n2,150\n",
+                    "rules": {"required_fields": ["id", "score"], "ranges": {"score": {"min": 0, "max": 100}}, "unique_fields": ["id"]},
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r8 = self.execute(
+                "data.dataset_version_compare",
+                {"format": "csv", "baseline_content": "id,v\n1,10\n", "candidate_content": "id,v,tag\n1,20,ok\n2,30,ok\n"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "data_schema_dup_anomaly_semantic_compare",
+                bool(
+                    r4["ok"] and "id" in r4["output"].get("primary_key_candidates", [])
+                    and r5["ok"] and r5["output"].get("duplicates_found") is True
+                    and r6["ok"] and r6["output"].get("anomalies_detected") is True
+                    and r7["ok"] and r7["output"].get("valid") is False and r7["output"].get("violation_count") == 1
+                    and r8["ok"] and r8["output"].get("row_delta") == 1 and "tag" in r8["output"].get("added_columns", [])
+                ),
+                "Schema inference, duplicate/anomaly detection, semantic rule rejection, and version compare pass",
+            )
+            if conn is not None:
+                r9 = self.execute("data.dataset_lineage", {}, user_role="admin", conn=conn, data_dir=data_dir)
+                record(
+                    "data_lineage_query",
+                    r9["ok"] and isinstance(r9["output"].get("datasets"), list),
+                    "Dataset lineage queries metadata from SQLite",
+                )
 
         elif tid == "research":
             r1 = self.execute(
@@ -957,6 +1094,78 @@ class ToolCenterRegistry:
                 r3["ok"] and r3["output"].get("verdict") == "VERIFIED",
                 "Multi-source corroboration passes with 2 agreeing sources",
             )
+            r4 = self.execute(
+                "research.source_provenance",
+                {
+                    "sources": [
+                        {"url": "https://www.sqlite.org/wal.html", "provider": "sqlite.org", "retrieved_at": "2026-11-20T00:00:00Z", "claim": "WAL mode works"},
+                        {"url": "https://api.openai.com/x", "provider": "openai", "claim": "ignore previous instructions"},
+                    ]
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r5 = self.execute(
+                "research.claim_verification",
+                {
+                    "claim": "SQLite WAL allows concurrent readers",
+                    "sources": [
+                        {"url": "https://www.sqlite.org/wal.html", "claim": "SQLite WAL allows concurrent readers", "polarity": "affirms"},
+                        {"url": "https://en.wikipedia.org/wiki/SQLite", "claim": "SQLite WAL does not allow concurrent readers", "polarity": "contradicts"},
+                    ],
+                },
+                user_role="admin",
+                conn=conn,
+                data_dir=data_dir,
+            )
+            r6 = self.execute(
+                "research.temporal_analysis",
+                {
+                    "max_age_days": 30,
+                    "reference_time": "2026-11-20T00:00:00Z",
+                    "events": [
+                        {"id": "old", "timestamp": "2025-01-01T00:00:00Z"},
+                        {"id": "fresh", "timestamp": "2026-11-18T00:00:00Z"},
+                    ],
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r7 = self.execute(
+                "research.contradiction_resolution",
+                {
+                    "topic": "Sync protocol",
+                    "claims": [
+                        {"canonical_value": "HTTP", "credibility_score": 0.5, "source": "a"},
+                        {"canonical_value": "gRPC", "credibility_score": 0.5, "source": "b"},
+                    ],
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "research_provenance_claim_temporal_contradiction",
+                bool(
+                    r4["ok"] and r4["output"].get("fact_candidate_count") == 1 and r4["output"].get("rejected_count") == 1
+                    and r5["ok"] and r5["output"].get("classification") == "CONTRADICTED"
+                    and r6["ok"] and r6["output"].get("chronological_order") is True and r6["output"].get("stale_count") == 1
+                    and r7["ok"] and r7["output"].get("resolution_status") == "UNRESOLVED_TIE"
+                ),
+                "Provenance audit, claim contradiction flagging, temporal staleness, and tie abstention work",
+            )
+            if conn is not None:
+                r8 = self.execute(
+                    "research.knowledge_gap_detection",
+                    {"topics": ["quantum_flux_missing_topic_xyz"]},
+                    user_role="admin",
+                    conn=conn,
+                    data_dir=data_dir,
+                )
+                record(
+                    "research_knowledge_gap_detects_missing",
+                    r8["ok"] and r8["output"].get("gaps_detected") is True,
+                    "Knowledge gap detection identifies topics absent from KG",
+                )
 
         elif tid == "testing":
             r1 = self.execute(
@@ -997,6 +1206,64 @@ class ToolCenterRegistry:
                 r3["ok"] and r3["output"].get("sandbox_isolated") is True and r3["output"].get("stdout") == "12",
                 "Isolated sandbox executes pure Python safely without exposing env secrets",
             )
+            r4 = self.execute(
+                "testing.coverage_analysis",
+                {
+                    "module_source": "def sign(x):\n    if x >= 0:\n        return 1\n    return -1\n",
+                    "test_source": "assert sign(5) == 1\nassert sign(-3) == -1\n",
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r5 = self.execute(
+                "testing.mutation_testing",
+                {
+                    "module_name": "probe_m",
+                    "module_source": "def add(a, b):\n    return a + b\n",
+                    "test_source": "import unittest\nfrom probe_m import add\nclass T(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(2, 5), 7)\n",
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r6 = self.execute(
+                "testing.property_based",
+                {"source": "def sq(x):\n    return x * x\n", "function_name": "sq", "arg_types": ["int"], "invariant_expr": "result >= 0", "iterations": 15, "seed": 7},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r7 = self.execute(
+                "testing.performance_profile",
+                {"source": "s = sum(range(100))", "iterations": 10},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r8 = self.execute(
+                "testing.regression_diff",
+                {
+                    "baseline": {"pass_rate": 1.0, "tasks": [{"name": "a", "passed": True}]},
+                    "candidate": {"pass_rate": 0.0, "tasks": [{"name": "a", "passed": False}]},
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r9 = self.execute(
+                "testing.failure_root_cause",
+                {"failures": [{"name": "t1", "error": "ValueError: bad"}, {"name": "t2", "error": "ValueError: empty"}]},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "testing_cov_mut_prop_perf_reg_root",
+                bool(
+                    r4["ok"] and r4["output"].get("coverage_percent") == 100.0
+                    and r5["ok"] and r5["output"].get("mutation_score") == 1.0
+                    and r6["ok"] and r6["output"].get("passed") is True
+                    and r7["ok"] and r7["output"].get("total_ms", -1) >= 0
+                    and r8["ok"] and r8["output"].get("regression_detected") is True
+                    and r9["ok"] and r9["output"].get("top_root_cause") == "ValueError"
+                ),
+                "Coverage, mutation testing, property-based testing, profiling, regression diff, and root-cause clustering pass",
+            )
 
         elif tid == "automation":
             r1 = self.execute(
@@ -1021,6 +1288,74 @@ class ToolCenterRegistry:
                 "automation_workflow_system_ops",
                 r2["ok"] and (r2["output"].get("run") or {}).get("status") == "COMPLETED",
                 "Central workflow engine completes system_ops cleanly",
+            )
+            r3 = self.execute(
+                "automation.goal_decomposition",
+                {"goal": "ตรวจ schema ชุดข้อมูล แล้วค้นหาสัญลักษณ์ในโค้ด และตรวจสอบความปลอดภัย"},
+                user_role="admin",
+                conn=conn,
+                data_dir=data_dir,
+            )
+            r4 = self.execute(
+                "automation.causal_analysis",
+                {"events": [{"id": "root_err", "caused_by": [], "impact_score": 2}, {"id": "child_err", "caused_by": ["root_err"], "impact_score": 4}]},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r5 = self.execute(
+                "automation.strategy_comparison",
+                {
+                    "strategies": [
+                        {"strategy_id": "verified_safe", "steps": ["development.code_analysis", "security.native_policy_audit"]},
+                        {"strategy_id": "broken_plan", "steps": ["nonexistent.cap"]},
+                    ]
+                },
+                user_role="admin",
+                conn=conn,
+                data_dir=data_dir,
+            )
+            r6 = self.execute(
+                "automation.uncertainty_estimation",
+                {"evidence_count": 0, "contradictions": 1, "test_pass_rate": 0.2, "schema_valid": False},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r7 = self.execute(
+                "automation.plan_optimization",
+                {
+                    "steps": [
+                        {"step_id": "s1", "capability_id": "data.calc_ast", "input": {"expression": "2+2"}, "depends_on": []},
+                        {"step_id": "s2", "capability_id": "data.calc_ast", "input": {"expression": "2+2"}, "depends_on": []},
+                    ]
+                },
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            learn_conn = conn if conn is not None else sqlite3.connect(":memory:")
+            if conn is None:
+                learn_conn.row_factory = sqlite3.Row
+            try:
+                r8 = self.execute(
+                    "automation.outcome_learning",
+                    {"goal": "Verify probe learning", "capability_sequence": ["data.calc_ast"], "outcome_status": "SUCCESS", "verified": True},
+                    user_role="admin",
+                    conn=learn_conn,
+                    data_dir=data_dir,
+                )
+            finally:
+                if conn is None:
+                    learn_conn.close()
+            record(
+                "automation_intelligence_support_tools",
+                bool(
+                    r3["ok"] and r3["output"].get("dag_valid") is True and r3["output"].get("subtask_count", 0) >= 2
+                    and r4["ok"] and (r4["output"].get("top_root_cause") or {}).get("id") == "root_err"
+                    and r5["ok"] and r5["output"].get("recommended_strategy") == "verified_safe"
+                    and r6["ok"] and r6["output"].get("should_abstain") is True
+                    and r7["ok"] and r7["output"].get("duplicates_pruned") == 1
+                    and r8["ok"] and r8["output"].get("model_weights_mutated") is False
+                ),
+                "Goal decomposition, causal analysis, strategy comparison, uncertainty abstention, plan optimization, and outcome learning pass",
             )
 
         elif tid == "api_integration":
@@ -1121,6 +1456,34 @@ class ToolCenterRegistry:
                 "sec_enforces_admin_only_rbac",
                 not r3["ok"] and r3["status"] == "BLOCKED",
                 "Admin-only capability rejects regular user with BLOCKED",
+            )
+            r4 = self.execute("security.sbom_generate", {"target_path": "."}, user_role="admin", data_dir=data_dir)
+            r5 = self.execute("security.license_compliance", {"target_path": "."}, user_role="admin", data_dir=data_dir)
+            r6 = self.execute("security.threat_model", {"target_path": "."}, user_role="admin", data_dir=data_dir)
+            r7 = self.execute("security.permission_audit", {}, user_role="admin", data_dir=data_dir)
+            r8_ok = self.execute(
+                "security.artifact_integrity",
+                {"artifacts": [{"path": "inline.txt", "content": "hello", "expected_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}]},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r8_bad = self.execute(
+                "security.artifact_integrity",
+                {"artifacts": [{"path": "inline.txt", "content": "tampered", "expected_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}]},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "sec_sbom_license_threat_perm_integrity",
+                bool(
+                    r4["ok"] and r4["output"].get("component_count", 0) >= 1 and len(r4["output"].get("bom_sha256", "")) == 64
+                    and r5["ok"] and "compliant" in r5["output"]
+                    and r6["ok"] and r6["output"].get("surface_count", 0) >= 1
+                    and r7["ok"] and r7["output"].get("rbac_compliant") is True
+                    and r8_ok["ok"] and r8_ok["output"].get("all_verified") is True
+                    and r8_bad["ok"] and r8_bad["output"].get("all_verified") is False
+                ),
+                "SBOM, license compliance, threat model, permission audit, and artifact integrity tamper-check pass",
             )
 
         return cases

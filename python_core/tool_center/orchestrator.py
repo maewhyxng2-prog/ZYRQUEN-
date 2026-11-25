@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -62,6 +63,55 @@ def _db_file_path(conn: sqlite3.Connection | None) -> str | None:
     return None
 
 
+_GOAL_INTENT_EXPANSIONS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("ซ่อมบั๊ก", "แก้บั๊ก", "แก้ไขโค้ด", "แพตช์", "patch", "edit file"), ("patch", "replace", "diff", "sandbox")),
+    (("สร้างโปรเจกต์", "ขึ้นโครง", "scaffold", "boilerplate", "template"), ("scaffold", "template", "module")),
+    (("รีแฟกเตอร์", "เปลี่ยนชื่อฟังก์ชัน", "refactor", "rename symbol"), ("refactor", "rename", "ast")),
+    (("วินิจฉัย", "สาเหตุ error", "traceback", "stack trace", "diagnose"), ("diagnose", "traceback", "error")),
+    (("ความเข้ากันได้", "compatibility", "conflict", "เวอร์ชันขัดกัน"), ("compatibility", "conflict", "version")),
+    (("ไมเกรชัน", "alembic", "migration", "schema db"), ("migration", "alembic", "schema")),
+    (("สร้าง api", "endpoint", "rest route", "fastapi", "express"), ("endpoint", "rest", "route", "api")),
+    (("การเข้าถึง", "accessibility", "a11y", "alt text", "aria", "หน้าเว็บ"), ("a11y", "accessibility", "alt", "role")),
+    (("อนุมาน schema", "infer schema", "ชนิดคอลัมน์", "primary key"), ("schema", "infer", "columns")),
+    (("ข้อมูลซ้ำ", "แถวซ้ำ", "deduplicate", "duplicate rows", "near duplicate"), ("duplicate", "dedup", "jaccard")),
+    (("ผิดปกติ", "ค่าผิดปกติ", "outlier", "anomaly", "iqr"), ("anomaly", "outlier", "iqr")),
+    (("กฎความถูกต้อง", "semantic", "domain rule", "range check"), ("semantic", "rules", "constraints")),
+    (("สายข้อมูล", "ที่มาข้อมูล", "lineage", "provenance dataset"), ("lineage", "dataset", "origin")),
+    (("เทียบชุดข้อมูล", "version compare", "drift", "data diff"), ("compare", "version", "drift")),
+    (("แหล่งที่มา", "provenance", "ความน่าเชื่อถือ", "credit", "authoritative"), ("provenance", "authority", "credibility")),
+    (("ทวนสอบข้ออ้าง", "fact check", "verify claim", "claim verification"), ("claim", "verify", "corroborate")),
+    (("ลำดับเวลา", "ล้าสมัย", "temporal", "chronological", "stale"), ("temporal", "timestamp", "stale")),
+    (("ช่องว่างความรู้", "ไม่รู้เรื่อง", "knowledge gap", "missing knowledge"), ("gap", "missing", "knowledge")),
+    (("ความขัดแย้ง", "ข้อมูลแย้งกัน", "contradict", "resolve conflict"), ("contradiction", "conflict", "resolve")),
+    (("ครอบคลุม", "line coverage", "coverage", "uncovered"), ("coverage", "trace", "lines")),
+    (("กลายพันธุ์", "mutation test", "mutant", "test strength"), ("mutation", "mutant", "quality")),
+    (("สุ่มทดสอบ", "property based", "invariant", "fuzz", "counterexample"), ("property", "invariant", "seed")),
+    (("ความเร็ว", "ประสิทธิภาพ", "หน่วยความจำ", "latency", "memory profile", "tracemalloc"), ("performance", "profile", "latency", "memory")),
+    (("ถดถอย", "regression", "baseline compare"), ("regression", "baseline", "compare")),
+    (("สาเหตุราก", "root cause", "จัดกลุ่ม error", "failure cluster"), ("root_cause", "failure", "cluster")),
+    (("sbom", "รายการแพ็กเกจความปลอดภัย", "cyclonedx", "bill of materials"), ("sbom", "cyclonedx", "inventory")),
+    (("สัญญาอนุญาต", "license", "gpl", "mit", "copyleft"), ("license", "compliance", "copyleft")),
+    (("ภัยคุกคาม", "threat model", "stride", "attack surface"), ("threat", "stride", "surface")),
+    (("ตรวจสิทธิ์", "rbac audit", "permission matrix", "misconfig"), ("permission", "rbac", "audit")),
+    (("ความสมบูรณ์ไฟล์", "tamper", "sha256 artifact", "artifact integrity"), ("integrity", "sha256", "artifact", "tamper")),
+    (("แตกเป้าหมาย", "แยกงานย่อย", "decompose", "subtask"), ("decompose", "subtask", "dag")),
+    (("เหตุและผล", "causal", "สาเหตุต่อเนื่อง", "impact graph"), ("causal", "root_cause", "graph")),
+    (("เปรียบเทียบกลยุทธ์", "strategy compare", "เลือกแผน", "tradeoff"), ("strategy", "compare", "rank")),
+    (("ความไม่แน่นอน", "ความมั่นใจ", "uncertainty", "abstain", "confidence"), ("uncertainty", "confidence", "abstain")),
+    (("ปรับแผน", "ลดซ้ำ", "parallel schedule", "optimize plan"), ("optimize", "parallel", "deduplicate")),
+    (("บันทึกบทเรียน", "เรียนรู้ผล", "outcome learning", "task memory feedback"), ("learn", "memory", "outcome")),
+)
+
+
+def _expand_goal_terms(lowered_goal: str) -> tuple[list[str], set[str]]:
+    tokens = re.findall(r"[A-Za-z0-9_.\-]+|[\u0E00-\u0E7F]{2,}", lowered_goal)
+    expanded: set[str] = set()
+    for triggers, additions in _GOAL_INTENT_EXPANSIONS:
+        if any(t in lowered_goal for t in triggers):
+            expanded.update(additions)
+    return [t for t in tokens if len(t) >= 2], expanded
+
+
 def select_tools_for_goal(
     registry: Any,
     goal: str,
@@ -74,7 +124,7 @@ def select_tools_for_goal(
 ) -> dict[str, Any]:
     """
     Intelligent, deterministic Tool Selection combining:
-      - Intent & keyword alignment with the goal
+      - Bilingual intent & keyword alignment with the goal (across all 75 capabilities)
       - Role permission & lifecycle gating (READY only in primary plan)
       - Tool Dependency Manager checks
       - Task Memory empirical success rates & failure lessons
@@ -86,7 +136,7 @@ def select_tools_for_goal(
 
     clean_goal = str(goal or "").strip()
     lowered = clean_goal.lower()
-    tokens = [t for t in lowered.replace(",", " ").replace(".", " ").split() if len(t) >= 2]
+    tokens, expanded_terms = _expand_goal_terms(lowered)
 
     track_records: dict[str, dict[str, Any]] = {}
     memory_context: dict[str, Any] = {"matches": [], "episodic_matches": [], "success_examples": [], "failure_lessons": []}
@@ -94,12 +144,19 @@ def select_tools_for_goal(
         track_records = summarize_capability_track_record(conn)
         memory_context = retrieve_relevant_memories(conn, clean_goal, limit=6)
 
-    # Boost capabilities that succeeded in similar past Task Memory entries
+    # Boost capabilities that succeeded in similar past Task Memory entries, penalize recent unrecovered failures
     memory_boosted_caps: set[str] = set()
     for ex in memory_context.get("success_examples", []):
         try:
             for cid in json.loads(ex.get("capability_sequence_json") or "[]"):
                 memory_boosted_caps.add(cid)
+        except Exception:
+            pass
+    memory_penalized_caps: set[str] = set()
+    for fail_ex in memory_context.get("failure_lessons", []):
+        try:
+            for cid in json.loads(fail_ex.get("capability_sequence_json") or "[]"):
+                memory_penalized_caps.add(cid)
         except Exception:
             pass
 
@@ -113,9 +170,10 @@ def select_tools_for_goal(
         if spec is None:
             continue
 
+        cap_id_low = spec.id.lower()
         haystack = " ".join([
-            spec.id,
-            spec.toolkit_id,
+            cap_id_low,
+            spec.toolkit_id.lower(),
             spec.name.lower(),
             spec.description.lower(),
             " ".join(spec.keywords).lower(),
@@ -123,23 +181,33 @@ def select_tools_for_goal(
         keyword_hits: list[str] = []
         raw_score = 0.0
         for kw in spec.keywords:
-            if kw.lower() in lowered:
-                raw_score += 3.0
+            kw_low = kw.lower()
+            if kw_low in lowered:
+                raw_score += 3.5
                 keyword_hits.append(kw)
+            elif kw_low in expanded_terms:
+                raw_score += 2.5
+                keyword_hits.append(f"intent:{kw}")
         for tok in tokens:
             if tok in haystack:
                 raw_score += 1.0
-        if cid in memory_boosted_caps and raw_score > 0:
-            raw_score += 2.0
+        for exp in expanded_terms:
+            if exp in cap_id_low:
+                raw_score += 2.0
 
         if raw_score <= 0:
             continue
 
+        if cid in memory_boosted_caps:
+            raw_score += 2.0
+        if cid in memory_penalized_caps:
+            raw_score = max(0.5, raw_score - 1.0)
+
         dep_check = dep_mgr.check_capability(registry, cid)
         perm = evaluate_capability_permission(spec, user_role)
         hist = track_records.get(cid) or {"runs": 0, "success_rate": 1.0, "avg_latency_ms": 0.0}
-        # Penalize capabilities with low empirical track record (only once >= 2 runs)
-        hist_multiplier = (0.5 + 0.5 * hist["success_rate"]) if hist["runs"] >= 2 else 1.0
+        # Weight empirical track record as Task Memory accumulates real outcomes
+        hist_multiplier = (0.4 + 0.6 * hist["success_rate"]) if hist["runs"] >= 1 else 1.0
         final_score = round(raw_score * hist_multiplier, 3)
 
         rationale: list[str] = []
@@ -147,6 +215,8 @@ def select_tools_for_goal(
             rationale.append(f"keyword_match={','.join(keyword_hits[:4])}")
         if cid in memory_boosted_caps:
             rationale.append("proven_in_task_memory")
+        if cid in memory_penalized_caps:
+            rationale.append("prior_failure_caution")
         if hist["runs"] > 0:
             rationale.append(f"success_rate={hist['success_rate']} ({hist['runs']} runs)")
         if not dep_check["ok"]:
@@ -624,6 +694,15 @@ def execute_orchestrated_plan(
         "recovery_events": recovery_events,
         "context_footprints": context_footprints,
         "total_latency_ms": total_latency_ms,
+        "telemetry": {
+            "waves_count": len(wave_summaries),
+            "recovery_count": len(recovery_events),
+            "memory_recorded": conn is not None,
+            "avg_step_latency_ms": round(
+                sum(float(s.get("latency_ms") or 0.0) for s in step_records) / max(1, len(step_records)),
+                2,
+            ),
+        },
         "external_models_used": False,
         "upstream_failed": upstream_failed,
     }

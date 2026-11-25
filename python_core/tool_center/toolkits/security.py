@@ -7,6 +7,8 @@ and RBAC/governance audit trail inspection.
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -279,13 +281,290 @@ def _handle_dependency_audit(_payload: dict[str, Any], _ctx: dict[str, Any]) -> 
     }
 
 
+_PERMISSIVE_LICENSES = frozenset({"MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "0BSD", "PSF-2.0", "Python-2.0", "Unlicense"})
+_COPYLEFT_LICENSES = frozenset({"GPL-2.0", "GPL-3.0", "AGPL-3.0", "LGPL-2.1", "LGPL-3.0"})
+
+
+def _safe_repo_subpath(raw: str | None) -> Path | None:
+    clean = str(raw or ".").strip() or "."
+    target = (REPO_ROOT / clean).resolve()
+    if target != REPO_ROOT and not target.is_relative_to(REPO_ROOT):
+        return None
+    return target
+
+
+def _collect_sbom_components(target: Path) -> list[dict[str, Any]]:
+    components: list[dict[str, Any]] = []
+    pkg_json = target / "package.json"
+    lock_json = target / "package-lock.json"
+    lock_packages: dict[str, Any] = {}
+    if lock_json.is_file() and lock_json.stat().st_size <= 8_000_000:
+        try:
+            lock_data = json.loads(lock_json.read_text(encoding="utf-8"))
+            lock_packages = lock_data.get("packages") or {}
+        except Exception:
+            lock_packages = {}
+
+    if pkg_json.is_file():
+        try:
+            data = json.loads(pkg_json.read_text(encoding="utf-8"))
+            for section in ("dependencies", "devDependencies"):
+                deps = data.get(section) or {}
+                if isinstance(deps, dict):
+                    for name, spec in sorted(deps.items()):
+                        lock_meta = lock_packages.get(f"node_modules/{name}") or {}
+                        components.append({
+                            "name": str(name),
+                            "version": str(lock_meta.get("version") or spec),
+                            "declared_spec": str(spec),
+                            "ecosystem": "npm",
+                            "scope": "dev" if section == "devDependencies" else "runtime",
+                            "license": lock_meta.get("license") or "UNKNOWN",
+                        })
+        except Exception:
+            pass
+
+    for req_rel in ("requirements.txt", "apps/api/requirements.txt"):
+        rf = target / req_rel
+        if rf.is_file():
+            for line in rf.read_text(encoding="utf-8", errors="replace").splitlines():
+                clean = line.strip()
+                if not clean or clean.startswith(("#", "-")):
+                    continue
+                m = re.match(r"^([A-Za-z0-9_.\-]+)\s*(.*)$", clean)
+                if m:
+                    components.append({
+                        "name": m.group(1),
+                        "version": m.group(2).strip() or "unspecified",
+                        "declared_spec": clean,
+                        "ecosystem": "pypi",
+                        "scope": "runtime",
+                        "license": "UNKNOWN",
+                    })
+    return components
+
+
+def _handle_sbom_generate(payload: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+    target = _safe_repo_subpath(payload.get("target_path"))
+    if target is None:
+        return {"ok": False, "status": "BLOCKED", "error": "Path traversal forbidden.", "output": {}}
+    if not target.exists():
+        return {"ok": False, "status": "FAILED", "error": "Target path does not exist.", "output": {}}
+
+    components = _collect_sbom_components(target)
+    bom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "componentCount": len(components),
+        "components": components,
+    }
+    bom_sha = hashlib.sha256(json.dumps(bom, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return {
+        "ok": True,
+        "status": "COMPLETED",
+        "output": {
+            "bom_format": "CycloneDX",
+            "spec_version": "1.5",
+            "component_count": len(components),
+            "components": components[:200],
+            "bom_sha256": bom_sha,
+        },
+        "summary": f"สร้าง SBOM (CycloneDX 1.5): พบองค์ประกอบซอฟต์แวร์ {len(components)} รายการ",
+    }
+
+
+def _handle_license_compliance(payload: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+    target = _safe_repo_subpath(payload.get("target_path"))
+    if target is None:
+        return {"ok": False, "status": "BLOCKED", "error": "Path traversal forbidden.", "output": {}}
+    if not target.exists():
+        return {"ok": False, "status": "FAILED", "error": "Target path does not exist.", "output": {}}
+
+    components = _collect_sbom_components(target)
+    permissive = 0
+    copyleft_flags: list[dict[str, str]] = []
+    unknown: list[str] = []
+    for c in components:
+        lic = str(c.get("license") or "UNKNOWN")
+        if lic in _PERMISSIVE_LICENSES:
+            permissive += 1
+        elif any(cl in lic for cl in _COPYLEFT_LICENSES):
+            copyleft_flags.append({"package": c["name"], "license": lic, "ecosystem": c["ecosystem"]})
+        else:
+            unknown.append(c["name"])
+
+    return {
+        "ok": True,
+        "status": "COMPLETED",
+        "output": {
+            "total_components": len(components),
+            "permissive_count": permissive,
+            "copyleft_review_count": len(copyleft_flags),
+            "unknown_license_count": len(unknown),
+            "copyleft_flags": copyleft_flags,
+            "unknown_packages": unknown[:50],
+            "compliant": len(copyleft_flags) == 0,
+        },
+        "summary": f"ตรวจสอบ License ({len(components)} รายการ): Permissive {permissive}, Copyleft Review {len(copyleft_flags)}, Unknown {len(unknown)}",
+    }
+
+
+def _handle_threat_model(payload: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+    target = _safe_repo_subpath(payload.get("target_path") or ".")
+    if target is None:
+        return {"ok": False, "status": "BLOCKED", "error": "Path traversal forbidden.", "output": {}}
+    if not target.exists():
+        return {"ok": False, "status": "FAILED", "error": "Target path does not exist.", "output": {}}
+
+    surfaces: list[dict[str, Any]] = []
+    controls_verified: list[str] = []
+
+    server_ts = target / "server.ts"
+    if server_ts.is_file():
+        stxt = server_ts.read_text(encoding="utf-8", errors="replace")
+        has_auth = "requireAuth" in stxt
+        has_admin = "requireAdmin" in stxt
+        has_helmet_or_csp = "helmet" in stxt or "Content-Security-Policy" in stxt or "cors" in stxt
+        if has_auth:
+            controls_verified.append("Express routes enforce requireAuth middleware")
+        if has_admin:
+            controls_verified.append("Privileged endpoints enforce requireAdmin")
+        surfaces.append({
+            "asset": "server.ts",
+            "stride_categories": ["Spoofing", "Elevation of Privilege", "Tampering"],
+            "controls_present": {"requireAuth": has_auth, "requireAdmin": has_admin, "headers_or_cors": has_helmet_or_csp},
+        })
+
+    sandbox_py = target / "python_core" / "tool_center" / "sandbox.py"
+    if sandbox_py.is_file():
+        sb_txt = sandbox_py.read_text(encoding="utf-8", errors="replace")
+        has_ast_guard = "inspect_sandbox_code_policy" in sb_txt
+        has_rlimit = "setrlimit" in sb_txt
+        if has_ast_guard and has_rlimit:
+            controls_verified.append("Python sandbox enforces AST guard + OS rlimits")
+        surfaces.append({
+            "asset": "python_core/tool_center/sandbox.py",
+            "stride_categories": ["Tampering", "Information Disclosure", "Denial of Service"],
+            "controls_present": {"ast_policy_guard": has_ast_guard, "os_rlimit": has_rlimit},
+        })
+
+    return {
+        "ok": True,
+        "status": "COMPLETED",
+        "output": {
+            "methodology": "STRIDE-deterministic",
+            "surface_count": len(surfaces),
+            "surfaces": surfaces,
+            "verified_controls": controls_verified,
+        },
+        "summary": f"วิเคราะห์ Threat Model (STRIDE): ตรวจพบ {len(surfaces)} พื้นผิวหลัก และกลไกป้องกัน {len(controls_verified)} รายการ",
+    }
+
+
+def _handle_permission_audit(_payload: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    registry = ctx["registry"]
+    misconfigured: list[dict[str, str]] = []
+    by_mode: dict[str, int] = {"auto": 0, "approval_required": 0, "admin_only": 0, "disabled": 0}
+    total = 0
+
+    for cid in registry.list_capability_ids():
+        spec = registry.get_spec(cid)
+        if spec is None:
+            continue
+        total += 1
+        by_mode[spec.permission_mode] = by_mode.get(spec.permission_mode, 0) + 1
+        if spec.risk_tier == "external_readonly" and spec.permission_mode == "auto":
+            misconfigured.append({"capability_id": cid, "issue": "external_readonly capability should require approval_required"})
+        if spec.risk_tier == "governance" and spec.permission_mode == "auto" and spec.toolkit_id != "automation":
+            misconfigured.append({"capability_id": cid, "issue": "governance capability should enforce admin_only or approval_required"})
+
+    return {
+        "ok": True,
+        "status": "COMPLETED",
+        "output": {
+            "total_capabilities": total,
+            "permission_distribution": by_mode,
+            "misconfigurations": misconfigured,
+            "rbac_compliant": len(misconfigured) == 0,
+        },
+        "summary": f"ตรวจสอบสิทธิ์ RBAC ทั้ง {total} ความสามารถ: {'ถูกต้องตามนโยบาย' if not misconfigured else f'พบจุดเสี่ยง {len(misconfigured)} รายการ'}",
+    }
+
+
+def _handle_artifact_integrity(payload: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    data_dir: Path = ctx["data_dir"]
+    artifacts = payload.get("artifacts")
+    results: list[dict[str, Any]] = []
+    all_valid = True
+
+    if isinstance(artifacts, list) and artifacts:
+        ws_files = (data_dir / "workspace_files").resolve()
+        sb_root = (data_dir / "sandbox_workspaces").resolve()
+        for item in artifacts[:50]:
+            if not isinstance(item, dict):
+                continue
+            rel = str(item.get("path") or item.get("filename") or "").strip()
+            expected_sha = str(item.get("expected_sha256") or "").strip().lower()
+            content = item.get("content")
+            if isinstance(content, str):
+                actual_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                matched = (actual_sha == expected_sha) if expected_sha else True
+                if expected_sha and not matched:
+                    all_valid = False
+                results.append({"target": rel or "<inline>", "sha256": actual_sha, "expected_sha256": expected_sha or None, "verified": matched})
+                continue
+
+            if not rel or ".." in Path(rel).parts or rel.startswith("/"):
+                all_valid = False
+                results.append({"target": rel, "verified": False, "error": "Invalid or escaping artifact path"})
+                continue
+            cand = (ws_files / rel).resolve()
+            if not cand.exists() or not cand.is_relative_to(ws_files):
+                cand = (sb_root / rel).resolve()
+                if not cand.is_relative_to(sb_root):
+                    all_valid = False
+                    results.append({"target": rel, "verified": False, "error": "Path escapes allowed artifact directories"})
+                    continue
+            if not cand.is_file():
+                all_valid = False
+                results.append({"target": rel, "verified": False, "error": "Artifact file missing"})
+                continue
+            actual_sha = hashlib.sha256(cand.read_bytes()).hexdigest()
+            matched = (actual_sha == expected_sha) if expected_sha else True
+            if expected_sha and not matched:
+                all_valid = False
+            results.append({"target": rel, "size_bytes": cand.stat().st_size, "sha256": actual_sha, "expected_sha256": expected_sha or None, "verified": matched})
+    else:
+        ws_files = (data_dir / "workspace_files").resolve()
+        if ws_files.exists():
+            for fp in sorted(ws_files.iterdir()):
+                if fp.is_file():
+                    results.append({
+                        "target": fp.name,
+                        "size_bytes": fp.stat().st_size,
+                        "sha256": hashlib.sha256(fp.read_bytes()).hexdigest(),
+                        "verified": True,
+                    })
+
+    return {
+        "ok": True,
+        "status": "COMPLETED",
+        "output": {
+            "artifact_count": len(results),
+            "all_verified": all_valid,
+            "artifacts": results,
+        },
+        "summary": f"ตรวจสอบความสมบูรณ์ Artifact {len(results)} รายการ: {'ผ่านทั้งหมด' if all_valid else 'พบความคลาดเคลื่อน'}",
+    }
+
+
 def register_security_toolkit(registry: Any) -> None:
     manifest = ToolkitManifest(
         id="security",
         name="Security Toolkit",
         thai_name="ชุดเครื่องมือความปลอดภัยและธรรมาภิบาล",
-        version="1.1.0",
-        description="ตรวจสอบการฝังโมเดล AI ภายนอก, ตรวจ Dependencies, สแกน Secret/Path Traversal และตรวจ Audit Logs (RBAC)",
+        version="1.2.0",
+        description="ตรวจสอบการฝังโมเดล AI ภายนอก, SBOM, License Compliance, Threat Model, Permission Audit, Artifact Integrity และ Secret/Path Scan",
         category="security",
         dependencies=("apps.core.intelligence.cognitive_core", "python_core.tools_engine"),
         default_permission="auto",
@@ -295,7 +574,7 @@ def register_security_toolkit(registry: Any) -> None:
             "python_core/tools_engine.py",
             "apps/core/workflow/governance.py",
         ),
-        documentation="ใช้สแกนความปลอดภัยเชิงสถิต ตรวจสอบ Dependency และตรวจ Audit Logs สำหรับผู้ดูแลระบบ",
+        documentation="ใช้สแกนความปลอดภัยเชิงสถิต, Supply Chain (SBOM/License), Threat Model, Permission Audit และตรวจ Audit Logs",
     )
 
     specs = [
@@ -396,6 +675,106 @@ def register_security_toolkit(registry: Any) -> None:
                 keywords=("governance", "rbac", "audit", "admin", "สิทธิ์", "ความปลอดภัย"),
             ),
             _handle_governance_audit,
+        ),
+        (
+            CapabilitySpec(
+                id="security.sbom_generate",
+                toolkit_id="security",
+                name="สร้างรายการองค์ประกอบซอฟต์แวร์ (SBOM CycloneDX)",
+                version="1.0.0",
+                description="สร้าง CycloneDX 1.5 SBOM จาก package.json, package-lock.json และ requirements.txt พร้อม SHA-256",
+                input_schema={"type": "object", "properties": {"target_path": {"type": "string"}}},
+                output_schema={"type": "object", "required": ["bom_format", "component_count", "components", "bom_sha256"]},
+                dependencies=(),
+                permission_mode="auto",
+                risk_tier="local_readonly",
+                lifecycle_status="READY",
+                bound_modules=("python_core/tool_center/toolkits/security.py",),
+                documentation="สร้างรายการซอฟต์แวร์และไลบรารีที่ใช้ในโปรเจกต์เพื่อตรวจ Supply Chain",
+                example_input={"target_path": "."},
+                keywords=("sbom", "supply_chain", "cyclonedx", "dependencies", "ความปลอดภัย"),
+            ),
+            _handle_sbom_generate,
+        ),
+        (
+            CapabilitySpec(
+                id="security.license_compliance",
+                toolkit_id="security",
+                name="ตรวจสอบความสอดคล้องของ License (License Compliance)",
+                version="1.0.0",
+                description="จำแนก License ของแพ็กเกจใน Lockfile/Manifests เป็น Permissive, Copyleft Review หรือ Unknown",
+                input_schema={"type": "object", "properties": {"target_path": {"type": "string"}}},
+                output_schema={"type": "object", "required": ["total_components", "permissive_count", "copyleft_review_count", "compliant"]},
+                dependencies=(),
+                permission_mode="auto",
+                risk_tier="local_readonly",
+                lifecycle_status="READY",
+                bound_modules=("python_core/tool_center/toolkits/security.py",),
+                documentation="ตรวจสอบความเสี่ยงด้าน License ของแพ็กเกจทั้งหมด",
+                example_input={"target_path": "."},
+                keywords=("license", "compliance", "oss", "legal", "สัญญาอนุญาต"),
+            ),
+            _handle_license_compliance,
+        ),
+        (
+            CapabilitySpec(
+                id="security.threat_model",
+                toolkit_id="security",
+                name="วิเคราะห์ Threat Model เชิงโครงสร้าง (STRIDE Surface Analysis)",
+                version="1.0.0",
+                description="ตรวจพื้นผิวรับข้อมูล Middleware Auth/Admin และ Sandbox AST/rlimit Controls ตามกรอบ STRIDE",
+                input_schema={"type": "object", "properties": {"target_path": {"type": "string"}}},
+                output_schema={"type": "object", "required": ["methodology", "surface_count", "surfaces", "verified_controls"]},
+                dependencies=(),
+                permission_mode="auto",
+                risk_tier="local_readonly",
+                lifecycle_status="READY",
+                bound_modules=("python_core/tool_center/toolkits/security.py",),
+                documentation="วิเคราะห์ขอบเขตความปลอดภัยของเซิร์ฟเวอร์และ Sandbox เชิงกำหนด",
+                example_input={"target_path": "."},
+                keywords=("threat", "stride", "surface", "security", "ภัยคุกคาม"),
+            ),
+            _handle_threat_model,
+        ),
+        (
+            CapabilitySpec(
+                id="security.permission_audit",
+                toolkit_id="security",
+                name="ตรวจสอบสิทธิ์การเข้าถึง Capability ทั้งระบบ (Permission Audit)",
+                version="1.0.0",
+                description="ตรวจ RBAC mode และ Risk Tier ของความสามารถทุกตัวใน Tool Center เพื่อป้องกันสิทธิ์รั่วไหล",
+                input_schema={"type": "object", "properties": {}},
+                output_schema={"type": "object", "required": ["total_capabilities", "permission_distribution", "misconfigurations", "rbac_compliant"]},
+                dependencies=(),
+                permission_mode="auto",
+                risk_tier="local_readonly",
+                lifecycle_status="READY",
+                bound_modules=("python_core/tool_center/toolkits/security.py",),
+                documentation="ตรวจสอบว่าเครื่องมือที่มีความเสี่ยงสูงอยู่ภายใต้ admin_only หรือ approval_required",
+                example_input={},
+                keywords=("permission", "rbac", "audit", "access", "สิทธิ์"),
+            ),
+            _handle_permission_audit,
+        ),
+        (
+            CapabilitySpec(
+                id="security.artifact_integrity",
+                toolkit_id="security",
+                name="ทวนสอบแฮชและความสมบูรณ์ของ Artifact (Artifact Integrity)",
+                version="1.0.0",
+                description="คำนวณ SHA-256 และเทียบกับ expected_sha256 สำหรับผลผลิตใน workspace_files/sandbox_workspaces",
+                input_schema={"type": "object", "properties": {"artifacts": {"type": "array"}}},
+                output_schema={"type": "object", "required": ["artifact_count", "all_verified", "artifacts"]},
+                dependencies=(),
+                permission_mode="auto",
+                risk_tier="local_readonly",
+                lifecycle_status="READY",
+                bound_modules=("python_core/tool_center/toolkits/security.py",),
+                documentation="ตรวจสอบว่าไฟล์ผลลัพธ์ไม่ถูกดัดแปลงระหว่างทาง",
+                example_input={"artifacts": [{"filename": "demo.txt", "content": "ok", "expected_sha256": "2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df"}]},
+                keywords=("artifact", "integrity", "sha256", "checksum", "ความสมบูรณ์"),
+            ),
+            _handle_artifact_integrity,
         ),
     ]
 

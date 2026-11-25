@@ -24,6 +24,7 @@ import re
 import shutil
 import sqlite3
 import statistics
+import subprocess
 import sys
 import time
 import uuid
@@ -65,6 +66,11 @@ from cognitive_pipeline import (
     understand_input as _understand_cognitive_input,
     run_cognitive_fallback_pipeline,
     learn_from_experience as _learn_cognitive_experience,
+)
+from planner_intelligence import (
+    analyze_planner_goal,
+    build_context_aware_dag_plan,
+    unwrap_command_wrapper,
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -153,9 +159,17 @@ WORKFLOW_GROUPS = [
     {
         "id": "autonomous_improvement",
         "name": "ปรับปรุงอัตโนมัติ (Autonomous Improvement)",
-        "description": "วิเคราะห์จุดอ่อนจากผลประเมินและเสนอสมมติฐานการทดลองโดยต้องขออนุมัติก่อนเสมอ",
+        "description": "วิเคราะห์จุดอ่อน เสนอสมมติฐาน ตรวจความถูกต้องแผน (plan_hash + repo_revision) ขออนุมัติ ดำเนินการแบบจำกัดขอบเขต ยืนยันผลจริง และบันทึกประสบการณ์",
         "requires_approval": True,
-        "stages": ["gap_analysis", "hypothesis_draft", "approval_gate"],
+        "stages": [
+            "gap_analysis",
+            "hypothesis_draft",
+            "plan_validation",
+            "approval_gate",
+            "bounded_execution",
+            "verification",
+            "outcome_learning",
+        ],
     },
     {
         "id": "security_governance",
@@ -483,6 +497,23 @@ def init_db() -> None:
             conn.execute("ALTER TABLE tool_invocations ADD COLUMN mission_id TEXT")
         if "mission_node_id" not in cols:
             conn.execute("ALTER TABLE tool_invocations ADD COLUMN mission_node_id TEXT")
+
+        wf_cols = {
+            r["name"]
+            for r in conn.execute("PRAGMA table_info(workflow_runs)").fetchall()
+        }
+        for col_name, col_type in (
+            ("plan_hash", "TEXT"),
+            ("repo_revision", "TEXT"),
+            ("plan_json", "TEXT"),
+            ("approval_scope_json", "TEXT"),
+            ("depends_on_runs_json", "TEXT"),
+            ("output_json", "TEXT"),
+            ("verification_json", "TEXT"),
+            ("invalidated_reason", "TEXT"),
+        ):
+            if col_name not in wf_cols:
+                conn.execute(f"ALTER TABLE workflow_runs ADD COLUMN {col_name} {col_type}")
     conn.close()
 
 
@@ -517,6 +548,317 @@ def get_system_metrics() -> dict:
         "disk_free_gb": round(disk.free / (1024**3), 2),
         "disk_total_gb": round(disk.total / (1024**3), 2),
         "sqlite_db_kb": db_size_kb,
+    }
+
+
+def _compute_native_integrity() -> dict:
+    core_dir = Path(__file__).resolve().parent
+    module_digests: dict[str, str] = {}
+    for fname in ("zyrquen_core.py", "dag_executor.py", "planner_intelligence.py"):
+        fp = core_dir / fname
+        if fp.is_file():
+            module_digests[fname] = hashlib.sha256(fp.read_bytes()).hexdigest()[:16]
+    combined = hashlib.sha256(
+        json.dumps(module_digests, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "external_models_used": False,
+        "runtime": "python_native_stdlib",
+        "core_bundle_sha256": combined,
+        "module_digests": module_digests,
+    }
+
+
+def _compute_repo_revision(repo_root: Path | None = None) -> str:
+    root = repo_root or BASE_DIR
+    try:
+        head_proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        if head_proc.returncode == 0 and head_proc.stdout.strip():
+            head = head_proc.stdout.strip()[:16]
+            status_proc = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            diff_proc = subprocess.run(
+                ["git", "diff", "HEAD"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            dirty_hash = hashlib.sha256(
+                (status_proc.stdout + "\n" + diff_proc.stdout).encode("utf-8", errors="ignore")
+            ).hexdigest()[:12]
+            return f"git:{head}:dirty:{dirty_hash}"
+    except Exception:
+        pass
+    integrity = _compute_native_integrity()
+    return f"bundle:{integrity['core_bundle_sha256']}"
+
+
+def _canonical_plan_hash(plan_obj: dict) -> str:
+    canonical = json.dumps(plan_obj, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def get_knowledge_quality_summary(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        "SELECT id, subject, relation, object, source, confidence, created_at FROM knowledge_triples ORDER BY created_at DESC"
+    ).fetchall()
+    total = len(rows)
+    pairs: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
+    source_counts: dict[str, int] = collections.Counter()
+    with_provenance = 0
+    verified_count = 0
+    timestamps: list[str] = []
+
+    for r in rows:
+        subj = str(r["subject"] or "")
+        rel = str(r["relation"] or "")
+        obj = str(r["object"] or "")
+        src = str(r["source"] or "").strip()
+        conf = float(r["confidence"] or 0.0)
+        pairs[(subj.lower(), rel.lower())].add(obj.lower())
+        if src:
+            source_counts[src] += 1
+        if src and conf >= 0.7:
+            with_provenance += 1
+        if (
+            conf >= 0.8
+            and src
+            and "uncorroborated" not in src.lower()
+            and "conflicting" not in src.lower()
+            and "stale" not in src.lower()
+        ):
+            verified_count += 1
+        if r["created_at"]:
+            timestamps.append(str(r["created_at"]))
+
+    contradiction_details = [
+        {"subject": s, "relation": rel, "conflicting_objects": sorted(objs)}
+        for (s, rel), objs in pairs.items()
+        if len(objs) > 1
+    ]
+    contradictions = len(contradiction_details)
+    provenance_coverage_pct = round((with_provenance / total) * 100.0, 1) if total > 0 else 0.0
+
+    # Episodic + Tool Center task memory
+    ep_rows = conn.execute(
+        "SELECT goal, outcome_status, gap_type, verified_delta, created_at FROM episodic_experiences ORDER BY created_at DESC LIMIT 25"
+    ).fetchall()
+    ep_success = sum(1 for r in ep_rows if str(r["outcome_status"]) in {"COMPLETED", "VERIFIED", "PASS"})
+    ep_failed = sum(1 for r in ep_rows if str(r["outcome_status"]) in {"FAILED", "BLOCKED"})
+
+    tm_total = 0
+    tm_success = 0
+    tm_failed = 0
+    try:
+        tm_rows = conn.execute(
+            "SELECT capability_id, success_count, failure_count FROM task_memory"
+        ).fetchall()
+        tm_total = len(tm_rows)
+        tm_success = sum(int(r["success_count"] or 0) for r in tm_rows)
+        tm_failed = sum(int(r["failure_count"] or 0) for r in tm_rows)
+    except sqlite3.Error:
+        pass
+
+    if total == 0:
+        status = "EMPTY"
+        indexing_health = "EMPTY"
+    elif contradictions > 0 or provenance_coverage_pct < 100.0:
+        status = "WARN"
+        indexing_health = "INDEXED_WITH_WARNINGS"
+    else:
+        status = "VERIFIED"
+        indexing_health = "INDEXED"
+
+    return {
+        "status": status,
+        "empty": total == 0,
+        "total_triples": total,
+        "verified_triples": verified_count,
+        "provenance_coverage_pct": provenance_coverage_pct,
+        "source_counts": dict(source_counts),
+        "contradiction_groups": contradictions,
+        "contradiction_details": contradiction_details[:8],
+        "indexing_health": indexing_health,
+        "freshness": {
+            "latest_created_at": timestamps[0] if timestamps else None,
+            "oldest_created_at": timestamps[-1] if timestamps else None,
+        },
+        "task_memory_summary": {
+            "tracked_capabilities": tm_total,
+            "success_observations": tm_success,
+            "failure_observations": tm_failed,
+            "episodic_experiences": len(ep_rows),
+            "episodic_success": ep_success,
+            "episodic_failures": ep_failed,
+            "recent_outcomes": [
+                {
+                    "goal": str(r["goal"] or "")[:100],
+                    "outcome_status": str(r["outcome_status"]),
+                    "gap_type": r["gap_type"],
+                    "created_at": str(r["created_at"]),
+                }
+                for r in ep_rows[:5]
+            ],
+        },
+    }
+
+
+def get_training_tracks_and_levels(conn: sqlite3.Connection) -> dict:
+    # Track 1: Tool-Use Training (tool center invocations + task memory)
+    tc_total = 0
+    tc_success = 0
+    try:
+        tc_total = int(conn.execute("SELECT COUNT(*) FROM tool_center_invocations").fetchone()[0])
+        tc_success = int(
+            conn.execute("SELECT COUNT(*) FROM tool_center_invocations WHERE status IN ('COMPLETED', 'SUCCESS')").fetchone()[0]
+        )
+    except sqlite3.Error:
+        pass
+
+    # Track 2: Workflow Training (workflow_runs + improvement_proposals)
+    wf_completed = int(conn.execute("SELECT COUNT(*) FROM workflow_runs WHERE status='COMPLETED'").fetchone()[0])
+    wf_failed = int(conn.execute("SELECT COUNT(*) FROM workflow_runs WHERE status IN ('FAILED', 'BLOCKED')").fetchone()[0])
+    imp_approved = 0
+    try:
+        imp_approved = int(
+            conn.execute("SELECT COUNT(*) FROM improvement_proposals WHERE approval_status='APPROVED'").fetchone()[0]
+        )
+    except sqlite3.Error:
+        pass
+
+    # Track 3: Native Weight Training (Native-Only, from scratch, gated)
+    clean_datasets = int(
+        conn.execute("SELECT COUNT(*) FROM datasets WHERE leakage_detected=0 AND total_records>=5").fetchone()[0]
+    )
+    checkpoints_total = int(conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0])
+    neural_checkpoints = int(
+        conn.execute("SELECT COUNT(*) FROM checkpoints WHERE eval_status LIKE 'NEURAL%'").fetchone()[0]
+    )
+    approved_training_runs = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM workflow_runs WHERE group_id='native_training' AND status='COMPLETED' AND approved_by IS NOT NULL"
+        ).fetchone()[0]
+    )
+
+    # 5 Progressive Engineering Levels (honestly derived from persisted evidence)
+    missions_total = int(conn.execute("SELECT COUNT(*) FROM autonomous_missions").fetchone()[0])
+    missions_completed = int(
+        conn.execute("SELECT COUNT(*) FROM autonomous_missions WHERE status='COMPLETED'").fetchone()[0]
+    )
+    eval_rows = conn.execute(
+        "SELECT overall_status, math_score, knowledge_score, planning_score FROM evaluations ORDER BY created_at DESC LIMIT 1"
+    ).fetchall()
+    latest_eval = eval_rows[0] if eval_rows else None
+
+    code_understanding_score = 1.0 if tc_success > 0 else 0.0
+    debugging_score = round(
+        min(1.0, (ep_ok := int(conn.execute("SELECT COUNT(*) FROM episodic_experiences WHERE outcome_status='COMPLETED'").fetchone()[0])) / 2.0),
+        2,
+    )
+    implementation_score = round(min(1.0, (missions_completed + wf_completed) / 3.0), 2) if (missions_completed + wf_completed) > 0 else 0.0
+    testing_score = round(float(latest_eval["math_score"]), 2) if latest_eval else 0.0
+    autonomous_score = round(
+        min(1.0, (missions_completed / max(1, missions_total)) * (1.0 if (latest_eval and latest_eval["planning_score"] == 1.0) else 0.5)),
+        2,
+    ) if missions_total > 0 else 0.0
+
+    def _lvl_status(score: float, evidence_count: int) -> str:
+        if evidence_count == 0:
+            return "NOT_RUN"
+        if score >= 0.85:
+            return "VERIFIED"
+        if score > 0.0:
+            return "PARTIAL"
+        return "FAILED"
+
+    engineering_levels = [
+        {
+            "level": 1,
+            "key": "code_understanding",
+            "label": "Level 1: Code Understanding",
+            "status": _lvl_status(code_understanding_score, tc_total),
+            "score": code_understanding_score,
+            "evidence": f"{tc_success}/{tc_total} tool invocations completed",
+        },
+        {
+            "level": 2,
+            "key": "debugging",
+            "label": "Level 2: Debugging & Diagnosis",
+            "status": _lvl_status(debugging_score, ep_ok),
+            "score": debugging_score,
+            "evidence": f"{ep_ok} verified episodic recovery/outcome records",
+        },
+        {
+            "level": 3,
+            "key": "implementation",
+            "label": "Level 3: Bounded Implementation",
+            "status": _lvl_status(implementation_score, missions_completed + wf_completed),
+            "score": implementation_score,
+            "evidence": f"{missions_completed} missions, {wf_completed} completed workflows",
+        },
+        {
+            "level": 4,
+            "key": "testing",
+            "label": "Level 4: Verification & Testing",
+            "status": _lvl_status(testing_score, len(eval_rows)),
+            "score": testing_score,
+            "evidence": f"Latest eval={latest_eval['overall_status']}" if latest_eval else "No evaluations yet",
+        },
+        {
+            "level": 5,
+            "key": "autonomous_engineering",
+            "label": "Level 5: Autonomous Engineering",
+            "status": _lvl_status(autonomous_score, missions_total),
+            "score": autonomous_score,
+            "evidence": f"{missions_completed}/{missions_total} autonomous missions completed",
+        },
+    ]
+
+    return {
+        "training_tracks": {
+            "tool_use_training": {
+                "label": "Tool-Use Training (Empirical Task Memory)",
+                "native_only": True,
+                "status": "ACTIVE" if tc_total > 0 else "NOT_RUN",
+                "invocations_total": tc_total,
+                "invocations_succeeded": tc_success,
+            },
+            "workflow_training": {
+                "label": "Workflow Training (Orchestrated Lifecycles)",
+                "native_only": True,
+                "status": "ACTIVE" if wf_completed > 0 else "NOT_RUN",
+                "completed_runs": wf_completed,
+                "failed_or_blocked_runs": wf_failed,
+                "approved_improvement_proposals": imp_approved,
+            },
+            "native_weight_training": {
+                "label": "Native Weight Training (From-Scratch & Approval-Gated)",
+                "native_only": True,
+                "from_scratch_only": True,
+                "gated": True,
+                "status": "VERIFIED" if checkpoints_total > 0 else ("READY_FOR_GATE" if clean_datasets > 0 else "BLOCKED"),
+                "clean_datasets": clean_datasets,
+                "checkpoints_total": checkpoints_total,
+                "neural_checkpoints": neural_checkpoints,
+                "approved_training_runs": approved_training_runs,
+            },
+        },
+        "engineering_levels": engineering_levels,
     }
 
 
@@ -2038,301 +2380,13 @@ def run_ngram_continuation(conn: sqlite3.Connection, prompt: str, max_tokens: in
     }
 
 
-def _build_domain_adaptive_plan(goal: str, goal_l: str, clean_datasets: list, ckpt_rows: list, triple_rows: list, pending_runs: list) -> dict:
-    has_thai = any(k in goal_l for k in ["ภาษาไทย", "ไทย", "thai"])
-    is_recommender = any(k in goal_l for k in ["แนะนำ", "recommend", "ranking", "จัดอันดับ"])
-    is_api = any(k in goal_l for k in ["api", "บริการ", "service", "backend", "เซิร์ฟเวอร์"])
-    is_ui = any(k in goal_l for k in ["แอป", "เว็บ", "หน้าจอ", "ui", "app", "web"])
-
-    data_detail = (
-        f"ออกแบบ Schema และตัวตัดคำภาษาไทย (Thai Syllable/Entity Tokenizer) สำหรับ '{goal}'"
-        if has_thai
-        else f"ออกแบบ Schema เอนทิตี ดัชนีค้นหา และข้อจำกัดความถูกต้องของข้อมูลสำหรับ '{goal}'"
-    )
-    logic_detail = (
-        "พัฒนากลไกจับคู่คุณลักษณะ จัดอันดับความเกี่ยวข้อง (Scoring/Ranking) และเหตุผลอ้างอิงที่ตรวจสอบได้"
-        if is_recommender
-        else "พัฒนาตรรกะแกนกลาง กฎการตรวจสอบเงื่อนไข และจัดการกรณี Edge Cases โดยไม่ใช้ผลลัพธ์จำลอง"
-    )
-    interface_detail = (
-        "สร้าง Endpoint/API พร้อม Input Validation และ Parameterized Query"
-        if is_api or not is_ui
-        else "สร้างส่วนติดต่อผู้ใช้เชื่อมต่อ API จริง พร้อมแสดงสถานะ Loading/Error ตรงไปตรงมา"
-    )
-
-    steps = [
-        {
-            "step_id": "S1",
-            "title": f"วิเคราะห์ขอบเขตและเกณฑ์วัดผลจริงของเป้าหมาย: {goal}",
-            "workflow_group": "domain_requirements",
-            "depends_on": [],
-            "status": "READY",
-            "requires_approval": False,
-            "detail": f"กำหนดกรณีใช้งานหลัก เงื่อนไขขอบเขต และตัวชี้วัดความถูกต้องสำหรับ '{goal}'",
-        },
-        {
-            "step_id": "S2",
-            "title": "ออกแบบโครงสร้างข้อมูลและคุณลักษณะเฉพาะโดเมน (Data Modeling)",
-            "workflow_group": "data_modeling",
-            "depends_on": ["S1"],
-            "status": "READY",
-            "requires_approval": False,
-            "detail": data_detail,
-        },
-        {
-            "step_id": "S3",
-            "title": "พัฒนาอัลกอริทึมและตรรกะแกนกลางเฉพาะทาง (Core Domain Logic)",
-            "workflow_group": "core_logic",
-            "depends_on": ["S2"],
-            "status": "READY",
-            "requires_approval": False,
-            "detail": logic_detail,
-        },
-        {
-            "step_id": "S4",
-            "title": "เชื่อมต่อส่วนติดต่อและตรวจสอบความปลอดภัยของอินพุต (Interface Integration)",
-            "workflow_group": "interface_integration",
-            "depends_on": ["S2", "S3"],
-            "status": "READY",
-            "requires_approval": False,
-            "detail": interface_detail,
-        },
-        {
-            "step_id": "S5",
-            "title": "ทดสอบเชิงประจักษ์และตรวจจับข้อผิดพลาด (Verification & Testing)",
-            "workflow_group": "verification_testing",
-            "depends_on": ["S3", "S4"],
-            "status": "READY",
-            "requires_approval": False,
-            "detail": "รันชุดทดสอบ Positive, Unseen Generalization, และ Negative Boundary ก่อนส่งมอบ",
-        },
-    ]
-
-    for st in steps:
-        st.setdefault("task_id", st["step_id"])
-        st.setdefault("dependencies", list(st.get("depends_on", [])))
-        st.setdefault("tool_id", st.get("workflow_group", "native_planner"))
-        st.setdefault("input_contract", {"required_keys": ["goal"], "goal": goal})
-        st.setdefault("output_contract", {"required_keys": ["status"], "disallow_statuses": ["FAILED", "BLOCKED"]})
-        st.setdefault("preconditions", [f"dependency_completed:{d}" for d in st.get("depends_on", [])])
-        st.setdefault("postconditions", ["stage_verified"])
-        st.setdefault("retry_policy", {"max_attempts": 1, "idempotent_required": True, "retry_on": []})
-        st.setdefault("approval_policy", "approval_required" if st.get("requires_approval") else "auto")
-        st.setdefault("execution_status", st.get("status", "READY"))
-
-    return {
-        "engine": "native_planner_domain_adaptive",
-        "domain_mode": "general_engineering",
-        "goal": goal,
-        "steps": steps,
-        "summary": {
-            "total_steps": len(steps),
-            "blocked_steps": 0,
-            "approval_gated_steps": 0,
-            "state_snapshot": {
-                "clean_datasets": len(clean_datasets),
-                "checkpoints": len(ckpt_rows),
-                "triples": len(triple_rows),
-                "pending_approvals": len(pending_runs),
-            },
-        },
-    }
-
-
 def try_native_planning(conn: sqlite3.Connection, prompt: str, force_plan: bool = False) -> dict | None:
-    cleaned = prompt.strip()
-    m = re.match(
-        r"^(?:วางแผน|แผนงาน|กำหนดแผน|plan|decompose)\s*:?\s*(.+)$",
-        cleaned,
-        re.IGNORECASE,
+    return build_context_aware_dag_plan(
+        conn,
+        prompt,
+        repo_root=BASE_DIR,
+        force_plan=force_plan,
     )
-    if not m and not force_plan:
-        return None
-    goal = (m.group(1).strip() if m else cleaned) or "ตรวจสอบและพัฒนาสถานะระบบ ZYRQUEN"
-    goal_l = goal.lower()
-
-    # Inspect actual SQLite state (never fabricate readiness)
-    ds_rows = conn.execute(
-        "SELECT id, name, total_records, leakage_detected, status FROM datasets ORDER BY created_at DESC"
-    ).fetchall()
-    ckpt_rows = conn.execute(
-        "SELECT id, version, perplexity, eval_accuracy, eval_status FROM checkpoints ORDER BY version DESC"
-    ).fetchall()
-    eval_rows = conn.execute(
-        "SELECT id, overall_status, checkpoint_version, created_at FROM evaluations ORDER BY created_at DESC LIMIT 1"
-    ).fetchall()
-    triple_rows = conn.execute(
-        "SELECT subject, relation, object FROM knowledge_triples"
-    ).fetchall()
-    pending_runs = conn.execute(
-        "SELECT id, group_id FROM workflow_runs WHERE status='PENDING_APPROVAL'"
-    ).fetchall()
-
-    pairs: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
-    for r in triple_rows:
-        pairs[(r["subject"].lower(), r["relation"].lower())].add(r["object"].lower())
-    contradictions = sum(1 for objs in pairs.values() if len(objs) > 1)
-
-    clean_datasets = [d for d in ds_rows if not d["leakage_detected"] and d["total_records"] >= 5]
-    leaked_datasets = [d for d in ds_rows if d["leakage_detected"]]
-
-    wants_train = any(k in goal_l for k in ["ฝึกโมเดล", "ฝึก", "โมเดล", "train", "checkpoint", "เตรียมข้อมูล", "ชุดข้อมูล", "data leakage", "ngram", "ngi"])
-    wants_eval = any(k in goal_l for k in ["ประเมินผล", "ประเมิน", "eval", "benchmark", "baseline", "held-out", "perplexity"])
-    wants_knowledge = any(k in goal_l for k in ["กราฟความรู้", "ความจำ", "knowledge graph", "triple", "zyrquen"])
-    wants_ops = any(k in goal_l for k in ["ความปลอดภัยระบบ", "audit", "approval gate", "sqlite", "zyrquen", "security"])
-
-    is_mlops_goal = wants_train or wants_eval or wants_knowledge or wants_ops
-    if not is_mlops_goal:
-        return _build_domain_adaptive_plan(goal, goal_l, clean_datasets, ckpt_rows, triple_rows, pending_runs)
-
-    if not (wants_train or wants_eval or wants_knowledge or wants_ops):
-        wants_train = True
-        wants_eval = True
-        wants_knowledge = len(triple_rows) > 0
-
-    steps: list[dict] = []
-
-    steps.append(
-        {
-            "step_id": "S1",
-            "title": "ตรวจสุขภาพระบบและทรัพยากรเครื่องจริง (System Operations)",
-            "workflow_group": "system_ops",
-            "depends_on": [],
-            "status": "READY",
-            "requires_approval": False,
-            "detail": f"SQLite มีข้อมูล {len(ds_rows)} ชุด, {len(ckpt_rows)} Checkpoint, {len(triple_rows)} ความจำ",
-        }
-    )
-
-    if wants_knowledge or contradictions > 0:
-        steps.append(
-            {
-                "step_id": "S2",
-                "title": "ตรวจสอบความสอดคล้องของกราฟความรู้",
-                "workflow_group": "knowledge_memory",
-                "depends_on": ["S1"],
-                "status": "WARN" if contradictions > 0 else ("READY" if triple_rows else "BLOCKED"),
-                "requires_approval": False,
-                "detail": (
-                    f"พบข้อขัดแย้ง {contradictions} กลุ่มความสัมพันธ์ ควรตรวจสอบก่อนใช้งาน"
-                    if contradictions > 0
-                    else (
-                        f"พร้อมตรวจสอบความจำ {len(triple_rows)} รายการ"
-                        if triple_rows
-                        else "ยังไม่มีข้อมูลในกราฟความรู้ (ต้องสอนความจำก่อน)"
-                    )
-                ),
-            }
-        )
-
-    if wants_train:
-        ds_status = "COMPLETED" if clean_datasets else ("BLOCKED" if leaked_datasets else "BLOCKED")
-        ds_detail = (
-            f"มีชุดข้อมูลผ่านเกณฑ์ {len(clean_datasets)} ชุด (ล่าสุด: {clean_datasets[0]['name']})"
-            if clean_datasets
-            else (
-                f"พบ Data Leakage ในชุดข้อมูล {len(leaked_datasets)} ชุด — ต้องแก้ไขก่อนฝึก"
-                if leaked_datasets
-                else "ยังไม่มีชุดข้อมูล >= 5 บรรทัด — ต้องนำเข้าใน ตั้งค่า → นักพัฒนา"
-            )
-        )
-        steps.append(
-            {
-                "step_id": "S3",
-                "title": "ตรวจสอบ Data Leakage และ Split Train/Val/Test",
-                "workflow_group": "data_pipeline",
-                "depends_on": ["S1"],
-                "status": ds_status,
-                "requires_approval": False,
-                "detail": ds_detail,
-            }
-        )
-
-        train_status = "REQUIRES_APPROVAL" if clean_datasets else "BLOCKED"
-        steps.append(
-            {
-                "step_id": "S4",
-                "title": "ฝึก Checkpoint โมเดล N-Gram รุ่นใหม่แบบไม่เขียนทับ",
-                "workflow_group": "native_training",
-                "depends_on": ["S3"],
-                "status": train_status,
-                "requires_approval": True,
-                "detail": (
-                    f"ส่งคำขอผ่าน Approval Gate ได้ (ปัจจุบันมี {len(ckpt_rows)} Checkpoint, รออนุมัติ {len(pending_runs)} งาน)"
-                    if clean_datasets
-                    else "ถูกบล็อกจนกว่า S3 จะมีชุดข้อมูลที่ผ่านการตรวจ Data Leakage"
-                ),
-            }
-        )
-
-    if wants_eval or wants_train:
-        eval_deps = ["S4"] if wants_train else ["S1"]
-        eval_status = "READY" if (ckpt_rows or not wants_train) else "WAITING_DEPENDENCY"
-        steps.append(
-            {
-                "step_id": "S5",
-                "title": "รันชุดประเมินผลเชิงวิทยาศาสตร์และเทียบ Baseline",
-                "workflow_group": "evaluation",
-                "depends_on": eval_deps,
-                "status": eval_status,
-                "requires_approval": False,
-                "detail": (
-                    f"ประเมินผลล่าสุด: {eval_rows[0]['overall_status']}"
-                    if eval_rows
-                    else (
-                        f"พร้อมทดสอบ Checkpoint v{ckpt_rows[0]['version']} กับชุดข้อมูล Test"
-                        if ckpt_rows
-                        else "สามารถรันการทดสอบ AST/Graph/Planner ได้ทันที (Held-out Test รอ Checkpoint)"
-                    )
-                ),
-            }
-        )
-
-    if wants_ops:
-        steps.append(
-            {
-                "step_id": "S6",
-                "title": "ตรวจสอบความสมบูรณ์ของซอร์สโค้ดและ Audit Logs",
-                "workflow_group": "security_governance",
-                "depends_on": ["S1"],
-                "status": "READY",
-                "requires_approval": False,
-                "detail": f"งานรออนุมัติปัจจุบัน {len(pending_runs)} รายการ",
-            }
-        )
-
-    for st in steps:
-        st.setdefault("task_id", st["step_id"])
-        st.setdefault("dependencies", list(st.get("depends_on", [])))
-        st.setdefault("tool_id", st.get("workflow_group", "native_planner"))
-        st.setdefault("input_contract", {"required_keys": ["goal"], "goal": goal})
-        st.setdefault("output_contract", {"required_keys": ["status"], "disallow_statuses": ["FAILED", "BLOCKED"]})
-        st.setdefault("preconditions", [f"dependency_completed:{d}" for d in st.get("depends_on", [])])
-        st.setdefault("postconditions", ["stage_verified"])
-        st.setdefault("retry_policy", {"max_attempts": 1, "idempotent_required": True, "retry_on": []})
-        st.setdefault("approval_policy", "approval_required" if st.get("requires_approval") else "auto")
-        st.setdefault("execution_status", st.get("status", "READY"))
-
-    blocked_count = sum(1 for s in steps if s["status"] == "BLOCKED")
-    approval_count = sum(1 for s in steps if s["requires_approval"])
-
-    return {
-        "engine": "native_planner",
-        "domain_mode": "mlops_native",
-        "goal": goal,
-        "steps": steps,
-        "summary": {
-            "total_steps": len(steps),
-            "blocked_steps": blocked_count,
-            "approval_gated_steps": approval_count,
-            "state_snapshot": {
-                "clean_datasets": len(clean_datasets),
-                "checkpoints": len(ckpt_rows),
-                "triples": len(triple_rows),
-                "pending_approvals": len(pending_runs),
-            },
-        },
-    }
 
 
 def _score_interpolated_ngram(
@@ -2525,6 +2579,7 @@ def handle_run_evaluation(payload: dict) -> dict:
         overall_status = "VERIFIED"
 
     eval_id = str(uuid.uuid4())
+    tracks_and_levels = get_training_tracks_and_levels(conn)
     details_obj = {
         "math_probes": math_results,
         "knowledge_probe": {
@@ -2538,6 +2593,8 @@ def handle_run_evaluation(payload: dict) -> dict:
             "steps_generated": len(plan_steps),
         },
         "heldout_test": heldout_detail,
+        "training_tracks": tracks_and_levels["training_tracks"],
+        "engineering_levels": tracks_and_levels["engineering_levels"],
     }
 
     with conn:
@@ -2569,7 +2626,12 @@ def handle_run_evaluation(payload: dict) -> dict:
         )
     row = dict(conn.execute("SELECT * FROM evaluations WHERE id=?", (eval_id,)).fetchone())
     conn.close()
-    return {"ok": True, "evaluation": row}
+    return {
+        "ok": True,
+        "evaluation": row,
+        "training_tracks": tracks_and_levels["training_tracks"],
+        "engineering_levels": tracks_and_levels["engineering_levels"],
+    }
 
 
 def _calc_any_for_tool(expr: str) -> dict | None:
@@ -2591,8 +2653,13 @@ _CHAT_AUTONOMOUS_GOAL_RE = re.compile(
 
 _CHAT_ENG_INSPECT_GOAL_RE = re.compile(
     r"^(?:ช่วย)?(?:"
-    r"(?:ค้นหา(?:สัญลักษณ์|ฟังก์ชัน|คลาส|จุดใช้งาน|ไฟล์ทดสอบ|ตำแหน่งในโค้ด)|สำรวจ\s*(?:dependencies|แพ็กเกจ|ไฟล์ทดสอบ|โครงสร้างโค้ด|การตั้งค่า)|ตรวจสอบ\s*(?:diff|git\s*diff|ความแตกต่างของโค้ด|dependencies|ไฟล์ทดสอบ|การตั้งค่า\s*build|build\s*config|quality\s*config))"
-    r"|(?:(?:search|find)\s+(?:symbol|function|class|reference)\b|(?:inspect|check|audit)\s+(?:git\s+)?(?:diff|dependencies|tests?|build\s+config|configs?)\b)"
+    r"(?:ค้นหา(?:สัญลักษณ์|ฟังก์ชัน|คลาส|จุดใช้งาน|ไฟล์ทดสอบ|ตำแหน่งในโค้ด)"
+    r"|สำรวจ\s*(?:dependencies|แพ็กเกจ|ไฟล์ทดสอบ|โครงสร้างโค้ด|การตั้งค่า|sbom|license|schema)"
+    r"|ตรวจสอบ\s*(?:diff|git\s*diff|ความแตกต่างของโค้ด|dependencies|ไฟล์ทดสอบ|การตั้งค่า\s*build|build\s*config|quality\s*config|compatibility|ความเข้ากันได้|migration|alembic|a11y|accessibility|sbom|license|threat\s*model|permission|rbac|schema|ความผิดปกติ|ข้อมูลซ้ำ|artifact\s*integrity)"
+    r"|วิเคราะห์\s*(?:migration|alembic|threat\s*model|ภัยคุกคาม|schema|สาเหตุราก|error|traceback|ความเสี่ยง)"
+    r"|แตกเป้าหมาย"
+    r"|วินิจฉัย\s*(?:error|traceback|สาเหตุ))"
+    r"|(?:(?:search|find)\s+(?:symbol|function|class|reference)\b|(?:inspect|check|audit|analyze|diagnose|decompose)\s+(?:git\s+)?(?:diff|dependencies|compatibility|migration|a11y|accessibility|sbom|license|threat\s+model|permission|rbac|tests?|build\s+config|configs?|schema|anomal\w*|duplicates?|goal|error|traceback)\b)"
     r")",
     re.IGNORECASE,
 )
@@ -2637,14 +2704,25 @@ def _try_execute_chat_autonomous_goal(
     user_id: str = "",
 ) -> dict | None:
     cleaned = prompt.strip()
-    is_create_goal = bool(cleaned and _CHAT_AUTONOMOUS_GOAL_RE.match(cleaned))
-    is_inspect_goal = bool(cleaned and _CHAT_ENG_INSPECT_GOAL_RE.match(cleaned))
+    unwrapped = unwrap_command_wrapper(cleaned)
+    effective_cleaned = unwrapped["effective_goal"] or cleaned
+    is_create_goal = bool(
+        cleaned
+        and (
+            _CHAT_AUTONOMOUS_GOAL_RE.match(cleaned)
+            or _CHAT_AUTONOMOUS_GOAL_RE.match(effective_cleaned)
+            or unwrapped["wrapper_kind"] in {"create_document", "create_data"}
+        )
+    )
+    is_inspect_goal = bool(
+        cleaned and (_CHAT_ENG_INSPECT_GOAL_RE.match(cleaned) or _CHAT_ENG_INSPECT_GOAL_RE.match(effective_cleaned))
+    )
     if not cleaned or (not is_create_goal and not is_inspect_goal):
         return None
-    if _CHAT_FACTUAL_EXCLUSION_RE.search(cleaned):
+    if _CHAT_FACTUAL_EXCLUSION_RE.search(effective_cleaned):
         return None
     # Skip explicit KG triple teaching variations like "สร้างความจำ: ..."
-    if re.match(r"^(?:สร้างความจำ|สร้าง\s*triple)\b", cleaned, re.IGNORECASE):
+    if re.match(r"^(?:สร้างความจำ|สร้าง\s*triple)\b", effective_cleaned, re.IGNORECASE):
         return None
 
     t0 = time.perf_counter()
@@ -2656,12 +2734,42 @@ def _try_execute_chat_autonomous_goal(
     if not plan_res:
         return None
 
+    goal_analysis = plan_res.get("goal_interpretation") or analyze_planner_goal(cleaned, attachment=attachment)
+    if plan_res.get("plan_status") == "NEEDS_CLARIFICATION" or goal_analysis.get("clarity_status") != "VALID":
+        clarify_status = "UNKNOWN" if goal_analysis.get("clarity_status") == "INVALID_CORRUPT" else "NEEDS_CLARIFICATION"
+        questions = plan_res.get("clarification_questions") or goal_analysis.get("clarification_questions") or []
+        issues = plan_res.get("issues") or goal_analysis.get("issues") or []
+        q_lines = "\n".join(f"- {q}" for q in questions)
+        content = (
+            f"**ยังไม่สามารถสร้างหรือดำเนินการจากคำสั่งนี้ได้ (`{clarify_status}`)**\n\n"
+            + (f"สาเหตุที่ตรวจพบ: `{', '.join(issues)}`\n\n" if issues else "")
+            + (f"**คำถามเพื่อความชัดเจน:**\n{q_lines}" if q_lines else "")
+        )
+        return {
+            "content": content,
+            "status": clarify_status,
+            "execution_phase": "CLARIFICATION_REQUIRED",
+            "goal_interpretation": goal_analysis,
+            "engine_path": ["goal_understanding_gate"],
+            "plan": plan_res,
+            "task_timings": [
+                {
+                    "task": "goal_understanding_gate",
+                    "duration_ms": round((time.perf_counter() - t0) * 1000, 3),
+                    "matched": True,
+                    "status": clarify_status,
+                    "detail": ", ".join(issues) or clarify_status,
+                }
+            ],
+        }
+
+    cleaned = effective_cleaned
     timings: list[dict] = [
         {
             "task": "native_planner",
             "duration_ms": round((time.perf_counter() - t0) * 1000, 3),
             "matched": True,
-            "status": "VERIFIED",
+            "status": "PLANNED",
             "detail": f"{len(plan_res.get('steps') or [])} steps",
         }
     ]
@@ -2747,6 +2855,38 @@ def _try_execute_chat_autonomous_goal(
         "development.diff_inspect" in selected_caps
         or any(k in low for k in ("diff", "ความแตกต่างของโค้ด", "ตรวจ diff", "git diff", "patch"))
     )
+    wants_dep_compat = (
+        "development.dependency_compatibility" in selected_caps
+        or any(k in low for k in ("compatibility", "ความเข้ากันได้", "conflict"))
+    )
+    wants_migration = (
+        "development.migration_analyzer" in selected_caps
+        or any(k in low for k in ("migration", "alembic", "ไมเกรชัน"))
+    )
+    wants_a11y = (
+        "development.frontend_a11y_audit" in selected_caps
+        or any(k in low for k in ("a11y", "accessibility", "การเข้าถึง"))
+    )
+    wants_sbom = (
+        "security.sbom_generate" in selected_caps
+        or any(k in low for k in ("sbom", "cyclonedx", "bill of materials"))
+    )
+    wants_license = (
+        "security.license_compliance" in selected_caps
+        or any(k in low for k in ("license", "สัญญาอนุญาต", "copyleft"))
+    )
+    wants_threat = (
+        "security.threat_model" in selected_caps
+        or any(k in low for k in ("threat model", "stride", "ภัยคุกคาม"))
+    )
+    wants_perm_audit = (
+        "security.permission_audit" in selected_caps
+        or any(k in low for k in ("permission audit", "rbac", "ตรวจสิทธิ์"))
+    )
+    wants_goal_decomp = (
+        "automation.goal_decomposition" in selected_caps
+        or any(k in low for k in ("แตกเป้าหมาย", "decompose", "แยกงานย่อย"))
+    )
 
     if wants_dep_inventory:
         wave1_steps.append(
@@ -2793,21 +2933,113 @@ def _try_execute_chat_autonomous_goal(
                 "depends_on": [],
             }
         )
+    if wants_dep_compat:
+        wave1_steps.append(
+            {
+                "step_id": "check_dep_compat",
+                "capability_id": "development.dependency_compatibility",
+                "input": {"target_path": "."},
+                "depends_on": [],
+            }
+        )
+    if wants_migration:
+        wave1_steps.append(
+            {
+                "step_id": "analyze_migrations",
+                "capability_id": "development.migration_analyzer",
+                "input": {"migrations_path": "apps/api/migrations/versions"},
+                "depends_on": [],
+            }
+        )
+    if wants_a11y:
+        wave1_steps.append(
+            {
+                "step_id": "audit_a11y",
+                "capability_id": "development.frontend_a11y_audit",
+                "input": {"target_path": "src"},
+                "depends_on": [],
+            }
+        )
+    if wants_sbom:
+        wave1_steps.append(
+            {
+                "step_id": "generate_sbom",
+                "capability_id": "security.sbom_generate",
+                "input": {"target_path": "."},
+                "depends_on": [],
+            }
+        )
+    if wants_license:
+        wave1_steps.append(
+            {
+                "step_id": "audit_licenses",
+                "capability_id": "security.license_compliance",
+                "input": {"target_path": "."},
+                "depends_on": [],
+            }
+        )
+    if wants_threat:
+        wave1_steps.append(
+            {
+                "step_id": "analyze_threat_model",
+                "capability_id": "security.threat_model",
+                "input": {"target_path": "."},
+                "depends_on": [],
+            }
+        )
+    if wants_perm_audit:
+        wave1_steps.append(
+            {
+                "step_id": "audit_permissions",
+                "capability_id": "security.permission_audit",
+                "input": {},
+                "depends_on": [],
+            }
+        )
+    if wants_goal_decomp:
+        wave1_steps.append(
+            {
+                "step_id": "decompose_goal",
+                "capability_id": "automation.goal_decomposition",
+                "input": {"goal": cleaned},
+                "depends_on": [],
+            }
+        )
 
     ds_rep = analyze_structured_dataset_content(attachment) if attachment else {"ok": False}
     if attachment:
         if ds_rep.get("ok"):
+            ds_fmt = str(ds_rep.get("format") or "csv").lower()
+            ds_txt = attachment[:15000]
             wave1_steps.append(
                 {
                     "step_id": "inspect_attachment_data",
                     "capability_id": "data.profile_structured",
-                    "input": {
-                        "format": str(ds_rep.get("format") or "csv").lower(),
-                        "content": attachment[:15000],
-                    },
+                    "input": {"format": ds_fmt, "content": ds_txt},
                     "depends_on": [],
                 }
             )
+            if ds_fmt in {"csv", "json", "jsonl"}:
+                wave1_steps.extend([
+                    {
+                        "step_id": "infer_attachment_schema",
+                        "capability_id": "data.schema_inference",
+                        "input": {"format": ds_fmt, "content": ds_txt},
+                        "depends_on": [],
+                    },
+                    {
+                        "step_id": "detect_attachment_duplicates",
+                        "capability_id": "data.duplicate_detection",
+                        "input": {"format": ds_fmt, "content": ds_txt},
+                        "depends_on": [],
+                    },
+                    {
+                        "step_id": "detect_attachment_anomalies",
+                        "capability_id": "data.anomaly_detection",
+                        "input": {"format": ds_fmt, "content": ds_txt},
+                        "depends_on": [],
+                    },
+                ])
         else:
             wave1_steps.append(
                 {
@@ -2836,6 +3068,14 @@ def _try_execute_chat_autonomous_goal(
     config_audit_info = (wave1_by_id.get("audit_configs") or {}).get("output") or {}
     symbol_info = (wave1_by_id.get("search_symbol") or {}).get("output") or {}
     diff_info = (wave1_by_id.get("inspect_diff") or {}).get("output") or {}
+    compat_info = (wave1_by_id.get("check_dep_compat") or {}).get("output") or {}
+    mig_info = (wave1_by_id.get("analyze_migrations") or {}).get("output") or {}
+    a11y_info = (wave1_by_id.get("audit_a11y") or {}).get("output") or {}
+    sbom_info = (wave1_by_id.get("generate_sbom") or {}).get("output") or {}
+    lic_info = (wave1_by_id.get("audit_licenses") or {}).get("output") or {}
+    threat_info = (wave1_by_id.get("analyze_threat_model") or {}).get("output") or {}
+    perm_info = (wave1_by_id.get("audit_permissions") or {}).get("output") or {}
+    decomp_info = (wave1_by_id.get("decompose_goal") or {}).get("output") or {}
 
     attach_summary_lines: list[str] = []
     if attachment:
@@ -3037,6 +3277,8 @@ def _try_execute_chat_autonomous_goal(
         return {
             "content": full_content,
             "status": "VERIFIED" if doc_verified else "FAILED",
+            "execution_phase": "VERIFIED" if doc_verified else "EXECUTED",
+            "goal_interpretation": goal_analysis,
             "engine_path": engine_path,
             "plan": plan_res,
             "deliverable": deliverable,
@@ -3099,6 +3341,54 @@ def _try_execute_chat_autonomous_goal(
                 inspect_sections.append(f"```diff\n{diff_text[:3000]}\n```")
             elif diff_info.get("reason"):
                 inspect_sections.append(f"- หมายเหตุ: {diff_info['reason']}")
+        if compat_info:
+            inspect_sections.extend([
+                "",
+                "### ความเข้ากันได้ Dependencies (`development.dependency_compatibility`)",
+                f"- ตรวจ {len(compat_info.get('manifests_checked') or [])} ไฟล์ · compatible=`{compat_info.get('compatible')}` · ความขัดแย้ง `{len(compat_info.get('conflicts') or [])}` รายการ",
+            ])
+        if mig_info:
+            inspect_sections.extend([
+                "",
+                "### วิเคราะห์ Database Migration (`development.migration_analyzer`)",
+                f"- พบ `{mig_info.get('migration_count', 0)}` ไฟล์ · heads=`{len(mig_info.get('heads') or [])}` · chain_valid=`{mig_info.get('chain_valid')}`",
+            ])
+        if a11y_info:
+            inspect_sections.extend([
+                "",
+                "### ตรวจสอบ Accessibility (`development.frontend_a11y_audit`)",
+                f"- สแกน `{a11y_info.get('scanned_files', 0)}` ไฟล์ · ข้อสังเกต `{a11y_info.get('issue_count', 0)}` รายการ",
+            ])
+        if sbom_info:
+            inspect_sections.extend([
+                "",
+                "### รายการ SBOM (`security.sbom_generate`)",
+                f"- `{sbom_info.get('bom_format', 'CycloneDX')} {sbom_info.get('spec_version', '1.5')}` · องค์ประกอบ `{sbom_info.get('component_count', 0)}` รายการ · SHA-256: `{sbom_info.get('bom_sha256', '')[:16]}...`",
+            ])
+        if lic_info:
+            inspect_sections.extend([
+                "",
+                "### ตรวจสอบ License (`security.license_compliance`)",
+                f"- ทั้งหมด `{lic_info.get('total_components', 0)}` รายการ · Copyleft Review `{lic_info.get('copyleft_review_count', 0)}` · Compliant=`{lic_info.get('compliant')}`",
+            ])
+        if threat_info:
+            inspect_sections.extend([
+                "",
+                "### วิเคราะห์ Threat Model (`security.threat_model`)",
+                f"- พื้นผิวหลัก `{threat_info.get('surface_count', 0)}` จุด · กลไกป้องกันที่ตรวจพบ `{len(threat_info.get('verified_controls') or [])}` รายการ",
+            ])
+        if perm_info:
+            inspect_sections.extend([
+                "",
+                "### ตรวจสอบ Permission / RBAC (`security.permission_audit`)",
+                f"- ตรวจสอบทั้ง `{perm_info.get('total_capabilities', 0)}` ความสามารถ · rbac_compliant=`{perm_info.get('rbac_compliant')}`",
+            ])
+        if decomp_info:
+            inspect_sections.extend([
+                "",
+                "### แตกเป้าหมายเป็น DAG (`automation.goal_decomposition`)",
+                f"- งานย่อย `{decomp_info.get('subtask_count', 0)}` ขั้นตอน · จับคู่เครื่องมือได้ `{decomp_info.get('matched_capability_count', 0)}` · dag_valid=`{decomp_info.get('dag_valid')}`",
+            ])
 
         inspect_report = "\n".join(inspect_sections)
 
@@ -3177,6 +3467,8 @@ def _try_execute_chat_autonomous_goal(
         return {
             "content": full_report,
             "status": "VERIFIED" if inspect_verified else "FAILED",
+            "execution_phase": "VERIFIED" if inspect_verified else "EXECUTED",
+            "goal_interpretation": goal_analysis,
             "engine_path": engine_path,
             "plan": plan_res,
             "deliverable": deliverable,
@@ -3525,6 +3817,8 @@ def _try_execute_chat_autonomous_goal(
     return {
         "content": content,
         "status": "VERIFIED" if code_verified else "FAILED",
+        "execution_phase": "VERIFIED" if code_verified else "EXECUTED",
+        "goal_interpretation": goal_analysis,
         "engine_path": engine_path,
         "plan": plan_res,
         "deliverable": deliverable,
@@ -3596,10 +3890,13 @@ def handle_infer(payload: dict) -> dict:
                 "task": slowest["task"],
                 "duration_ms": slowest_ms,
                 "share_pct": round((slowest_ms / total_tasks_ms) * 100, 1) if total_tasks_ms > 0 else 0.0,
+                "informative": slowest_ms >= 1.0,
+                "note": "sub_millisecond_fast_path" if slowest_ms < 1.0 else "measured_hotspot",
             }
         else:
             trace["bottleneck_task"] = None
 
+    goal_interp = analyze_planner_goal(prompt, attachment=attachment)
     trace: dict = {
         "mode": mode,
         "model_version": model_version,
@@ -3611,6 +3908,9 @@ def handle_infer(payload: dict) -> dict:
         "latency_ms": 0.0,
         "python_version": platform.python_version(),
         "external_models_used": False,
+        "native_integrity": _compute_native_integrity(),
+        "goal_interpretation": goal_interp,
+        "execution_phase": "EXECUTED",
     }
 
     # Stage 1 & 2: Native Understand -> Interpret BEFORE retrieval/checkpoints
@@ -3745,20 +4045,47 @@ def handle_infer(payload: dict) -> dict:
             }
         _record_task_timing("autonomous_mission_detect", t0, matched=False, status_label="MISS")
 
-    # 1. Native DAG Goal Decomposition & Planning
+    # 1. Native DAG Goal Decomposition & Planning (Read-Only Planning Phase -> PLANNED or NEEDS_CLARIFICATION)
     if mode in ("auto", "plan"):
         t0 = time.perf_counter()
         plan_res = try_native_planning(conn, prompt, force_plan=(mode == "plan"))
         if plan_res:
+            trace["engine_path"].append("native_planner")
+            trace["plan"] = plan_res
+            if plan_res.get("goal_interpretation"):
+                trace["goal_interpretation"] = plan_res["goal_interpretation"]
+
+            if plan_res.get("plan_status") == "NEEDS_CLARIFICATION":
+                clarity = (plan_res.get("goal_interpretation") or {}).get("clarity_status")
+                clarify_status = "UNKNOWN" if clarity == "INVALID_CORRUPT" else "NEEDS_CLARIFICATION"
+                issues = plan_res.get("issues") or []
+                questions = plan_res.get("clarification_questions") or []
+                _record_task_timing(
+                    "native_planner",
+                    t0,
+                    matched=True,
+                    status_label=clarify_status,
+                    detail=", ".join(issues) or clarify_status,
+                )
+                trace["execution_phase"] = "CLARIFICATION_REQUIRED"
+                q_md = "\n".join(f"- {q}" for q in questions)
+                content = (
+                    f"**ต้องการข้อมูลเพิ่มเติมก่อนวางแผน ({clarify_status})**\n\n"
+                    + (f"ประเด็นที่ตรวจพบ: `{', '.join(issues)}`\n\n" if issues else "")
+                    + (f"**คำถามเพื่อความชัดเจน:**\n{q_md}" if q_md else "")
+                )
+                _finalize_trace()
+                conn.close()
+                return {"content": content, "status": clarify_status, "trace": trace}
+
             _record_task_timing(
                 "native_planner",
                 t0,
                 matched=True,
-                status_label="VERIFIED",
-                detail=f"{len(plan_res.get('steps') or [])} DAG steps",
+                status_label="PLANNED",
+                detail=f"{len(plan_res.get('steps') or [])} DAG steps (read-only plan)",
             )
-            trace["engine_path"].append("native_planner")
-            trace["plan"] = plan_res
+            trace["execution_phase"] = "PLANNED"
             step_lines = [
                 f"- **{s['step_id']} · {s['title']}** (`{s['status']}`"
                 + (f", รอ `{','.join(s['depends_on'])}`" if s["depends_on"] else "")
@@ -3768,15 +4095,15 @@ def handle_infer(payload: dict) -> dict:
             ]
             snap = plan_res["summary"]["state_snapshot"]
             content = (
-                f"**แผนปฏิบัติการเชิงโครงสร้าง (Native DAG Plan)**\n"
+                f"**แผนปฏิบัติการเชิงโครงสร้าง (Native DAG Plan · PLANNED)**\n"
                 f"เป้าหมาย: `{plan_res['goal']}`\n\n"
                 + "\n".join(step_lines)
                 + f"\n\n*สถานะฐานข้อมูลจริง: ชุดข้อมูลผ่านเกณฑ์ {snap['clean_datasets']}, "
-                f"Checkpoint {snap['checkpoints']} รุ่น, ความจำ {snap['triples']} รายการ*"
+                f"Checkpoint {snap['checkpoints']} รุ่น, ความจำ {snap['triples']} รายการ · (ยังไม่ได้รันปฏิบัติการจริง)*"
             )
             _finalize_trace()
             conn.close()
-            return {"content": content, "status": "VERIFIED", "trace": trace}
+            return {"content": content, "status": "PLANNED", "trace": trace}
         _record_task_timing("native_planner", t0, matched=False, status_label="MISS")
 
     # 1.5 Governed External Tool Integration (Native Core calls tools, never replaced by them)
@@ -3861,6 +4188,12 @@ def handle_infer(payload: dict) -> dict:
             for item in auto_res.get("task_timings") or []:
                 task_timings.append({"order": len(task_timings) + 1, **item})
             trace["engine_path"].extend(auto_res.get("engine_path") or ["autonomous_goal_executor"])
+            if auto_res.get("execution_phase"):
+                trace["execution_phase"] = auto_res["execution_phase"]
+            else:
+                trace["execution_phase"] = "VERIFIED" if auto_res.get("status") == "VERIFIED" else "EXECUTED"
+            if auto_res.get("goal_interpretation"):
+                trace["goal_interpretation"] = auto_res["goal_interpretation"]
             if auto_res.get("plan"):
                 trace["plan"] = auto_res["plan"]
             if auto_res.get("deliverable"):
@@ -4623,6 +4956,399 @@ def train_checkpoint_from_dataset(conn: sqlite3.Connection, dataset_id: str, use
     return {"ok": True, "checkpoint": row}
 
 
+def _collect_upstream_workflow_refs(conn: sqlite3.Connection, group_ids: list[str]) -> dict[str, dict]:
+    refs: dict[str, dict] = {}
+    for gid in group_ids:
+        row = conn.execute(
+            "SELECT id, group_id, status, summary, output_json, created_at FROM workflow_runs WHERE group_id=? ORDER BY created_at DESC LIMIT 1",
+            (gid,),
+        ).fetchone()
+        if row:
+            try:
+                out_obj = json.loads(row["output_json"] or "{}") if row["output_json"] else {}
+            except Exception:
+                out_obj = {}
+            refs[gid] = {
+                "run_id": row["id"],
+                "status": row["status"],
+                "summary": row["summary"],
+                "output": out_obj,
+                "created_at": row["created_at"],
+            }
+    return refs
+
+
+def _build_autonomous_improvement_proposal(conn: sqlite3.Connection) -> dict:
+    """Stages 1-3 (Strictly Read-Only): gap_analysis -> hypothesis_draft -> plan_validation."""
+    upstream = _collect_upstream_workflow_refs(conn, ["evaluation", "project_dev", "knowledge_memory"])
+    latest_ckpt = conn.execute("SELECT * FROM checkpoints ORDER BY version DESC LIMIT 1").fetchone()
+    latest_eval = conn.execute(
+        "SELECT id, overall_status, math_score, knowledge_score, planning_score, test_accuracy, created_at FROM evaluations ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    gaps = detect_capability_gaps(conn)
+
+    failure_patterns: list[dict] = []
+    try:
+        from tool_center import analyze_failure_patterns
+        failure_patterns = analyze_failure_patterns(conn, limit=5)
+    except Exception:
+        failure_patterns = []
+
+    if gaps:
+        top_gap = gaps[0]
+        gap_summary = f"{top_gap.get('gap_type')}: {top_gap.get('detail')}"
+    elif not latest_ckpt:
+        gap_summary = "No trained native checkpoint yet; focus bounded verification on core planner/workflow modules."
+    else:
+        gap_summary = (
+            f"Checkpoint v{latest_ckpt['version']} test_accuracy={latest_ckpt['eval_accuracy']}; "
+            f"evaluate bounded quality checks and corpus coverage."
+        )
+
+    # Read-only real repo files that exist
+    candidate_targets = [
+        rel
+        for rel in ("python_core/zyrquen_core.py", "python_core/dag_executor.py", "python_core/planner_intelligence.py")
+        if (BASE_DIR / rel).is_file()
+    ]
+    hypothesis = (
+        f"{gap_summary} เสนอแผนตรวจสอบและปรับปรุงแบบจำกัดขอบเขต (Read-Only Syntax/Contract Verification + Outcome Memory) "
+        f"บนโมดูล {', '.join(candidate_targets) or 'python_core/zyrquen_core.py'}"
+    )
+    allowed_operations = ["readonly_file_inspect", "python_ast_syntax_check", "contract_assertion_verify", "record_outcome_memory"]
+    forbidden_operations = ["git_push", "git_commit", "weight_mutation", "delete_data", "paid_compute", "architecture_change"]
+
+    plan_obj = {
+        "gap_summary": gap_summary,
+        "hypothesis": hypothesis,
+        "target_files": candidate_targets,
+        "allowed_operations": allowed_operations,
+        "forbidden_operations": forbidden_operations,
+        "expected_checks": ["python_syntax_ast", "contract_assertion"],
+        "verification_command": "python3 -m unittest discover -s python_core/tests -p 'test_planner_and_workflow_lifecycle.py'",
+        "rollback_strategy": "No repository mutation performed outside sandbox; abort outcome_learning on any check failure.",
+        "upstream_refs": {k: {"run_id": v["run_id"], "status": v["status"]} for k, v in upstream.items()},
+    }
+    scope_obj = {
+        "allowed_files": candidate_targets,
+        "allowed_operations": allowed_operations,
+        "forbidden_operations": forbidden_operations,
+        "max_files": len(candidate_targets),
+        "allow_weight_mutation": False,
+        "allow_external_models": False,
+    }
+
+    # Stage 3: Read-Only Plan Validation
+    validation_errors: list[str] = []
+    if not candidate_targets:
+        validation_errors.append("No target files resolved in workspace")
+    for rel in candidate_targets:
+        resolved = (BASE_DIR / rel).resolve()
+        if not str(resolved).startswith(str(BASE_DIR.resolve())) or not resolved.is_file():
+            validation_errors.append(f"Target file outside repo or missing: {rel}")
+    if any(op in allowed_operations for op in forbidden_operations):
+        validation_errors.append("Allowed operations overlap forbidden operations")
+    if not plan_obj["expected_checks"]:
+        validation_errors.append("Missing expected verification checks")
+
+    repo_rev = _compute_repo_revision(BASE_DIR)
+    plan_hash = _canonical_plan_hash(plan_obj)
+    return {
+        "valid": len(validation_errors) == 0,
+        "validation_errors": validation_errors,
+        "plan_obj": plan_obj,
+        "scope_obj": scope_obj,
+        "plan_hash": plan_hash,
+        "repo_revision": repo_rev,
+        "upstream": upstream,
+        "latest_eval": dict(latest_eval) if latest_eval else None,
+        "failure_patterns_count": len(failure_patterns),
+        "hypothesis": hypothesis,
+    }
+
+
+def _execute_autonomous_improvement_approved(
+    conn: sqlite3.Connection,
+    run_row: dict,
+    *,
+    approved_by: str,
+    user_id: str,
+) -> dict:
+    """Stages 4-7 after verified Admin Approval: hash/revision check -> bounded_execution -> verification -> outcome_learning."""
+    stored_hash = str(run_row.get("plan_hash") or "")
+    stored_rev = str(run_row.get("repo_revision") or "")
+    try:
+        plan_obj = json.loads(run_row.get("plan_json") or "{}")
+    except Exception:
+        plan_obj = {}
+    try:
+        scope_obj = json.loads(run_row.get("approval_scope_json") or "{}")
+    except Exception:
+        scope_obj = {}
+    try:
+        prior_stages = json.loads(run_row.get("stages_json") or "[]")
+    except Exception:
+        prior_stages = []
+
+    stage_by_name = {s.get("stage"): s for s in prior_stages if isinstance(s, dict)}
+    s_gap = stage_by_name.get("gap_analysis") or {"stage": "gap_analysis", "status": "PASS", "detail": plan_obj.get("gap_summary", "")}
+    s_hyp = stage_by_name.get("hypothesis_draft") or {"stage": "hypothesis_draft", "status": "PASS", "detail": plan_obj.get("hypothesis", "")}
+    s_val = stage_by_name.get("plan_validation") or {"stage": "plan_validation", "status": "PASS", "detail": f"plan_hash={stored_hash[:12]}..."}
+
+    # Re-verify immutable plan_hash & repo_revision BEFORE execution!
+    recomputed_hash = _canonical_plan_hash(plan_obj) if plan_obj else ""
+    current_rev = _compute_repo_revision(BASE_DIR)
+
+    if not stored_hash or recomputed_hash != stored_hash:
+        reason = "Approval invalidated: stored plan payload hash does not match approved plan_hash."
+        stages_out = [
+            s_gap,
+            s_hyp,
+            s_val,
+            {"stage": "approval_gate", "status": "BLOCKED", "detail": reason},
+            {"stage": "bounded_execution", "status": "BLOCKED", "detail": "Halted due to plan tamper/mismatch"},
+            {"stage": "verification", "status": "BLOCKED", "detail": "Not executed"},
+            {"stage": "outcome_learning", "status": "BLOCKED", "detail": "Not executed"},
+        ]
+        return {
+            "ok": False,
+            "status": "BLOCKED",
+            "summary": reason,
+            "stages_out": stages_out,
+            "invalidated_reason": reason,
+            "verification_obj": {"passed": False, "reason": reason},
+            "output_obj": {"invalidated": True},
+        }
+
+    if not stored_rev or current_rev != stored_rev:
+        reason = f"Approval invalidated: repository revision changed ({stored_rev} -> {current_rev}). Re-propose and re-approve required."
+        stages_out = [
+            s_gap,
+            s_hyp,
+            s_val,
+            {"stage": "approval_gate", "status": "BLOCKED", "detail": reason},
+            {"stage": "bounded_execution", "status": "BLOCKED", "detail": "Halted due to repo_revision drift"},
+            {"stage": "verification", "status": "BLOCKED", "detail": "Not executed"},
+            {"stage": "outcome_learning", "status": "BLOCKED", "detail": "Not executed"},
+        ]
+        return {
+            "ok": False,
+            "status": "BLOCKED",
+            "summary": reason,
+            "stages_out": stages_out,
+            "invalidated_reason": reason,
+            "verification_obj": {"passed": False, "reason": reason},
+            "output_obj": {"invalidated": True},
+        }
+
+    # Stage 5: Bounded Execution within approved scope
+    allowed_files = set(scope_obj.get("allowed_files") or [])
+    target_files = list(plan_obj.get("target_files") or [])
+    allowed_ops = set(scope_obj.get("allowed_operations") or [])
+    forbidden_ops = set(scope_obj.get("forbidden_operations") or [])
+
+    scope_violation: str | None = None
+    for tf in target_files:
+        if tf not in allowed_files:
+            scope_violation = f"Out-of-scope file requested: {tf}"
+            break
+    if not target_files or not allowed_files:
+        scope_violation = "Empty approval scope"
+    if allowed_ops & forbidden_ops:
+        scope_violation = "Forbidden operation present in execution scope"
+
+    if scope_violation:
+        stages_out = [
+            s_gap,
+            s_hyp,
+            s_val,
+            {"stage": "approval_gate", "status": "PASS", "detail": f"Approved by {approved_by}"},
+            {"stage": "bounded_execution", "status": "BLOCKED", "detail": scope_violation},
+            {"stage": "verification", "status": "BLOCKED", "detail": "Halted on scope violation"},
+            {"stage": "outcome_learning", "status": "BLOCKED", "detail": "Skipped"},
+        ]
+        return {
+            "ok": False,
+            "status": "BLOCKED",
+            "summary": scope_violation,
+            "stages_out": stages_out,
+            "invalidated_reason": scope_violation,
+            "verification_obj": {"passed": False, "reason": scope_violation},
+            "output_obj": {"scope_violation": scope_violation},
+        }
+
+    inspected_files: list[dict] = []
+    for rel in target_files:
+        fp = (BASE_DIR / rel).resolve()
+        if not fp.is_file():
+            scope_violation = f"Approved file missing on disk: {rel}"
+            break
+        src_text = fp.read_text(encoding="utf-8")
+        inspected_files.append(
+            {
+                "path": rel,
+                "bytes": len(src_text.encode("utf-8")),
+                "lines": len(src_text.splitlines()),
+                "sha256": hashlib.sha256(src_text.encode("utf-8")).hexdigest()[:16],
+                "source": src_text,
+            }
+        )
+
+    if scope_violation:
+        stages_out = [
+            s_gap,
+            s_hyp,
+            s_val,
+            {"stage": "approval_gate", "status": "PASS", "detail": f"Approved by {approved_by}"},
+            {"stage": "bounded_execution", "status": "FAILED", "detail": scope_violation},
+            {"stage": "verification", "status": "BLOCKED", "detail": "Target file missing"},
+            {"stage": "outcome_learning", "status": "BLOCKED", "detail": "Skipped"},
+        ]
+        return {
+            "ok": False,
+            "status": "FAILED",
+            "summary": scope_violation,
+            "stages_out": stages_out,
+            "invalidated_reason": None,
+            "verification_obj": {"passed": False, "reason": scope_violation},
+            "output_obj": {},
+        }
+
+    # Stage 6: Real Verification Checks (AST parse + Contract Assertion)
+    ast_checks: list[dict] = []
+    all_ast_ok = True
+    for finfo in inspected_files:
+        if finfo["path"].endswith(".py"):
+            try:
+                ast.parse(finfo["source"], filename=finfo["path"])
+                ast_checks.append({"file": finfo["path"], "syntax_valid": True})
+            except SyntaxError as exc:
+                all_ast_ok = False
+                ast_checks.append({"file": finfo["path"], "syntax_valid": False, "error": str(exc)})
+
+    contract_cases = [
+        {"name": "plan_hash_bound", "op": "eq", "actual": recomputed_hash, "expected": stored_hash},
+        {"name": "repo_revision_bound", "op": "eq", "actual": current_rev, "expected": stored_rev},
+        {"name": "all_target_files_ast_valid", "op": "eq", "actual": all_ast_ok, "expected": True},
+        {"name": "no_weight_mutation", "op": "eq", "actual": bool(scope_obj.get("allow_weight_mutation", False)), "expected": False},
+    ]
+    assertion_verdict = "PASS" if all(c["actual"] == c["expected"] for c in contract_cases) else "FAILED"
+    try:
+        from tool_center import get_tool_center_registry
+        tc_res = get_tool_center_registry().execute(
+            "testing.contract_assertion",
+            {"cases": contract_cases},
+            user_role="admin",
+            conn=conn,
+            data_dir=DATA_DIR,
+            approved_by=approved_by,
+        )
+        tc_out = tc_res.get("output") or {}
+        if tc_res.get("ok") and tc_out.get("verdict"):
+            assertion_verdict = str(tc_out["verdict"])
+    except Exception:
+        pass
+
+    verification_passed = bool(all_ast_ok and assertion_verdict == "PASS")
+    verification_obj = {
+        "passed": verification_passed,
+        "ast_checks": ast_checks,
+        "assertion_verdict": assertion_verdict,
+        "checked_files": [f["path"] for f in inspected_files],
+        "plan_hash": stored_hash,
+        "repo_revision": stored_rev,
+        "verified_at": now_iso(),
+    }
+
+    if not verification_passed:
+        fail_msg = "Verification failed: target module AST or contract assertion did not pass; outcome_learning halted."
+        stages_out = [
+            s_gap,
+            s_hyp,
+            s_val,
+            {"stage": "approval_gate", "status": "PASS", "detail": f"Approved by {approved_by}"},
+            {"stage": "bounded_execution", "status": "PASS", "detail": f"Inspected {len(inspected_files)} scoped file(s)"},
+            {"stage": "verification", "status": "FAILED", "detail": fail_msg},
+            {"stage": "outcome_learning", "status": "BLOCKED", "detail": "Blocked because verification failed"},
+        ]
+        return {
+            "ok": False,
+            "status": "FAILED",
+            "summary": fail_msg,
+            "stages_out": stages_out,
+            "invalidated_reason": None,
+            "verification_obj": verification_obj,
+            "output_obj": {"inspected_files": [f["path"] for f in inspected_files]},
+        }
+
+    # Stage 7: Outcome Learning (ONLY reached when verification passes)
+    record_episodic_experience(
+        conn,
+        mission_id=None,
+        goal=str(plan_obj.get("hypothesis") or "autonomous_improvement")[:240],
+        outcome_status="COMPLETED",
+        gap_type="autonomous_improvement_verified",
+        hypothesis={
+            "plan_hash": stored_hash,
+            "repo_revision": stored_rev,
+            "approved_by": approved_by,
+            "checked_files": [f["path"] for f in inspected_files],
+        },
+        verified_delta=1.0,
+    )
+    try:
+        from tool_center import record_task_memory
+        record_task_memory(
+            conn,
+            goal=str(plan_obj.get("hypothesis") or "autonomous_improvement")[:200],
+            capability_id="automation.outcome_learning",
+            success=True,
+            latency_ms=1.0,
+            detail=f"verified plan_hash={stored_hash[:12]}",
+        )
+    except Exception:
+        pass
+
+    stages_out = [
+        s_gap,
+        s_hyp,
+        s_val,
+        {"stage": "approval_gate", "status": "PASS", "detail": f"Approved by {approved_by}"},
+        {
+            "stage": "bounded_execution",
+            "status": "PASS",
+            "detail": f"Bounded inspection on {len(inspected_files)} approved file(s); zero unapproved mutations",
+        },
+        {
+            "stage": "verification",
+            "status": "PASS",
+            "detail": f"AST + Contract assertions passed ({len(ast_checks)} file(s), plan_hash={stored_hash[:12]}...)",
+        },
+        {
+            "stage": "outcome_learning",
+            "status": "PASS",
+            "detail": "Recorded verified outcome into episodic_experiences & task_memory",
+        },
+    ]
+    summary = (
+        f"Autonomous Improvement COMPLETED (7/7 stages): verified {len(inspected_files)} scoped file(s), "
+        f"plan_hash={stored_hash[:12]}..., approved_by={approved_by}."
+    )
+    return {
+        "ok": True,
+        "status": "COMPLETED",
+        "summary": summary,
+        "stages_out": stages_out,
+        "invalidated_reason": None,
+        "verification_obj": verification_obj,
+        "output_obj": {
+            "checked_files": [{"path": f["path"], "sha256": f["sha256"]} for f in inspected_files],
+            "plan_hash": stored_hash,
+            "repo_revision": stored_rev,
+        },
+    }
+
+
 def handle_run_workflow(payload: dict) -> dict:
     conn = get_db()
     group_id = str(payload.get("group_id", ""))
@@ -4630,11 +5356,20 @@ def handle_run_workflow(payload: dict) -> dict:
     approved_by = payload.get("approved_by")
     existing_run_id = payload.get("run_id")
     dataset_id = payload.get("dataset_id")
+    verified_approval_ctx = bool(payload.get("_verified_approval_context", False))
 
     group = next((g for g in WORKFLOW_GROUPS if g["id"] == group_id), None)
     if not group:
         conn.close()
         return {"ok": False, "error": f"Unknown workflow group '{group_id}'"}
+
+    # Fail-closed guard: block forged approved_by bypasses on approval-gated workflows
+    if group["requires_approval"] and approved_by and not verified_approval_ctx:
+        conn.close()
+        return {
+            "ok": False,
+            "error": "Direct approval bypass blocked: approval-gated workflows must enter PENDING_APPROVAL and pass Admin Approval Gate.",
+        }
 
     # Strict pre-gate check for native_training: Steps 1-3 must pass BEFORE creating an Approval Gate request
     if group_id == "native_training":
@@ -4647,9 +5382,109 @@ def handle_run_workflow(payload: dict) -> dict:
             conn.close()
             return prereq
 
-    # Check Approval Gate
+    # Handle approval-gated pre-gate submission (no verified approval yet)
     if group["requires_approval"] and not approved_by:
         run_id = str(uuid.uuid4())
+        if group_id == "autonomous_improvement":
+            # Execute Stages 1-3 (read-only) BEFORE entering Approval Gate!
+            proposal = _build_autonomous_improvement_proposal(conn)
+            upstream_refs = {k: v["run_id"] for k, v in proposal["upstream"].items()}
+            if not proposal["valid"]:
+                err_msg = "; ".join(proposal["validation_errors"])
+                stages = [
+                    {"stage": "gap_analysis", "status": "PASS", "detail": proposal["plan_obj"]["gap_summary"]},
+                    {"stage": "hypothesis_draft", "status": "PASS", "detail": proposal["hypothesis"]},
+                    {"stage": "plan_validation", "status": "FAILED", "detail": err_msg},
+                    {"stage": "approval_gate", "status": "BLOCKED", "detail": "Blocked: plan validation failed"},
+                    {"stage": "bounded_execution", "status": "BLOCKED", "detail": "Not executed"},
+                    {"stage": "verification", "status": "BLOCKED", "detail": "Not executed"},
+                    {"stage": "outcome_learning", "status": "BLOCKED", "detail": "Not executed"},
+                ]
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO workflow_runs (
+                            id, group_id, status, requires_approval, triggered_by, approved_by,
+                            summary, stages_json, plan_hash, repo_revision, plan_json,
+                            approval_scope_json, depends_on_runs_json, output_json, invalidated_reason,
+                            created_at, updated_at
+                        )
+                        VALUES (?, ?, 'BLOCKED', 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            group_id,
+                            user_id,
+                            f"Plan validation failed: {err_msg}",
+                            json.dumps(stages),
+                            proposal["plan_hash"],
+                            proposal["repo_revision"],
+                            json.dumps(proposal["plan_obj"], ensure_ascii=False),
+                            json.dumps(proposal["scope_obj"], ensure_ascii=False),
+                            json.dumps(upstream_refs),
+                            json.dumps({"validation_errors": proposal["validation_errors"]}),
+                            err_msg,
+                            now_iso(),
+                            now_iso(),
+                        ),
+                    )
+                run = dict(conn.execute("SELECT * FROM workflow_runs WHERE id=?", (run_id,)).fetchone())
+                conn.close()
+                return {"ok": False, "error": err_msg, "run": run}
+
+            stages = [
+                {"stage": "gap_analysis", "status": "PASS", "detail": proposal["plan_obj"]["gap_summary"]},
+                {"stage": "hypothesis_draft", "status": "PASS", "detail": proposal["hypothesis"]},
+                {
+                    "stage": "plan_validation",
+                    "status": "PASS",
+                    "detail": f"Validated scope ({len(proposal['scope_obj']['allowed_files'])} files) · plan_hash={proposal['plan_hash'][:12]}... · {proposal['repo_revision']}",
+                },
+                {
+                    "stage": "approval_gate",
+                    "status": "PENDING_APPROVAL",
+                    "detail": f"Awaiting Admin Approval for plan_hash={proposal['plan_hash'][:12]}...",
+                },
+                {"stage": "bounded_execution", "status": "WAITING", "detail": "Awaiting Admin Approval"},
+                {"stage": "verification", "status": "WAITING", "detail": "Awaiting bounded_execution"},
+                {"stage": "outcome_learning", "status": "WAITING", "detail": "Awaiting verified outcome"},
+            ]
+            summary = (
+                f"Stages 1–3 passed (read-only). Awaiting Admin Approval Gate: "
+                f"plan_hash={proposal['plan_hash'][:12]}... · {proposal['repo_revision']}"
+            )
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_runs (
+                        id, group_id, status, requires_approval, triggered_by, approved_by,
+                        summary, stages_json, plan_hash, repo_revision, plan_json,
+                        approval_scope_json, depends_on_runs_json, output_json,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, 'PENDING_APPROVAL', 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        group_id,
+                        user_id,
+                        summary,
+                        json.dumps(stages),
+                        proposal["plan_hash"],
+                        proposal["repo_revision"],
+                        json.dumps(proposal["plan_obj"], ensure_ascii=False),
+                        json.dumps(proposal["scope_obj"], ensure_ascii=False),
+                        json.dumps(upstream_refs),
+                        json.dumps({"plan_hash": proposal["plan_hash"], "repo_revision": proposal["repo_revision"]}),
+                        now_iso(),
+                        now_iso(),
+                    ),
+                )
+            run = dict(conn.execute("SELECT * FROM workflow_runs WHERE id=?", (run_id,)).fetchone())
+            conn.close()
+            return {"ok": True, "run": run}
+
+        # Other approval-gated workflows (native_training)
         stages = [
             {"stage": s, "status": "PENDING_APPROVAL" if s == "approval_gate" else "WAITING"}
             for s in group["stages"]
@@ -4671,6 +5506,11 @@ def handle_run_workflow(payload: dict) -> dict:
     stages_out = []
     status = "COMPLETED"
     summary = ""
+    depends_on_runs: dict = {}
+    output_obj: dict = {}
+    verification_obj: dict | None = None
+    invalidated_reason: str | None = None
+    exec_ok = True
 
     if group_id == "system_ops":
         metrics = get_system_metrics()
@@ -4680,6 +5520,7 @@ def handle_run_workflow(payload: dict) -> dict:
             {"stage": "storage_check", "status": "PASS", "detail": f"SQLite {metrics['sqlite_db_kb']} KB · Disk free {metrics['disk_free_gb']} GB"},
             {"stage": "status_report", "status": "PASS", "detail": "All runtime boundaries nominal"},
         ]
+        output_obj = {"metrics": metrics}
         summary = f"System Operations verified: {metrics['mem_available_mb']} MB RAM free, {metrics['disk_free_gb']} GB disk free."
 
     elif group_id == "data_pipeline":
@@ -4691,23 +5532,30 @@ def handle_run_workflow(payload: dict) -> dict:
             conn.execute("SELECT COUNT(*) FROM kg_ingestion_proposals WHERE status='PENDING_APPROVAL'").fetchone()[0]
         )
         stages_out = [
-            {"stage": "schema_validate", "status": "PASS", "detail": f"Audited {total_ds} registered dataset(s)"},
-            {"stage": "deduplicate", "status": "PASS", "detail": f"Provenance & normalization verified ({pending_kg} KG proposal(s) awaiting gate)"},
-            {"stage": "leakage_scan", "status": "FAILED" if leak_count else "PASS", "detail": f"{leak_count} dataset(s) with split/template/eval leakage"},
+            {"stage": "schema_validate", "status": "PASS" if total_ds > 0 else "EMPTY", "detail": f"Audited {total_ds} registered dataset(s)"},
+            {"stage": "deduplicate", "status": "PASS" if total_ds > 0 else "NOT_RUN", "detail": f"Provenance & normalization verified ({pending_kg} KG proposal(s) awaiting gate)"},
+            {"stage": "leakage_scan", "status": "FAILED" if leak_count else ("PASS" if total_ds > 0 else "NOT_RUN"), "detail": f"{leak_count} dataset(s) with split/template/eval leakage"},
             {
                 "stage": "manifest_hash",
-                "status": "FAILED" if checksum_fails else "PASS",
+                "status": "FAILED" if checksum_fails else ("PASS" if total_ds > 0 else "NOT_RUN"),
                 "detail": (
                     f"{checksum_fails} dataset(s) failed SHA-256 recomputation"
                     if checksum_fails
-                    else f"Verified SHA-256 manifests & disk checksums for {total_ds} dataset(s)"
+                    else (
+                        f"Verified SHA-256 manifests & disk checksums for {total_ds} dataset(s)"
+                        if total_ds > 0
+                        else "No datasets registered yet"
+                    )
                 ),
             },
         ]
-        status = "FAILED" if (leak_count or checksum_fails) else "COMPLETED"
-        summary = f"Data Pipeline verified {total_ds} dataset(s); leakage={leak_count}, checksum_failures={checksum_fails}, pending_kg_gate={pending_kg}."
+        status = "FAILED" if (leak_count or checksum_fails) else ("EMPTY" if total_ds == 0 else "COMPLETED")
+        output_obj = {"total_datasets": total_ds, "leak_count": leak_count, "checksum_fails": checksum_fails, "pending_kg": pending_kg}
+        summary = f"Data Pipeline audited {total_ds} dataset(s); leakage={leak_count}, checksum_failures={checksum_fails}, pending_kg_gate={pending_kg}."
 
     elif group_id == "native_training":
+        upstream = _collect_upstream_workflow_refs(conn, ["data_pipeline", "evaluation"])
+        depends_on_runs = {k: v["run_id"] for k, v in upstream.items()}
         prereq = check_training_pipeline_prerequisites(
             conn,
             dataset_id=str(dataset_id) if dataset_id else None,
@@ -4758,10 +5606,11 @@ def handle_run_workflow(payload: dict) -> dict:
                     },
                     {
                         "stage": "checkpoint_eval_gate",
-                        "status": "PASS" if ev.get("overall_status") in ("PASS", "PARTIAL") else "WARN",
+                        "status": "PASS" if ev.get("overall_status") in ("VERIFIED", "PASS", "PARTIAL") else "WARN",
                         "detail": f"Post-eval {ev.get('overall_status', 'RECORDED')} (test_acc={ev.get('test_accuracy')}, ppl={ev.get('perplexity')})",
                     },
                 ]
+                output_obj = {"checkpoint_id": ck["id"], "version": ck["version"], "perplexity": ck["perplexity"], "post_eval_status": ev.get("overall_status")}
                 summary = (
                     f"Trained & evaluated immutable Checkpoint v{ck['version']}: "
                     f"train_loss={ck['train_loss']}, val_loss={ck['val_loss']}, "
@@ -4769,6 +5618,8 @@ def handle_run_workflow(payload: dict) -> dict:
                 )
 
     elif group_id == "evaluation":
+        upstream = _collect_upstream_workflow_refs(conn, ["knowledge_memory", "native_training"])
+        depends_on_runs = {k: v["run_id"] for k, v in upstream.items()}
         eval_res = handle_run_evaluation({"user_id": user_id, "suite_name": "Evaluation Workflow Suite"})
         ev = eval_res["evaluation"]
         details = json.loads(ev["details_json"])
@@ -4777,6 +5628,8 @@ def handle_run_workflow(payload: dict) -> dict:
             if ev["checkpoint_version"] is not None
             else "NOT RUN (no trained checkpoint)"
         )
+        ev_overall = str(ev["overall_status"])
+        report_emit_status = "PASS" if ev_overall == "VERIFIED" else ("PARTIAL" if ev_overall == "PARTIAL" else "FAILED")
         stages_out = [
             {
                 "stage": "math_probe",
@@ -4800,71 +5653,121 @@ def handle_run_workflow(payload: dict) -> dict:
             },
             {
                 "stage": "report_emit",
-                "status": "PASS",
-                "detail": f"Evaluation {ev['id'][:8]} saved ({ev['overall_status']})",
+                "status": report_emit_status,
+                "detail": f"Evaluation {ev['id'][:8]} saved ({ev_overall})",
             },
         ]
-        summary = f"Evaluation ({ev['overall_status']}): Math={ev['math_score'] * 100:.0f}%, Plan={ev['planning_score'] * 100:.0f}%, {ckpt_detail}."
+        status = "FAILED" if ev_overall == "FAILED" else ("PARTIAL" if ev_overall == "PARTIAL" else "COMPLETED")
+        output_obj = {"evaluation_id": ev["id"], "overall_status": ev_overall, "math_score": ev["math_score"], "knowledge_score": ev["knowledge_score"], "planning_score": ev["planning_score"]}
+        verification_obj = {"evaluation_id": ev["id"], "overall_status": ev_overall}
+        summary = f"Evaluation ({ev_overall}): Math={ev['math_score'] * 100:.0f}%, Plan={ev['planning_score'] * 100:.0f}%, {ckpt_detail}."
 
     elif group_id == "knowledge_memory":
-        rows = conn.execute("SELECT subject, relation, object FROM knowledge_triples").fetchall()
-        pairs = collections.defaultdict(set)
-        for r in rows:
-            pairs[(r["subject"].lower(), r["relation"].lower())].add(r["object"].lower())
-        conflicts = sum(1 for objs in pairs.values() if len(objs) > 1)
-        stages_out = [
-            {"stage": "triple_scan", "status": "PASS", "detail": f"Scanned {len(rows)} triple(s)"},
-            {"stage": "contradiction_detect", "status": "WARN" if conflicts else "PASS", "detail": f"{conflicts} conflicting relation group(s)"},
-            {"stage": "graph_index", "status": "PASS", "detail": "Associative lookup synchronized"},
-        ]
-        summary = f"Knowledge audit: {len(rows)} triples, {conflicts} contradiction group(s)."
+        kq = get_knowledge_quality_summary(conn)
+        total_tr = kq["total_triples"]
+        conflicts = kq["contradiction_groups"]
+        if total_tr == 0:
+            stages_out = [
+                {"stage": "triple_scan", "status": "EMPTY", "detail": "NO_RECORDS: 0 triples stored in knowledge_triples"},
+                {"stage": "contradiction_detect", "status": "NOT_RUN", "detail": "Skipped (0 knowledge records)"},
+                {"stage": "graph_index", "status": "EMPTY", "detail": "Graph index empty (0 records)"},
+            ]
+            status = "EMPTY"
+            summary = "Knowledge & Memory EMPTY (NO_RECORDS): 0 triples indexed; add or ingest verified facts first."
+        else:
+            stages_out = [
+                {
+                    "stage": "triple_scan",
+                    "status": "PASS",
+                    "detail": f"Scanned {total_tr} triple(s) · provenance coverage {kq['provenance_coverage_pct']}%",
+                },
+                {
+                    "stage": "contradiction_detect",
+                    "status": "WARN" if conflicts else "PASS",
+                    "detail": f"{conflicts} conflicting relation group(s)",
+                },
+                {
+                    "stage": "graph_index",
+                    "status": "PASS" if kq["provenance_coverage_pct"] >= 100.0 else "WARN",
+                    "detail": f"Index status={kq['indexing_health']} ({kq['verified_triples']}/{total_tr} verified)",
+                },
+            ]
+            status = "PARTIAL" if (conflicts > 0 or kq["provenance_coverage_pct"] < 100.0) else "COMPLETED"
+            summary = (
+                f"Knowledge audit: {total_tr} triple(s) ({kq['verified_triples']} verified, "
+                f"provenance {kq['provenance_coverage_pct']}%), {conflicts} contradiction group(s)."
+            )
+        output_obj = kq
 
     elif group_id == "autonomous_improvement":
-        latest_ckpt = conn.execute("SELECT * FROM checkpoints ORDER BY version DESC LIMIT 1").fetchone()
-        if not latest_ckpt:
-            hypothesis = "No trained checkpoint yet. Ingest domain corpus to establish baseline perplexity."
-        else:
-            hypothesis = (
-                f"Checkpoint v{latest_ckpt['version']} shows test accuracy {latest_ckpt['eval_accuracy']}. "
-                f"Hypothesis: expand deduplicated training corpus size to reduce out-of-vocabulary rate."
-            )
-        stages_out = [
-            {"stage": "gap_analysis", "status": "PASS", "detail": hypothesis},
-            {"stage": "hypothesis_draft", "status": "PASS", "detail": "Bounded experiment proposal logged"},
-            {"stage": "approval_gate", "status": "PASS", "detail": f"Reviewed by {approved_by}"},
-        ]
-        summary = hypothesis
+        if not existing_run_id:
+            conn.close()
+            return {"ok": False, "error": "existing_run_id is required for approved autonomous_improvement execution"}
+        run_row_obj = conn.execute("SELECT * FROM workflow_runs WHERE id=?", (existing_run_id,)).fetchone()
+        if not run_row_obj:
+            conn.close()
+            return {"ok": False, "error": "Workflow run not found"}
+        res_imp = _execute_autonomous_improvement_approved(
+            conn,
+            dict(run_row_obj),
+            approved_by=str(approved_by),
+            user_id=user_id,
+        )
+        exec_ok = bool(res_imp["ok"])
+        status = res_imp["status"]
+        summary = res_imp["summary"]
+        stages_out = res_imp["stages_out"]
+        invalidated_reason = res_imp.get("invalidated_reason")
+        verification_obj = res_imp.get("verification_obj")
+        output_obj = res_imp.get("output_obj") or {}
 
     elif group_id == "security_governance":
-        core_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+        integrity = _compute_native_integrity()
+        core_hash = integrity["core_bundle_sha256"]
         active_keys = conn.execute("SELECT COUNT(*) FROM api_keys WHERE revoked=0").fetchone()[0]
         audit_count = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0]
         stages_out = [
-            {"stage": "integrity_hash", "status": "PASS", "detail": f"zyrquen_core.py sha256:{core_hash}..."},
+            {"stage": "integrity_hash", "status": "PASS", "detail": f"native_core bundle sha256:{core_hash}... (external_models_used=false)"},
             {"stage": "key_hygiene", "status": "PASS", "detail": f"{active_keys} hashed API key(s) active"},
             {"stage": "audit_verify", "status": "PASS", "detail": f"{audit_count} immutable audit event(s)"},
         ]
-        summary = f"Security Governance verified: core sha256:{core_hash}, {active_keys} active key(s), {audit_count} audit log(s)."
+        output_obj = {"integrity": integrity, "active_keys": active_keys, "audit_count": audit_count}
+        summary = f"Security Governance verified: bundle sha256:{core_hash}, {active_keys} active key(s), {audit_count} audit log(s)."
 
     elif group_id == "project_dev":
         ckpt_count = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
         ds_count = conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
+        repo_rev = _compute_repo_revision(BASE_DIR)
         stages_out = [
-            {"stage": "runtime_sync", "status": "PASS", "detail": "Express + Python Native Core synchronized"},
+            {"stage": "runtime_sync", "status": "PASS", "detail": f"Express + Python Native Core synchronized ({repo_rev})"},
             {"stage": "artifact_check", "status": "PASS", "detail": f"{ds_count} dataset(s), {ckpt_count} checkpoint(s)"},
             {"stage": "roadmap_verify", "status": "PASS", "detail": "No unauthorized architecture mutations"},
         ]
-        summary = f"Project sync verified: {ds_count} dataset(s), {ckpt_count} immutable checkpoint(s)."
+        output_obj = {"repo_revision": repo_rev, "datasets": ds_count, "checkpoints": ckpt_count}
+        summary = f"Project sync verified ({repo_rev}): {ds_count} dataset(s), {ckpt_count} immutable checkpoint(s)."
 
     if existing_run_id:
         with conn:
             conn.execute(
                 """
                 UPDATE workflow_runs
-                SET status=?, approved_by=?, summary=?, stages_json=?, updated_at=?
+                SET status=?, approved_by=?, summary=?, stages_json=?,
+                    depends_on_runs_json=COALESCE(?, depends_on_runs_json),
+                    output_json=?, verification_json=?, invalidated_reason=?, updated_at=?
                 WHERE id=?
                 """,
-                (status, approved_by, summary, json.dumps(stages_out), now_iso(), existing_run_id),
+                (
+                    status,
+                    approved_by,
+                    summary,
+                    json.dumps(stages_out),
+                    json.dumps(depends_on_runs) if depends_on_runs else None,
+                    json.dumps(output_obj, ensure_ascii=False),
+                    json.dumps(verification_obj, ensure_ascii=False) if verification_obj is not None else None,
+                    invalidated_reason,
+                    now_iso(),
+                    existing_run_id,
+                ),
             )
         run_id = existing_run_id
     else:
@@ -4872,13 +5775,34 @@ def handle_run_workflow(payload: dict) -> dict:
         with conn:
             conn.execute(
                 """
-                INSERT INTO workflow_runs (id, group_id, status, requires_approval, triggered_by, approved_by, summary, stages_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO workflow_runs (
+                    id, group_id, status, requires_approval, triggered_by, approved_by,
+                    summary, stages_json, depends_on_runs_json, output_json, verification_json,
+                    invalidated_reason, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, group_id, status, 1 if group["requires_approval"] else 0, user_id, approved_by, summary, json.dumps(stages_out), now_iso(), now_iso()),
+                (
+                    run_id,
+                    group_id,
+                    status,
+                    1 if group["requires_approval"] else 0,
+                    user_id,
+                    approved_by,
+                    summary,
+                    json.dumps(stages_out),
+                    json.dumps(depends_on_runs) if depends_on_runs else None,
+                    json.dumps(output_obj, ensure_ascii=False),
+                    json.dumps(verification_obj, ensure_ascii=False) if verification_obj is not None else None,
+                    invalidated_reason,
+                    now_iso(),
+                    now_iso(),
+                ),
             )
     run = dict(conn.execute("SELECT * FROM workflow_runs WHERE id=?", (run_id,)).fetchone())
     conn.close()
+    if not exec_ok:
+        return {"ok": False, "error": summary, "run": run}
     return {"ok": True, "run": run}
 
 

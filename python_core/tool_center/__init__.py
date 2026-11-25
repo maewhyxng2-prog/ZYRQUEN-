@@ -42,6 +42,10 @@ from .software_engineering import (  # noqa: E402
     run_autonomous_repair_loop,
     run_engineering_benchmark,
 )
+from .autonomous_training import (  # noqa: E402
+    run_autonomous_engineering_curriculum,
+    run_comprehensive_benchmark,
+)
 from .self_improvement import (  # noqa: E402
     decide_improvement_proposal,
     init_self_improvement_schema,
@@ -82,7 +86,9 @@ __all__ = [
     "inspect_sandbox_code_policy",
     "record_task_memory",
     "retrieve_relevant_memories",
+    "run_autonomous_engineering_curriculum",
     "run_autonomous_repair_loop",
+    "run_comprehensive_benchmark",
     "run_engineering_benchmark",
     "run_python_sandbox",
     "run_self_improvement_evaluation",
