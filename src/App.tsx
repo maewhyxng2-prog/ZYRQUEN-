@@ -1005,7 +1005,6 @@ export default function App() {
                   variant || selectedModelVariant
                 )
               }
-              onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
               onRetryLast={
                 lastFailedPrompt
                   ? () =>
@@ -1036,11 +1035,13 @@ export default function App() {
               activeTab={screen === 'analysis' ? 'developer' : user.role !== 'admin' && settingsTab === 'admin' ? 'account' : settingsTab}
               autoExpandTrace={autoExpandTrace}
               defaultMode={defaultMode}
+              selectedModelVariant={selectedModelVariant}
               perfSamples={perfSamples}
               clientLatencies={clientLatencies}
               cleanupVerification={cleanupVerification}
               onCapturePerfSample={handleCapturePerfSampleNow}
               onChangeTab={(nextTab) => pushRoute('settings', null, nextTab)}
+              onChangeModelVariant={(variant) => setSelectedModelVariant(variant)}
               onUpdatePreferences={(prefs) => {
                 if (prefs.autoExpandTrace !== undefined) setAutoExpandTrace(prefs.autoExpandTrace);
                 if (prefs.defaultMode !== undefined) setDefaultMode(prefs.defaultMode);
