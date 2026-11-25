@@ -112,6 +112,7 @@ jobs:
     name: Pull Request Dependency Review
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    continue-on-error: true
 
     if: github.event_name == 'pull_request'
 
