@@ -45,12 +45,14 @@ interface SettingsViewProps {
   activeTab: SettingsTab;
   autoExpandTrace: boolean;
   defaultMode: ReasoningMode;
+  selectedModelVariant: ModelVariantId;
   perfSamples?: MemorySnapshot[];
   clientLatencies?: ClientLatencySample[];
   cleanupVerification?: ThreadCleanupVerification | null;
   onCapturePerfSample?: () => void;
   onChangeTab: (tab: SettingsTab) => void;
   onUpdatePreferences: (prefs: { autoExpandTrace?: boolean; defaultMode?: ReasoningMode }) => void;
+  onChangeModelVariant: (variant: ModelVariantId) => void;
   onLogout: () => void;
 }
 
@@ -60,12 +62,14 @@ export function SettingsView({
   activeTab,
   autoExpandTrace,
   defaultMode,
+  selectedModelVariant,
   perfSamples = [],
   clientLatencies = [],
   cleanupVerification = null,
   onCapturePerfSample,
   onChangeTab,
   onUpdatePreferences,
+  onChangeModelVariant,
   onLogout,
 }: SettingsViewProps) {
   const { theme, setTheme } = useZyrquenTheme();
@@ -578,6 +582,13 @@ export function SettingsView({
             </div>
           ) : (
             <>
+              <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5">
+                <h3 className="text-sm font-semibold text-[var(--color-text)]">การตั้งค่าแกนประมวลผล</h3>
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">เลือกรุ่น Native Model ที่ใช้กับงานใหม่ ค่าเลือกนี้ไม่เปลี่ยนน้ำหนักโมเดล</p>
+                <select aria-label="รุ่นโมเดลเริ่มต้น" value={selectedModelVariant} onChange={(event) => onChangeModelVariant(event.target.value as ModelVariantId)} className="mt-3 min-h-[42px] w-full max-w-xl rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]">
+                  {MODEL_VARIANTS.map((variant) => <option key={variant.id} value={variant.id}>{variant.label} — {variant.description}</option>)}
+                </select>
+              </section>
               <section className="grid gap-4 sm:grid-cols-3">
                 <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4">
                   <p className="text-xs text-[var(--color-text-secondary)]">จำนวนคำขอ API ทั้งหมด</p>
