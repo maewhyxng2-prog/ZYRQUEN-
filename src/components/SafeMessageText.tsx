@@ -31,7 +31,7 @@ function renderInlineSegments(line: string): React.ReactNode[] {
   });
 }
 
-export function SafeMessageText({ content }: { content: string }) {
+export const SafeMessageText = React.memo(function SafeMessageText({ content }: { content: string }) {
   const lines = content.split('\n');
   return (
     <div className="space-y-2 text-[15px] leading-relaxed text-[var(--color-text)]">
@@ -65,4 +65,4 @@ export function SafeMessageText({ content }: { content: string }) {
       })}
     </div>
   );
-}
+});

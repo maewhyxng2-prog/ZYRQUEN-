@@ -158,12 +158,22 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+_ensured_data_dirs: set[str] = set()
+
+
 def get_db() -> sqlite3.Connection:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    dir_key = str(DATA_DIR)
+    if dir_key not in _ensured_data_dirs:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        _ensured_data_dirs.add(dir_key)
     conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=-16000;")
+    conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
@@ -417,6 +427,27 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_reasoning_traces_created
                 ON reasoning_traces(created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_conversations_user_updated
+                ON conversations(user_id, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_messages_conv_created
+                ON messages(conversation_id, created_at ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_knowledge_triples_subj_rel
+                ON knowledge_triples(subject, relation);
+
+            CREATE INDEX IF NOT EXISTS idx_api_keys_user
+                ON api_keys(user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_api_usage_user_created
+                ON api_usage_logs(user_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_workflow_runs_created
+                ON workflow_runs(created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_created
+                ON audit_logs(created_at DESC);
             """
         )
         init_tools_schema(conn, DATA_DIR)
@@ -4098,59 +4129,41 @@ def summarize_conversation(messages: list[dict]) -> dict:
     }
 
 
-def main() -> None:
-    init_db()
-    raw = sys.stdin.read().strip()
-    if not raw:
-        print(json.dumps({"ok": False, "error": "Empty command payload"}))
-        return
-    try:
-        req = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(json.dumps({"ok": False, "error": f"Invalid JSON: {exc}"}))
-        return
-
-    cmd = req.get("cmd")
-    payload = req.get("payload", {})
-
+def dispatch_command(cmd: str, payload: dict) -> dict:
     if cmd == "init":
-        print(json.dumps({"ok": True, "db_path": str(DB_PATH)}))
-    elif cmd == "health":
+        return {"ok": True, "db_path": str(DB_PATH)}
+    if cmd == "health":
         conn = get_db()
         triples = conn.execute("SELECT COUNT(*) FROM knowledge_triples").fetchone()[0]
         ckpts = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
         datasets = conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
         conn.close()
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "metrics": get_system_metrics(),
-                    "counts": {"triples": triples, "checkpoints": ckpts, "datasets": datasets},
-                }
-            )
-        )
-    elif cmd == "infer":
+        return {
+            "ok": True,
+            "metrics": get_system_metrics(),
+            "counts": {"triples": triples, "checkpoints": ckpts, "datasets": datasets},
+        }
+    if cmd == "infer":
         res = handle_infer(payload)
-        print(json.dumps({"ok": True, **res}))
-    elif cmd == "ingest_dataset":
-        print(json.dumps(handle_ingest_dataset(payload)))
-    elif cmd == "run_workflow":
-        print(json.dumps(handle_run_workflow(payload)))
-    elif cmd == "evaluate":
-        print(json.dumps(handle_run_evaluation(payload)))
-    elif cmd == "evaluations_list":
+        return {"ok": True, **res}
+    if cmd == "ingest_dataset":
+        return handle_ingest_dataset(payload)
+    if cmd == "run_workflow":
+        return handle_run_workflow(payload)
+    if cmd == "evaluate":
+        return handle_run_evaluation(payload)
+    if cmd == "evaluations_list":
         conn = get_db()
         rows = [dict(r) for r in conn.execute("SELECT * FROM evaluations ORDER BY created_at DESC LIMIT 15").fetchall()]
         conn.close()
-        print(json.dumps({"ok": True, "evaluations": rows}))
-    elif cmd == "run_mission":
-        print(json.dumps(run_autonomous_mission(payload)))
-    elif cmd == "resume_mission":
-        print(json.dumps(resume_autonomous_mission(payload)))
-    elif cmd == "cancel_mission":
-        print(json.dumps(cancel_autonomous_mission(payload)))
-    elif cmd == "run_experiment":
+        return {"ok": True, "evaluations": rows}
+    if cmd == "run_mission":
+        return run_autonomous_mission(payload)
+    if cmd == "resume_mission":
+        return resume_autonomous_mission(payload)
+    if cmd == "cancel_mission":
+        return cancel_autonomous_mission(payload)
+    if cmd == "run_experiment":
         conn = get_db()
         res = run_controlled_neural_experiment(
             conn,
@@ -4161,8 +4174,8 @@ def main() -> None:
             seed=int(payload.get("seed", 42)),
         )
         conn.close()
-        print(json.dumps(res))
-    elif cmd == "decide_experiment":
+        return res
+    if cmd == "decide_experiment":
         conn = get_db()
         res = decide_experiment(
             conn,
@@ -4173,8 +4186,8 @@ def main() -> None:
             admin_id=str(payload.get("admin_id", "admin")),
         )
         conn.close()
-        print(json.dumps(res))
-    elif cmd == "curate_corpus":
+        return res
+    if cmd == "curate_corpus":
         conn = get_db()
         res = curate_verified_training_corpus(
             conn,
@@ -4183,8 +4196,8 @@ def main() -> None:
             name=str(payload.get("name", "verified-knowledge-corpus")),
         )
         conn.close()
-        print(json.dumps(res))
-    elif cmd == "synthesize_curriculum":
+        return res
+    if cmd == "synthesize_curriculum":
         conn = get_db()
         res = synthesize_failure_curriculum(
             conn,
@@ -4192,8 +4205,8 @@ def main() -> None:
             limit=int(payload.get("limit", 50)),
         )
         conn.close()
-        print(json.dumps(res))
-    elif cmd == "run_continual_round":
+        return res
+    if cmd == "run_continual_round":
         conn = get_db()
         res = run_continual_learning_round(
             conn,
@@ -4210,11 +4223,27 @@ def main() -> None:
             seed=int(payload.get("seed", 42)),
         )
         conn.close()
-        print(json.dumps(res))
-    elif cmd == "workflow_groups":
-        print(json.dumps({"ok": True, "groups": WORKFLOW_GROUPS}))
-    else:
-        print(json.dumps({"ok": False, "error": f"Unknown command '{cmd}'"}))
+        return res
+    if cmd == "workflow_groups":
+        return {"ok": True, "groups": WORKFLOW_GROUPS}
+    return {"ok": False, "error": f"Unknown command '{cmd}'"}
+
+
+def main() -> None:
+    init_db()
+    raw = sys.stdin.read().strip()
+    if not raw:
+        print(json.dumps({"ok": False, "error": "Empty command payload"}))
+        return
+    try:
+        req = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(json.dumps({"ok": False, "error": f"Invalid JSON: {exc}"}))
+        return
+
+    cmd = str(req.get("cmd", ""))
+    payload = req.get("payload", {})
+    print(json.dumps(dispatch_command(cmd, payload)))
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 import crypto from 'crypto';
-import { spawn } from 'child_process';
+import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import dotenv from 'dotenv';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import readline from 'readline';
 import { fileURLToPath } from 'url';
 
 dotenv.config();
@@ -30,45 +31,175 @@ interface AuthedRequest extends Request {
   tokenJti?: string;
 }
 
+interface PendingWorkerCall {
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+  timer: NodeJS.Timeout;
+}
+
+class PythonWorkerClient {
+  private child: ChildProcessWithoutNullStreams | null = null;
+  private readyPromise: Promise<void> | null = null;
+  private pending = new Map<string, PendingWorkerCall>();
+  private rl: readline.Interface | null = null;
+  private stderrTail = '';
+  readonly dataDir: string;
+
+  constructor(dataDir: string) {
+    this.dataDir = dataDir;
+  }
+
+  private ensureStarted(): Promise<void> {
+    if (this.readyPromise && this.child && !this.child.killed && this.child.exitCode === null) {
+      return this.readyPromise;
+    }
+
+    this.readyPromise = new Promise<void>((resolve, reject) => {
+      const workerPath = path.resolve(__dirname, 'python_core', 'worker.py');
+      const child = spawn('python3', [workerPath], {
+        cwd: __dirname,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          PYTHONPATH: path.resolve(__dirname, 'python_core'),
+        },
+      });
+      child.unref();
+      this.child = child;
+      this.stderrTail = '';
+
+      let settledReady = false;
+      const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+      this.rl = rl;
+
+      child.stderr.on('data', (chunk: Buffer) => {
+        this.stderrTail = (this.stderrTail + chunk.toString('utf-8')).slice(-2000);
+      });
+
+      rl.on('line', (line: string) => {
+        if (!line.trim()) return;
+        let msg: { id?: string; ready?: boolean; ok?: boolean; result?: unknown; error?: string };
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (msg.ready && !settledReady) {
+          settledReady = true;
+          resolve();
+          return;
+        }
+        if (!msg.id) return;
+        const entry = this.pending.get(msg.id);
+        if (!entry) return;
+        this.pending.delete(msg.id);
+        clearTimeout(entry.timer);
+        if (msg.ok) {
+          entry.resolve(msg.result);
+        } else {
+          entry.reject(new Error(msg.error || 'Python worker call failed'));
+        }
+      });
+
+      const failAll = (err: Error) => {
+        if (!settledReady) {
+          settledReady = true;
+          reject(err);
+        }
+        for (const [id, entry] of this.pending.entries()) {
+          clearTimeout(entry.timer);
+          entry.reject(err);
+          this.pending.delete(id);
+        }
+        this.rl?.close();
+        this.rl = null;
+        this.child = null;
+        this.readyPromise = null;
+      };
+
+      child.on('error', (err) => failAll(err));
+      child.on('exit', (code) => {
+        failAll(new Error(this.stderrTail.trim() || `Python worker exited with code ${code ?? 'unknown'}`));
+      });
+    });
+
+    return this.readyPromise;
+  }
+
+  async call<T>(scriptName: 'zyrquen_core.py' | 'db_bridge.py', input: Record<string, unknown>): Promise<T> {
+    await this.ensureStarted();
+    const child = this.child;
+    if (!child || child.exitCode !== null) {
+      throw new Error('Python worker unavailable');
+    }
+    const id = crypto.randomUUID();
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Python worker timeout for ${scriptName}`));
+      }, 60_000);
+      timer.unref();
+      this.pending.set(id, {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        timer,
+      });
+      const frame = JSON.stringify({ id, script: scriptName, input }) + '\n';
+      child.stdin.write(frame, (err) => {
+        if (err) {
+          const entry = this.pending.get(id);
+          if (entry) {
+            clearTimeout(entry.timer);
+            this.pending.delete(id);
+            entry.reject(err);
+          }
+        }
+      });
+    });
+  }
+
+  dispose(): void {
+    for (const [id, entry] of this.pending.entries()) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error('Python worker disposed'));
+      this.pending.delete(id);
+    }
+    this.rl?.close();
+    this.rl = null;
+    if (this.child && this.child.exitCode === null) {
+      this.child.kill('SIGTERM');
+    }
+    this.child = null;
+    this.readyPromise = null;
+  }
+}
+
+let activeWorker: PythonWorkerClient | null = null;
+let exitHookRegistered = false;
+
+function getPythonWorker(): PythonWorkerClient {
+  const currentDataDir = process.env.ZYRQUEN_DATA_DIR || '';
+  if (activeWorker && activeWorker.dataDir !== currentDataDir) {
+    activeWorker.dispose();
+    activeWorker = null;
+  }
+  if (!activeWorker) {
+    activeWorker = new PythonWorkerClient(currentDataDir);
+  }
+  if (!exitHookRegistered) {
+    exitHookRegistered = true;
+    process.once('exit', () => {
+      activeWorker?.dispose();
+    });
+  }
+  return activeWorker;
+}
+
 function runPythonScript<T = Record<string, unknown>>(
   scriptName: 'zyrquen_core.py' | 'db_bridge.py',
   input: Record<string, unknown>
 ): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const scriptPath = path.resolve(__dirname, 'python_core', scriptName);
-    const child = spawn('python3', [scriptPath], {
-      cwd: __dirname,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        PYTHONPATH: path.resolve(__dirname, 'python_core'),
-      },
-    });
-
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf-8');
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf-8');
-    });
-    child.on('error', (err) => reject(err));
-    child.on('close', (code) => {
-      if (code !== 0) {
-        return reject(new Error(stderr.trim() || `Python exited with code ${code}`));
-      }
-      try {
-        const parsed = JSON.parse(stdout.trim()) as T;
-        resolve(parsed);
-      } catch (err) {
-        reject(new Error(`Invalid JSON from ${scriptName}: ${(err as Error).message}`));
-      }
-    });
-
-    child.stdin.write(JSON.stringify(input));
-    child.stdin.end();
-  });
+  return getPythonWorker().call<T>(scriptName, input);
 }
 
 function hashPassword(password: string): string {
@@ -1711,7 +1842,18 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
     app.use(vite.middlewares);
   } else if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve(__dirname, 'dist');
-    app.use(express.static(distDir));
+    app.use(
+      express.static(distDir, {
+        maxAge: '7d',
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith(`${path.sep}index.html`)) {
+            res.setHeader('Cache-Control', 'no-cache');
+          } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
       const indexFile = path.resolve(distDir, 'index.html');
       if (fs.existsSync(indexFile)) {

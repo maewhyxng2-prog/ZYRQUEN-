@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -22,8 +22,11 @@ import { apiRequest, ApiError } from '../lib/api';
 import { runNativeCapabilityBenchmark } from '../lib/benchmark';
 import { useZyrquenTheme } from '../lib/theme';
 import { MODEL_VARIANTS } from '../types';
-import { AdminStabilityPanel } from './AdminStabilityPanel';
 import { ToolRegistry } from './ToolRegistry';
+
+const AdminStabilityPanel = lazy(() =>
+  import('./AdminStabilityPanel').then((m) => ({ default: m.AdminStabilityPanel }))
+);
 import type {
   AdminOverview,
   ClientLatencySample,
@@ -1218,15 +1221,23 @@ export function SettingsView({
               กำลังโหลดระบบธรรมาภิบาล...
             </div>
           ) : adminSubTab === 'stability' ? (
-            <AdminStabilityPanel
-              adminData={adminData}
-              perfSamples={perfSamples}
-              clientLatencies={clientLatencies}
-              cleanupVerification={cleanupVerification}
-              loading={loading}
-              onCapturePerfSample={onCapturePerfSample}
-              onRefreshAdmin={() => void loadAdmin()}
-            />
+            <Suspense
+              fallback={
+                <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-6 text-sm text-[var(--color-text-secondary)]">
+                  กำลังโหลดแผงเสถียรภาพระบบ...
+                </div>
+              }
+            >
+              <AdminStabilityPanel
+                adminData={adminData}
+                perfSamples={perfSamples}
+                clientLatencies={clientLatencies}
+                cleanupVerification={cleanupVerification}
+                loading={loading}
+                onCapturePerfSample={onCapturePerfSample}
+                onRefreshAdmin={() => void loadAdmin()}
+              />
+            </Suspense>
           ) : (
             <>
               {(() => {

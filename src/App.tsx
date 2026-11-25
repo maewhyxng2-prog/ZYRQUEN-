@@ -1,13 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { WifiOff } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { AppShell } from './components/AppShell';
 import { AuthGate } from './components/AuthGate';
-import { CommandPalette } from './components/CommandPalette';
 import { HomeView } from './components/HomeView';
-import { MemoryWorkflowsView } from './components/MemoryWorkflowsView';
-import { SettingsView } from './components/SettingsView';
-import { WorkspaceView } from './components/WorkspaceView';
+
+const CommandPalette = lazy(() =>
+  import('./components/CommandPalette').then((m) => ({ default: m.CommandPalette }))
+);
+const MemoryWorkflowsView = lazy(() =>
+  import('./components/MemoryWorkflowsView').then((m) => ({ default: m.MemoryWorkflowsView }))
+);
+const SettingsView = lazy(() =>
+  import('./components/SettingsView').then((m) => ({ default: m.SettingsView }))
+);
+const WorkspaceView = lazy(() =>
+  import('./components/WorkspaceView').then((m) => ({ default: m.WorkspaceView }))
+);
 import { apiRequest, ApiError, streamConversationMessage } from './lib/api';
 import { useZyrquenTheme } from './lib/theme';
 import type {
@@ -962,95 +971,107 @@ export default function App() {
             />
           )}
 
-          {screen === 'workspace' && (
-            <WorkspaceView
-              token={token}
-              conversations={conversations}
-              activeConversationId={activeConversationId}
-              activeTitle={activeTitle}
-              messages={messages}
-              loadingThread={loadingThread}
-              sending={sending}
-              streamingContent={streamingContent}
-              error={workspaceError}
-              autoExpandTrace={autoExpandTrace}
-              defaultMode={defaultMode}
-              defaultModelVariant={selectedModelVariant}
-              onSelectConversation={(cid) => {
-                if (cid !== activeConversationId) {
-                  activeStreamControllerRef.current?.abort();
-                  activeStreamControllerRef.current = null;
+          <Suspense
+            fallback={
+              <div className="py-12 text-center text-sm text-[var(--color-text-muted)]">
+                กำลังโหลด...
+              </div>
+            }
+          >
+            {screen === 'workspace' && (
+              <WorkspaceView
+                token={token}
+                conversations={conversations}
+                activeConversationId={activeConversationId}
+                activeTitle={activeTitle}
+                messages={messages}
+                loadingThread={loadingThread}
+                sending={sending}
+                streamingContent={streamingContent}
+                error={workspaceError}
+                autoExpandTrace={autoExpandTrace}
+                defaultMode={defaultMode}
+                defaultModelVariant={selectedModelVariant}
+                onSelectConversation={(cid) => {
+                  if (cid !== activeConversationId) {
+                    activeStreamControllerRef.current?.abort();
+                    activeStreamControllerRef.current = null;
+                  }
+                  pushRoute('workspace', cid, settingsTab);
+                }}
+                onNewConversation={() => void handleNewConversation()}
+                onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
+                onSendMessage={(content, mode, attachment, variant) =>
+                  sendMessageToConversation(
+                    activeConversationId,
+                    content,
+                    mode,
+                    attachment,
+                    variant || selectedModelVariant
+                  )
                 }
-                pushRoute('workspace', cid, settingsTab);
-              }}
-              onNewConversation={() => void handleNewConversation()}
-              onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
-              onSendMessage={(content, mode, attachment, variant) =>
-                sendMessageToConversation(
-                  activeConversationId,
-                  content,
-                  mode,
-                  attachment,
-                  variant || selectedModelVariant
-                )
-              }
-              onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
-              onRetryLast={
-                lastFailedPrompt
-                  ? () =>
-                      void sendMessageToConversation(
-                        activeConversationId,
-                        lastFailedPrompt.content,
-                        lastFailedPrompt.mode,
-                        lastFailedPrompt.attachment,
-                        lastFailedPrompt.modelVariant || selectedModelVariant
-                      )
-                  : undefined
-              }
-            />
-          )}
+                onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
+                onRetryLast={
+                  lastFailedPrompt
+                    ? () =>
+                        void sendMessageToConversation(
+                          activeConversationId,
+                          lastFailedPrompt.content,
+                          lastFailedPrompt.mode,
+                          lastFailedPrompt.attachment,
+                          lastFailedPrompt.modelVariant || selectedModelVariant
+                        )
+                    : undefined
+                }
+              />
+            )}
 
-          {screen === 'memory' && <MemoryWorkflowsView token={token} user={user} />}
+            {screen === 'memory' && <MemoryWorkflowsView token={token} user={user} />}
 
-          {screen === 'settings' && (
-            <SettingsView
-              token={token}
-              user={user}
-              activeTab={user.role !== 'admin' && settingsTab === 'admin' ? 'account' : settingsTab}
-              autoExpandTrace={autoExpandTrace}
-              defaultMode={defaultMode}
-              perfSamples={perfSamples}
-              clientLatencies={clientLatencies}
-              cleanupVerification={cleanupVerification}
-              onCapturePerfSample={handleCapturePerfSampleNow}
-              onChangeTab={(nextTab) => pushRoute('settings', null, nextTab)}
-              onUpdatePreferences={(prefs) => {
-                if (prefs.autoExpandTrace !== undefined) setAutoExpandTrace(prefs.autoExpandTrace);
-                if (prefs.defaultMode !== undefined) setDefaultMode(prefs.defaultMode);
-              }}
-              onLogout={() => void handleLogout()}
-            />
-          )}
+            {screen === 'settings' && (
+              <SettingsView
+                token={token}
+                user={user}
+                activeTab={user.role !== 'admin' && settingsTab === 'admin' ? 'account' : settingsTab}
+                autoExpandTrace={autoExpandTrace}
+                defaultMode={defaultMode}
+                perfSamples={perfSamples}
+                clientLatencies={clientLatencies}
+                cleanupVerification={cleanupVerification}
+                onCapturePerfSample={handleCapturePerfSampleNow}
+                onChangeTab={(nextTab) => pushRoute('settings', null, nextTab)}
+                onUpdatePreferences={(prefs) => {
+                  if (prefs.autoExpandTrace !== undefined) setAutoExpandTrace(prefs.autoExpandTrace);
+                  if (prefs.defaultMode !== undefined) setDefaultMode(prefs.defaultMode);
+                }}
+                onLogout={() => void handleLogout()}
+              />
+            )}
+          </Suspense>
         </motion.div>
       </AnimatePresence>
 
-      <CommandPalette
-        open={paletteOpen}
-        user={user}
-        conversations={conversations}
-        onClose={() => setPaletteOpen(false)}
-        onNavigate={(nextScreen, nextTab) => {
-          if (nextScreen === 'settings') {
-            pushRoute('settings', null, nextTab || 'account');
-          } else if (nextScreen === 'workspace') {
-            pushRoute('workspace', activeConversationId, settingsTab);
-          } else {
-            pushRoute(nextScreen, null, settingsTab);
-          }
-        }}
-        onNewConversation={handleNewConversation}
-        onOpenConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
-      />
+      {paletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette
+            open={paletteOpen}
+            user={user}
+            conversations={conversations}
+            onClose={() => setPaletteOpen(false)}
+            onNavigate={(nextScreen, nextTab) => {
+              if (nextScreen === 'settings') {
+                pushRoute('settings', null, nextTab || 'account');
+              } else if (nextScreen === 'workspace') {
+                pushRoute('workspace', activeConversationId, settingsTab);
+              } else {
+                pushRoute(nextScreen, null, settingsTab);
+              }
+            }}
+            onNewConversation={handleNewConversation}
+            onOpenConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
+          />
+        </Suspense>
+      )}
     </AppShell>
   );
 }
