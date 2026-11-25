@@ -474,7 +474,10 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
 
     expect(await screen.findByText(/สวัสดี, สมาชิกทดสอบ/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'คำนวณ AST เชิงสัญลักษณ์' }));
+    fireEvent.change(screen.getByLabelText('กำหนดเป้าหมายของงาน'), {
+      target: { value: 'คำนวณ (2^12 - 96) / 16' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /เริ่มดำเนินงาน/i }));
     expect(await screen.findByText('250')).toBeInTheDocument();
     expect(window.location.search).toContain('view=workspace');
 
@@ -668,6 +671,10 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(screen.getByRole('navigation', { name: 'แถบนำทางมือถือ' })).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'สร้างงาน' })[0]);
+    expect(await screen.findByLabelText('เป้าหมายงาน')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'หน้าหลัก ZYRQUEN' }));
+
+    fireEvent.click(screen.getByText('เซสชันคณิตศาสตร์ก่อนหน้า'));
     expect(await screen.findByLabelText('ช่องพิมพ์ข้อความ')).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'แถบนำทางมือถือ' })).not.toBeInTheDocument();
 
@@ -769,7 +776,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(signInButtons[signInButtons.length - 1]);
 
     expect(await screen.findByText(/สวัสดี, ผู้ดูแลเสียง/i)).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'สร้างงาน' })[0]);
+    fireEvent.keyDown(window, { key: 'n', altKey: true });
 
     const micBtn = await screen.findByRole('button', { name: /พิมพ์ด้วยเสียง/i });
     fireEvent.click(micBtn);
