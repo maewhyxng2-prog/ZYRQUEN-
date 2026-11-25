@@ -387,3 +387,206 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
     expect(clJson.continual_metrics.retention_rate).toBeGreaterThanOrEqual(0);
   }, 45_000);
 });
+
+describe('Isolated 6-Step Non-Skippable Native Training Pipeline Gate E2E', () => {
+  let gateServer: http.Server;
+  let gateBaseUrl = '';
+  let gateTmpDir = '';
+  let prevDataDir: string | undefined;
+  let prevNoAutostart: string | undefined;
+
+  beforeAll(async () => {
+    gateTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zyrquen-e2e-6step-'));
+    prevDataDir = process.env.ZYRQUEN_DATA_DIR;
+    prevNoAutostart = process.env.ZYRQUEN_NO_AUTOSTART;
+    process.env.ZYRQUEN_DATA_DIR = gateTmpDir;
+    process.env.ZYRQUEN_NO_AUTOSTART = '1';
+
+    const { createApp } = await import('../../server');
+    const app = await createApp({ attachVite: false });
+    await new Promise<void>((resolve) => {
+      gateServer = app.listen(0, '127.0.0.1', () => resolve());
+    });
+    const addr = gateServer.address();
+    if (!addr || typeof addr === 'string') {
+      throw new Error('Failed to bind ephemeral 6-step E2E server port');
+    }
+    gateBaseUrl = `http://127.0.0.1:${addr.port}`;
+  }, 30_000);
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => {
+      if (!gateServer) return resolve();
+      gateServer.close(() => resolve());
+    });
+    if (prevDataDir === undefined) {
+      delete process.env.ZYRQUEN_DATA_DIR;
+    } else {
+      process.env.ZYRQUEN_DATA_DIR = prevDataDir;
+    }
+    if (prevNoAutostart === undefined) {
+      delete process.env.ZYRQUEN_NO_AUTOSTART;
+    } else {
+      process.env.ZYRQUEN_NO_AUTOSTART = prevNoAutostart;
+    }
+    fs.rmSync(gateTmpDir, { recursive: true, force: true });
+  });
+
+  it('Enforces strict 6-step non-skippable native training order (Data+Provenance -> Baseline -> Approval -> Train -> Checkpoint Eval)', async () => {
+    const setupRes = await fetch(`${gateBaseUrl}/api/auth/claim-admin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'gate-admin@zyrquen.local',
+        displayName: 'Gate Admin',
+        password: 'StrongPassword123!',
+      }),
+    });
+    expect(setupRes.status).toBe(201);
+    const setupJson = (await setupRes.json()) as { token: string };
+    const authHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${setupJson.token}`,
+    };
+
+    // Initial empty DB must report BLOCKED
+    const initOverview = await fetch(`${gateBaseUrl}/api/admin/overview`, { headers: authHeaders });
+    expect(initOverview.status).toBe(200);
+    const initJson = (await initOverview.json()) as {
+      training_readiness?: { gate_status: string; datasets_total: number; baseline_evaluations?: number };
+    };
+    expect(initJson.training_readiness?.gate_status).toBe('BLOCKED');
+    expect(initJson.training_readiness?.datasets_total).toBe(0);
+    expect(initJson.training_readiness?.baseline_evaluations).toBe(0);
+
+    // Step 1/2: Synthetic/external LLM provenance must be rejected
+    const fakeProvRes = await fetch(`${gateBaseUrl}/api/developer/datasets`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        name: 'synthetic-rejected',
+        provenance: 'synthetic_llm_gpt',
+        content: [
+          'alpha fact line one verified',
+          'beta fact line two verified',
+          'gamma fact line three verified',
+          'delta fact line four verified',
+          'epsilon fact line five verified',
+        ].join('\n'),
+      }),
+    });
+    expect(fakeProvRes.status).toBe(400);
+
+    // Step 1/2: Real dataset ingest succeeds with clean split & SHA-256 manifest
+    const realDsRes = await fetch(`${gateBaseUrl}/api/developer/datasets`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        name: 'verified-field-corpus',
+        provenance: 'human_verified_field_notes',
+        content: [
+          'native symbolic algebra computes deterministic roots cleanly',
+          'knowledge graph stores verified provenance triples in sqlite',
+          'planning workflows verify prerequisites before model training',
+          'evaluation suites measure generalization on unseen entities',
+          'checkpoint governance protects historical baselines from overwrite',
+          'resource telemetry tracks real ram cpu and storage margins',
+        ].join('\n'),
+      }),
+    });
+    expect(realDsRes.status).toBe(201);
+    const realDsJson = (await realDsRes.json()) as {
+      ok: boolean;
+      dataset: { id: string; leakage_detected: number; total_records: number };
+    };
+    expect(realDsJson.ok).toBe(true);
+    expect(realDsJson.dataset.leakage_detected).toBe(0);
+    expect(realDsJson.dataset.total_records).toBeGreaterThanOrEqual(5);
+
+    // Before Step 3 (Baseline Evaluation): readiness must be BLOCKED_NO_BASELINE
+    const preBaselineOverview = await fetch(`${gateBaseUrl}/api/admin/overview`, { headers: authHeaders });
+    expect(preBaselineOverview.status).toBe(200);
+    const preBaselineJson = (await preBaselineOverview.json()) as {
+      training_readiness?: { gate_status: string; baseline_evaluations?: number };
+    };
+    expect(preBaselineJson.training_readiness?.gate_status).toBe('BLOCKED_NO_BASELINE');
+    expect(preBaselineJson.training_readiness?.baseline_evaluations).toBe(0);
+
+    // Skipping Step 3 via workflow or experiment must fail closed (400)
+    const skipBaselineWf = await fetch(`${gateBaseUrl}/api/workflows/native_training/run`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ datasetId: realDsJson.dataset.id }),
+    });
+    expect(skipBaselineWf.status).toBe(400);
+
+    const skipBaselineExp = await fetch(`${gateBaseUrl}/api/developer/experiments`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ datasetId: realDsJson.dataset.id, epochs: 2 }),
+    });
+    expect(skipBaselineExp.status).toBe(400);
+
+    // Step 3: Run genuine baseline evaluation
+    const baselineEvalRes = await fetch(`${gateBaseUrl}/api/developer/evaluate`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ suiteName: 'Pre-Training Baseline Suite' }),
+    });
+    expect(baselineEvalRes.status).toBe(201);
+
+    // Before Step 4 (Approval Gate): direct experiment without approved training run must STILL be blocked (400)
+    const skipApprovalExp = await fetch(`${gateBaseUrl}/api/developer/experiments`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ datasetId: realDsJson.dataset.id, epochs: 2 }),
+    });
+    expect(skipApprovalExp.status).toBe(400);
+
+    // Step 4: Submit native_training workflow to Approval Gate -> PENDING_APPROVAL
+    const gateSubmitRes = await fetch(`${gateBaseUrl}/api/workflows/native_training/run`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ datasetId: realDsJson.dataset.id }),
+    });
+    expect(gateSubmitRes.status).toBe(201);
+    const gateSubmitJson = (await gateSubmitRes.json()) as {
+      ok: boolean;
+      run: { id: string; status: string };
+    };
+    expect(gateSubmitJson.ok).toBe(true);
+    expect(gateSubmitJson.run.status).toBe('PENDING_APPROVAL');
+
+    // Step 4 -> 5 -> 6: Admin approval executes training and post-training checkpoint evaluation
+    const approveRes = await fetch(`${gateBaseUrl}/api/workflows/runs/${gateSubmitJson.run.id}/decide`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ decision: 'approve', datasetId: realDsJson.dataset.id }),
+    });
+    expect(approveRes.status).toBe(200);
+    const approveJson = (await approveRes.json()) as {
+      ok: boolean;
+      run: { status: string; stages_json: string };
+    };
+    expect(approveJson.ok).toBe(true);
+    expect(approveJson.run.status).toBe('COMPLETED');
+    const stages = JSON.parse(approveJson.run.stages_json) as Array<{ stage: string; status: string }>;
+    expect(stages.map((s) => s.stage)).toEqual([
+      'provenance_leakage_gate',
+      'baseline_verify',
+      'approval_gate',
+      'checkpoint_train',
+      'checkpoint_eval_gate',
+    ]);
+    expect(stages.every((s) => s.status === 'PASS')).toBe(true);
+
+    // Now approved experiment can run cleanly
+    const expRes = await fetch(`${gateBaseUrl}/api/developer/experiments`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ datasetId: realDsJson.dataset.id, epochs: 2, seed: 7 }),
+    });
+    expect(expRes.status).toBe(201);
+  }, 60_000);
+});
+

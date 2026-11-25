@@ -295,6 +295,7 @@ def get_training_readiness(
         reasons.append("No active signed Tier-2 approval token for training.execute (required before dispatch).")
 
     configured = dataset_configured and tokenizer_configured and admin_configured
+    approval_ready = approved_training_approvals > 0
     all_ready = (
         dataset_verified
         and four_split_present
@@ -304,6 +305,7 @@ def get_training_readiness(
         and worker_ready
         and not worker_busy
         and admin_configured
+        and approval_ready
     )
     status_value = (
         "ready"
@@ -326,6 +328,7 @@ def get_training_readiness(
         "admin_allowlist_configured": admin_configured,
         "is_training_admin": is_training_admin,
         "tier2_approval_required": True,
+        "approval_ready": approval_ready,
         "approval_secret_configured": approval_secret_configured,
         "approved_training_approvals": approved_training_approvals,
         "pending_training_approvals": pending_training_approvals,

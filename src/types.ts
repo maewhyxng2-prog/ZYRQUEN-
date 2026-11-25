@@ -501,9 +501,17 @@ export interface ToolsOverview {
 }
 
 export interface TrainingReadinessSummary {
-  gate_status: 'BLOCKED' | 'AWAITING_APPROVAL' | 'READY_FOR_TRAINING_GATE' | 'VERIFIED' | string;
+  gate_status:
+    | 'BLOCKED'
+    | 'BLOCKED_NO_BASELINE'
+    | 'AWAITING_APPROVAL'
+    | 'READY_FOR_TRAINING_GATE'
+    | 'VERIFIED'
+    | string;
   datasets_total: number;
   clean_datasets: number;
+  baseline_evaluations?: number;
+  approved_training_runs?: number;
   triples_total: number;
   verified_triples: number;
   experiments_total: number;

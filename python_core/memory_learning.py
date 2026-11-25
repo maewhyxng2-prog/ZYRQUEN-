@@ -142,7 +142,14 @@ def curate_verified_training_corpus(
             "ok": False,
             "error": f"ต้องการข้อเท็จจริงที่ยืนยันแล้วอย่างน้อย 5 รายการ (พบ {len(lines)} รายการ)",
         }
-    return ingest_fn({"name": name, "content": "\n".join(lines), "user_id": user_id})
+    return ingest_fn(
+        {
+            "name": name,
+            "content": "\n".join(lines),
+            "user_id": user_id,
+            "provenance": "verified_knowledge_graph",
+        }
+    )
 
 
 def run_controlled_neural_experiment(
@@ -153,9 +160,11 @@ def run_controlled_neural_experiment(
     dataset_id: str | None = None,
     epochs: int = 8,
     seed: int = 42,
+    require_baseline_and_approval: bool = False,
 ) -> dict[str, Any]:
     """
     Execute an isolated controlled training experiment on a clean dataset:
+    - Enforces provenance, zero data leakage, baseline evaluation, and approval gate when strict mode enabled
     - Compares random-initialized baseline loss/perplexity vs post-training held-out val/test loss
     - Saves candidate checkpoint artifact without overwriting active checkpoints
     - Records experiment in `experiments` table requiring Admin approval to promote
@@ -170,6 +179,25 @@ def run_controlled_neural_experiment(
         return {"ok": False, "error": "ไม่พบชุดข้อมูลที่สะอาดสำหรับรันการทดลอง"}
     if ds["leakage_detected"]:
         return {"ok": False, "error": "ปฏิเสธการทดลอง: ชุดข้อมูลมี Data Leakage"}
+
+    if require_baseline_and_approval:
+        eval_count = int(conn.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0])
+        baseline_count = int(conn.execute("SELECT COUNT(*) FROM capability_baselines").fetchone()[0])
+        if eval_count == 0 and baseline_count == 0:
+            return {
+                "ok": False,
+                "error": "Training blocked (Step 3): ต้องประเมิน Baseline ก่อนจึงจะรันการทดลองฝึกได้",
+            }
+        approved_runs = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM workflow_runs WHERE group_id='native_training' AND status='COMPLETED' AND approved_by IS NOT NULL"
+            ).fetchone()[0]
+        )
+        if approved_runs == 0:
+            return {
+                "ok": False,
+                "error": "Training blocked (Step 4): ต้องผ่านการตรวจสอบและอนุมัติจากผู้ดูแลระบบ (Approval Gate) ก่อนเริ่มฝึก",
+            }
 
     splits = json.loads(ds["records_json"])
     train_lines = splits.get("train", [])

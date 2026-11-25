@@ -338,6 +338,7 @@ def test_training_readiness_enforces_v11_four_split_and_leakage_detection(api_cl
     assert res_leaked["dataset"]["leakage_check"]["passed"] is False
 
     # 3. Clean V11 4-split dataset passes DataAdapter verification, leakage check, and orchestrator preflight
+    #    but MUST remain status='not_ready' without an active signed Tier-2 training.execute approval.
     ds_clean = _build_v11_dataset(tmp_path / "ds_v11_clean", leak=False)
     monkeypatch.setenv("ZYRQUEN_DATASET_DIR", str(ds_clean))
     res_clean = client.get("/training/readiness").json()
@@ -347,3 +348,135 @@ def test_training_readiness_enforces_v11_four_split_and_leakage_detection(api_cl
     assert res_clean["tokenizer"]["valid"] is True
     assert res_clean["preflight"]["passed"] is True
     assert res_clean["preflight"]["resource_limits_checked"] is True
+    assert res_clean["approval_ready"] is False
+    assert res_clean["status"] == "not_ready"
+
+
+def test_training_readiness_requires_active_signed_approval_for_ready_status(api_client, monkeypatch):
+    from apps.api.routers import workflows as workflows_router
+    from apps.core.workflow import CentralWorkflowOrchestrator, WorkflowStepSpec
+
+    client, _, user, tmp_path = api_client
+    tok = tmp_path / "tokenizer.json"
+    ZyrquenTokenizer.train(["rule TR_E11 ok " * 10], vocab_size=BASE_VOCAB + 8).save(tok)
+    ds_clean = _build_v11_dataset(tmp_path / "ds_v11_ready", leak=False)
+    monkeypatch.setenv("ZYRQUEN_TOKENIZER_PATH", str(tok))
+    monkeypatch.setenv("ZYRQUEN_DATASET_DIR", str(ds_clean))
+    monkeypatch.setattr(training_router.jobs._orchestrator, "training_root", tmp_path / "runs")
+
+    isolated_engine = CentralWorkflowOrchestrator(
+        db_path=tmp_path / "wf-ready.db",
+        work_dir=tmp_path / "wf-ready-work",
+        approval_secret="unit-test-approval-secret-minimum-32-chars",
+    )
+    monkeypatch.setattr(workflows_router, "_ENGINE", isolated_engine)
+    monkeypatch.setattr(training_router, "get_workflow_engine", lambda: isolated_engine)
+    try:
+        before = client.get("/training/readiness").json()
+        assert before["approval_ready"] is False
+        assert before["status"] == "not_ready"
+
+        wf_run, _ = isolated_engine.store.create_run(
+            workflow_key="training.native_controlled_run",
+            workflow_version="1.0.0",
+            trigger_type="manual",
+            trigger_payload={},
+            steps=[{"step_key": "execute_training", "handler_key": "training.execute"}],
+            requested_by_user_id=str(user.id),
+        )
+        pending = isolated_engine.governance.ensure_pending_approval(
+            run_id=wf_run["id"],
+            step=WorkflowStepSpec(
+                step_key="execute_training",
+                handler_key="training.execute",
+                description="Execute training",
+                tier="tier2_approval",
+                action_type="training.execute",
+            ),
+            requested_by_user_id=str(user.id),
+            scope="dataset:nagi_v11",
+        )
+        isolated_engine.governance.decide_approval(
+            pending["id"],
+            approve=True,
+            approver_user_id=str(user.id),
+            approver_role="admin",
+            reason="Readiness test approval",
+        )
+        after = client.get("/training/readiness").json()
+        assert after["approval_ready"] is True
+        assert after["approved_training_approvals"] == 1
+        assert after["status"] == "ready"
+    finally:
+        isolated_engine.shutdown(wait=True)
+
+
+def test_dataset_ingest_enforces_provenance_leakage_and_no_overwrite(api_client, monkeypatch):
+    client, _, _, tmp_path = api_client
+    root = tmp_path / "datasets_ingest_root"
+    root.mkdir()
+    monkeypatch.setenv("ZYRQUEN_DATASET_ROOT", str(root))
+
+    # Reject synthetic/external provenance
+    bad_prov = client.post(
+        "/v1/datasets/ingest",
+        json={
+            "dataset_version": "1.0.0",
+            "source_name": "synthetic_source",
+            "license": "CC-BY-4.0",
+            "provenance": "generated_by_gpt",
+            "splits": {
+                "train": [{"input": "q TR1", "target": "a TR1"}],
+                "validation": [{"input": "q VA2", "target": "a VA2"}],
+                "unseen": [{"input": "q UN3", "target": "a UN3"}],
+                "ood": [{"input": "q OO4", "target": "a OO4"}],
+            },
+        },
+    )
+    assert bad_prov.status_code == 422
+    assert not (root / "1.0.0").exists()
+
+    # Reject cross-split entity leakage without persisting to disk
+    leaked = client.post(
+        "/v1/datasets/ingest",
+        json={
+            "dataset_version": "1.0.0",
+            "source_name": "verified_field_notes",
+            "license": "CC-BY-4.0",
+            "provenance": "human_curated_native_corpus",
+            "splits": {
+                "train": [{"input": "rule TR_E11", "target": "ok TR_E11"}],
+                "validation": [{"input": "rule VA_E22", "target": "ok VA_E22"}],
+                "unseen": [{"input": "rule TR_E11 extra", "target": "ok TR_E11"}],
+                "ood": [{"input": "rule OO_E44", "target": "ok OO_E44"}],
+            },
+        },
+    )
+    assert leaked.status_code == 422
+    assert not (root / "1.0.0").exists()
+
+    # Clean V11 4-split dataset succeeds and verifies leakage PASS + manifest SHA-256
+    clean_payload = {
+        "dataset_version": "1.0.0",
+        "source_name": "verified_field_notes",
+        "license": "CC-BY-4.0",
+        "provenance": "human_curated_native_corpus",
+        "splits": {
+            "train": [{"input": "rule TR_E11", "target": "ok TR_E11"}],
+            "validation": [{"input": "rule VA_E22", "target": "ok VA_E22"}],
+            "unseen": [{"input": "rule UN_E33", "target": "ok UN_E33"}],
+            "ood": [{"input": "rule OO_E44", "target": "ok OO_E44"}],
+        },
+    }
+    created = client.post("/v1/datasets/ingest", json=clean_payload)
+    assert created.status_code == 201
+    body = created.json()
+    assert body["verified"] is True
+    assert body["four_split_compliant"] is True
+    assert body["v11_leakage_check"]["passed"] is True
+    assert body["licensed_sources_count"] == 1
+
+    # Duplicate version cannot overwrite existing verified dataset
+    dup = client.post("/v1/datasets/ingest", json=clean_payload)
+    assert dup.status_code == 409
+

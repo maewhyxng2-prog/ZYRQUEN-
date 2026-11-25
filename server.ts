@@ -1323,6 +1323,7 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
   app.post('/api/developer/datasets', requireAuth, async (req: AuthedRequest, res: Response) => {
     const name = String(req.body?.name || '').trim().slice(0, 80);
     const content = String(req.body?.content || '').slice(0, 200000);
+    const provenance = String(req.body?.provenance || 'developer_manual_corpus').trim().slice(0, 120);
     if (!name || !content) {
       res.status(400).json({ error: 'Dataset name and content are required.' });
       return;
@@ -1333,7 +1334,7 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
       error?: string;
     }>('zyrquen_core.py', {
       cmd: 'ingest_dataset',
-      payload: { name, content, user_id: req.user!.id },
+      payload: { name, content, provenance, user_id: req.user!.id },
     });
     if (!result.ok) {
       res.status(400).json({ error: result.error || 'Dataset ingestion failed' });
@@ -1418,7 +1419,13 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
       improved?: boolean;
     }>('zyrquen_core.py', {
       cmd: 'run_experiment',
-      payload: { user_id: req.user!.id, dataset_id: datasetId, epochs, seed },
+      payload: {
+        user_id: req.user!.id,
+        dataset_id: datasetId,
+        epochs,
+        seed,
+        require_baseline_and_approval: true,
+      },
     });
     if (!result.ok) {
       res.status(400).json({ error: result.error || 'Neural experiment failed' });

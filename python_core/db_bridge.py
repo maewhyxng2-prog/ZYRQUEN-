@@ -673,12 +673,22 @@ def handle_action(action: str, payload: dict) -> dict:
         clean_datasets = sum(
             1 for d in datasets if int(d.get("leakage_detected", 0)) == 0 and int(d.get("total_records", 0)) >= 5
         )
+        eval_count = int(conn.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0])
+        baseline_count = int(conn.execute("SELECT COUNT(*) FROM capability_baselines").fetchone()[0])
+        baseline_evaluations = eval_count + baseline_count
+        approved_training_runs = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM workflow_runs WHERE group_id='native_training' AND status='COMPLETED' AND approved_by IS NOT NULL"
+            ).fetchone()[0]
+        )
         neural_checkpoints = sum(1 for c in checkpoints if str(c.get("eval_status") or "").startswith("NEURAL"))
         approved_experiments = sum(1 for e in experiments_recent if e.get("approval_status") == "APPROVED")
         pending_training_runs = sum(1 for r in pending_runs if r.get("group_id") == "native_training")
 
         if clean_datasets == 0:
             gate_status = "BLOCKED"
+        elif baseline_evaluations == 0:
+            gate_status = "BLOCKED_NO_BASELINE"
         elif len(pending_experiments) > 0 or pending_training_runs > 0:
             gate_status = "AWAITING_APPROVAL"
         elif len(checkpoints) == 0:
@@ -710,6 +720,8 @@ def handle_action(action: str, payload: dict) -> dict:
                 "gate_status": gate_status,
                 "datasets_total": len(datasets),
                 "clean_datasets": clean_datasets,
+                "baseline_evaluations": baseline_evaluations,
+                "approved_training_runs": approved_training_runs,
                 "triples_total": triples_total,
                 "verified_triples": verified_triples,
                 "experiments_total": len(experiments_recent),

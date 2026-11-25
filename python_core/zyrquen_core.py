@@ -112,9 +112,15 @@ WORKFLOW_GROUPS = [
     {
         "id": "native_training",
         "name": "ฝึกโมเดลภายใน (Native Training)",
-        "description": "ตรวจความพร้อมและฝึก Checkpoint รุ่นใหม่แบบไม่เขียนทับของเดิมหลังผ่าน Approval Gate",
+        "description": "บังคับลำดับ ข้อมูลจริง+ไร้ Leakage → Baseline → อนุมัติ → ฝึก → ประเมินและควบคุม Checkpoint",
         "requires_approval": True,
-        "stages": ["readiness_check", "resource_guard", "approval_gate", "checkpoint_train"],
+        "stages": [
+            "provenance_leakage_gate",
+            "baseline_verify",
+            "approval_gate",
+            "checkpoint_train",
+            "checkpoint_eval_gate",
+        ],
     },
     {
         "id": "evaluation",
@@ -3188,11 +3194,30 @@ def _near_dup_leakage_exists(split_a: list[str], split_b: list[str], threshold: 
     return False
 
 
+DISALLOWED_PROVENANCE_TOKENS = (
+    "fake",
+    "mock",
+    "fabricated",
+    "synthetic_llm",
+    "external_llm",
+    "gpt",
+    "openai",
+    "claude",
+    "gemini",
+)
+
+
 def handle_ingest_dataset(payload: dict) -> dict:
     conn = get_db()
     name = str(payload.get("name", "untitled-corpus")).strip() or "untitled-corpus"
     raw_text = str(payload.get("content", "")).strip()
     user_id = str(payload.get("user_id", ""))
+    provenance = str(payload.get("provenance") or "developer_manual_corpus").strip()[:120] or "developer_manual_corpus"
+    prov_lower = provenance.lower()
+    if any(tok in prov_lower for tok in DISALLOWED_PROVENANCE_TOKENS):
+        conn.close()
+        return {"ok": False, "error": f"Dataset rejected: disallowed synthetic or external provenance '{provenance}'."}
+
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
     if len(lines) < 5:
         conn.close()
@@ -3230,7 +3255,14 @@ def handle_ingest_dataset(payload: dict) -> dict:
     leakage = 1 if (exact_leak or near_leak) else 0
     manifest_hash = hashlib.sha256("\n".join(unique_lines).encode("utf-8")).hexdigest()
     dataset_id = str(uuid.uuid4())
-    records_obj = {"train": train_set, "val": val_set, "test": test_set}
+    records_obj = {
+        "train": train_set,
+        "val": val_set,
+        "test": test_set,
+        "provenance": provenance,
+        "provenance_verified": True,
+        "leakage_checked_at": now_iso(),
+    }
 
     with conn:
         conn.execute(
@@ -3247,15 +3279,95 @@ def handle_ingest_dataset(payload: dict) -> dict:
                 len(val_set),
                 len(test_set),
                 leakage,
-                "READY",
+                "LEAKAGE_BLOCKED" if leakage else "READY",
                 user_id,
                 now_iso(),
                 json.dumps(records_obj),
             ),
         )
     row = dict(conn.execute("SELECT id, name, manifest_hash, total_records, train_count, val_count, test_count, leakage_detected, status, created_by, created_at FROM datasets WHERE id=?", (dataset_id,)).fetchone())
+    row["provenance"] = provenance
     conn.close()
     return {"ok": True, "dataset": row, "deduplicated_removed": len(lines) - len(unique_lines)}
+
+
+def check_training_pipeline_prerequisites(
+    conn: sqlite3.Connection,
+    *,
+    dataset_id: str | None = None,
+    require_approval: bool = False,
+) -> dict:
+    # Step 1 & 2: Real dataset + provenance + manifest hash + zero leakage
+    if dataset_id:
+        ds = conn.execute("SELECT * FROM datasets WHERE id=?", (dataset_id,)).fetchone()
+    else:
+        ds = conn.execute(
+            "SELECT * FROM datasets WHERE leakage_detected=0 AND total_records>=5 ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    if not ds:
+        return {
+            "ok": False,
+            "blocked_step": "STEP_1_2_DATA_PROVENANCE_LEAKAGE",
+            "error": "Training blocked (Steps 1–2): ต้องสร้าง/นำเข้าชุดข้อมูลจริงที่ผ่านการตรวจที่มาและไม่พบ Data Leakage (>= 5 รายการ) ก่อน",
+        }
+    if int(ds["leakage_detected"] or 0) != 0 or int(ds["total_records"] or 0) < 5:
+        return {
+            "ok": False,
+            "blocked_step": "STEP_1_2_DATA_PROVENANCE_LEAKAGE",
+            "error": "Training blocked (Steps 1–2): ชุดข้อมูลพบ Data Leakage หรือมีรายการน้อยกว่า 5 รายการ",
+        }
+    manifest = str(ds["manifest_hash"] or "")
+    if len(manifest) != 64:
+        return {
+            "ok": False,
+            "blocked_step": "STEP_1_2_DATA_PROVENANCE_LEAKAGE",
+            "error": "Training blocked (Steps 1–2): ไม่พบ SHA-256 manifest hash ของชุดข้อมูล",
+        }
+    try:
+        rec_meta = json.loads(ds["records_json"] or "{}")
+    except Exception:
+        rec_meta = {}
+    prov = str(rec_meta.get("provenance") or "legacy_verified").lower()
+    if any(tok in prov for tok in DISALLOWED_PROVENANCE_TOKENS):
+        return {
+            "ok": False,
+            "blocked_step": "STEP_1_2_DATA_PROVENANCE_LEAKAGE",
+            "error": "Training blocked (Steps 1–2): ที่มาของข้อมูลไม่ผ่านเกณฑ์ความถูกต้อง",
+        }
+
+    # Step 3: Baseline evaluation must exist before approval or training
+    eval_count = int(conn.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0])
+    baseline_count = int(conn.execute("SELECT COUNT(*) FROM capability_baselines").fetchone()[0])
+    if eval_count == 0 and baseline_count == 0:
+        return {
+            "ok": False,
+            "blocked_step": "STEP_3_BASELINE_EVALUATION",
+            "error": "Training blocked (Step 3): ต้องประเมิน Baseline (evaluate หรือ benchmark) ก่อนจึงจะดำเนินการขั้นถัดไปได้",
+        }
+
+    # Step 4: Explicit Admin Approval Gate must exist before training when required
+    approved_runs = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM workflow_runs WHERE group_id='native_training' AND status='COMPLETED' AND approved_by IS NOT NULL"
+        ).fetchone()[0]
+    )
+    if require_approval and approved_runs == 0:
+        return {
+            "ok": False,
+            "blocked_step": "STEP_4_APPROVAL_GATE",
+            "error": "Training blocked (Step 4): ต้องผ่านการตรวจสอบและอนุมัติจากผู้ดูแลระบบ (Approval Gate) ก่อนเริ่มฝึก",
+        }
+
+    return {
+        "ok": True,
+        "dataset_id": ds["id"],
+        "dataset_name": ds["name"],
+        "provenance": str(rec_meta.get("provenance") or "verified"),
+        "manifest_hash": manifest,
+        "eval_count": eval_count,
+        "baseline_count": baseline_count,
+        "approved_runs": approved_runs,
+    }
 
 
 def train_checkpoint_from_dataset(conn: sqlite3.Connection, dataset_id: str, user_id: str) -> dict:
@@ -3357,6 +3469,17 @@ def handle_run_workflow(payload: dict) -> dict:
         conn.close()
         return {"ok": False, "error": f"Unknown workflow group '{group_id}'"}
 
+    # Strict pre-gate check for native_training: Steps 1-3 must pass BEFORE creating an Approval Gate request
+    if group_id == "native_training":
+        prereq = check_training_pipeline_prerequisites(
+            conn,
+            dataset_id=str(dataset_id) if dataset_id else None,
+            require_approval=False,
+        )
+        if not prereq["ok"]:
+            conn.close()
+            return prereq
+
     # Check Approval Gate
     if group["requires_approval"] and not approved_by:
         run_id = str(uuid.uuid4())
@@ -3405,17 +3528,19 @@ def handle_run_workflow(payload: dict) -> dict:
         summary = f"Data Pipeline scanned {len(ds_rows)} dataset(s); leakage flags: {leak_count}."
 
     elif group_id == "native_training":
-        target_ds = dataset_id
-        if not target_ds:
-            latest_ds = conn.execute("SELECT id FROM datasets ORDER BY created_at DESC LIMIT 1").fetchone()
-            target_ds = latest_ds["id"] if latest_ds else None
-        if not target_ds:
+        prereq = check_training_pipeline_prerequisites(
+            conn,
+            dataset_id=str(dataset_id) if dataset_id else None,
+            require_approval=False,
+        )
+        if not prereq["ok"]:
             status = "BLOCKED"
             stages_out = [
-                {"stage": "readiness_check", "status": "BLOCKED", "detail": "No ingested dataset available"},
+                {"stage": "provenance_leakage_gate", "status": "BLOCKED", "detail": prereq["error"]},
             ]
-            summary = "Native Training blocked: ingest a dataset with >= 5 records first."
+            summary = prereq["error"]
         else:
+            target_ds = str(prereq["dataset_id"])
             res = train_checkpoint_from_dataset(conn, target_ds, approved_by or user_id)
             if not res["ok"]:
                 status = "FAILED"
@@ -3423,13 +3548,45 @@ def handle_run_workflow(payload: dict) -> dict:
                 summary = res["error"]
             else:
                 ck = res["checkpoint"]
+                post_eval = handle_run_evaluation(
+                    {
+                        "user_id": approved_by or user_id,
+                        "suite_name": f"Checkpoint v{ck['version']} Post-Training Gate",
+                    }
+                )
+                ev = post_eval.get("evaluation") or {}
                 stages_out = [
-                    {"stage": "readiness_check", "status": "PASS", "detail": f"Dataset {target_ds[:8]} validated"},
-                    {"stage": "resource_guard", "status": "PASS", "detail": "CPU/RAM within local bounds"},
-                    {"stage": "approval_gate", "status": "PASS", "detail": f"Authorized by {approved_by}"},
-                    {"stage": "checkpoint_train", "status": "PASS", "detail": f"Saved immutable Checkpoint v{ck['version']} (perplexity {ck['perplexity']})"},
+                    {
+                        "stage": "provenance_leakage_gate",
+                        "status": "PASS",
+                        "detail": f"Dataset {target_ds[:8]} ({prereq['provenance']}, sha256:{prereq['manifest_hash'][:10]}..., leakage=0)",
+                    },
+                    {
+                        "stage": "baseline_verify",
+                        "status": "PASS",
+                        "detail": f"Baseline verified ({prereq['eval_count']} evals, {prereq['baseline_count']} capability baselines)",
+                    },
+                    {
+                        "stage": "approval_gate",
+                        "status": "PASS",
+                        "detail": f"Authorized by {approved_by}",
+                    },
+                    {
+                        "stage": "checkpoint_train",
+                        "status": "PASS",
+                        "detail": f"Saved immutable Checkpoint v{ck['version']} (perplexity {ck['perplexity']})",
+                    },
+                    {
+                        "stage": "checkpoint_eval_gate",
+                        "status": "PASS" if ev.get("overall_status") in ("PASS", "PARTIAL") else "WARN",
+                        "detail": f"Post-eval {ev.get('overall_status', 'RECORDED')} (test_acc={ev.get('test_accuracy')}, ppl={ev.get('perplexity')})",
+                    },
                 ]
-                summary = f"Trained immutable Checkpoint v{ck['version']}: train_loss={ck['train_loss']}, val_loss={ck['val_loss']}, perplexity={ck['perplexity']}."
+                summary = (
+                    f"Trained & evaluated immutable Checkpoint v{ck['version']}: "
+                    f"train_loss={ck['train_loss']}, val_loss={ck['val_loss']}, "
+                    f"perplexity={ck['perplexity']}, post_eval={ev.get('overall_status', 'RECORDED')}."
+                )
 
     elif group_id == "evaluation":
         eval_res = handle_run_evaluation({"user_id": user_id, "suite_name": "Evaluation Workflow Suite"})
@@ -4172,6 +4329,7 @@ def dispatch_command(cmd: str, payload: dict) -> dict:
             dataset_id=payload.get("dataset_id"),
             epochs=int(payload.get("epochs", 8)),
             seed=int(payload.get("seed", 42)),
+            require_baseline_and_approval=bool(payload.get("require_baseline_and_approval", False)),
         )
         conn.close()
         return res

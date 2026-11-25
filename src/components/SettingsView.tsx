@@ -1268,7 +1268,7 @@ export function SettingsView({
                             className={`rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold ${
                               gateStatus === 'VERIFIED'
                                 ? 'border-[var(--color-success)]/40 bg-[var(--color-success-bg)] text-[var(--color-success)]'
-                                : gateStatus === 'BLOCKED'
+                                : gateStatus.startsWith('BLOCKED')
                                   ? 'border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] text-[var(--color-danger)]'
                                   : 'border-[var(--color-warning)]/40 bg-[var(--color-warning-bg)] text-[var(--color-warning)]'
                             }`}

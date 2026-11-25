@@ -6,20 +6,39 @@ without fabricating dataset readiness or returning raw document payloads.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from apps.core.native.dataset import (
+    SCHEMA,
     V11_SPLITS,
+    _sha256_file,
+    clean_text,
     detect_dataset_format,
+    redact_pii,
     resolve_dataset_splits,
     verify_dataset_manifest,
 )
-from apps.core.native.dataset_v11 import DataAdapter
+from apps.core.native.dataset_v11 import DataAdapter, DatasetLeakageError
 
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_DISALLOWED_PROVENANCE_TOKENS = (
+    "fake",
+    "mock",
+    "fabricated",
+    "synthetic_llm",
+    "external_llm",
+    "gpt",
+    "openai",
+    "claude",
+    "gemini",
+)
 
 
 def validate_dataset_version(version: str) -> str:
@@ -449,3 +468,153 @@ def inspect_training_preflight_readiness(
         "max_cpu_batch_size": MAX_CPU_BATCH_SIZE,
         "reasons": reasons,
     }
+
+
+def _validate_provenance_and_license(source_name: str, license_str: str, provenance: str) -> tuple[str, str, str]:
+    clean_source = str(source_name or "").strip()
+    clean_license = str(license_str or "").strip()
+    clean_provenance = str(provenance or "").strip()
+    if not clean_source:
+        raise ValueError("source_name is required for dataset provenance.")
+    if not clean_license:
+        raise ValueError("license is required for dataset provenance.")
+    if not clean_provenance:
+        raise ValueError("provenance is required for dataset origin traceability.")
+    combined = f"{clean_source} {clean_license} {clean_provenance}".lower()
+    for tok in _DISALLOWED_PROVENANCE_TOKENS:
+        if tok in combined:
+            raise ValueError(f"Disallowed synthetic or external model provenance token: {tok!r}")
+    return clean_source, clean_license, clean_provenance
+
+
+def ingest_v11_dataset(
+    *,
+    dataset_version: str,
+    splits: dict[str, list[dict[str, Any]]],
+    source_name: str,
+    license_str: str,
+    provenance: str,
+    dataset_root: str | Path | None = None,
+    do_redact_pii: bool = True,
+) -> dict[str, Any]:
+    """Ingest, clean, hash, and leakage-verify a 4-split V11 dataset atomically without overwriting existing versions."""
+    clean_version = validate_dataset_version(dataset_version)
+    clean_source, clean_license, clean_provenance = _validate_provenance_and_license(
+        source_name, license_str, provenance
+    )
+
+    root_val = str(dataset_root if dataset_root is not None else os.getenv("ZYRQUEN_DATASET_ROOT", "")).strip()
+    if not root_val:
+        raise RuntimeError("ZYRQUEN_DATASET_ROOT is not configured.")
+    raw_root = Path(root_val)
+    if raw_root.is_symlink() or not raw_root.is_dir():
+        raise RuntimeError("ZYRQUEN_DATASET_ROOT directory is missing or invalid.")
+    resolved_root = raw_root.resolve()
+
+    target_dir = (resolved_root / clean_version).resolve()
+    if target_dir == resolved_root or not target_dir.is_relative_to(resolved_root):
+        raise ValueError("Dataset version resolves outside configured dataset root.")
+    if target_dir.exists() or target_dir.is_symlink():
+        raise FileExistsError(f"Dataset version {clean_version!r} already exists; overwrite is forbidden.")
+
+    if not isinstance(splits, dict):
+        raise ValueError("splits payload must be an object mapping train/validation/unseen/ood.")
+    missing_splits = [sp for sp in V11_SPLITS if sp not in splits]
+    if missing_splits:
+        raise ValueError(f"V11 dataset requires 4 splits {list(V11_SPLITS)}; missing {missing_splits}.")
+
+    seen_norms: set[str] = set()
+    cleaned_splits: dict[str, list[dict[str, Any]]] = {sp: [] for sp in V11_SPLITS}
+    detected_mode: str | None = None
+
+    for sp in V11_SPLITS:
+        rows = splits.get(sp)
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"Split {sp!r} must be a non-empty list of records.")
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ValueError(f"Split {sp!r} row {idx} must be a JSON object.")
+            if "input" in row and "target" in row:
+                mode = "sft"
+                inp = clean_text(str(row["input"]))
+                tgt = clean_text(str(row["target"]))
+                if do_redact_pii:
+                    inp = redact_pii(inp)
+                    tgt = redact_pii(tgt)
+                if not inp or not tgt:
+                    continue
+                norm_key = re.sub(r"\s+", " ", inp).casefold()
+                out_row: dict[str, Any] = {"input": inp, "target": tgt, "split": sp, "source": clean_source}
+            elif "text" in row:
+                mode = "text"
+                txt = clean_text(str(row["text"]))
+                if do_redact_pii:
+                    txt = redact_pii(txt)
+                if not txt:
+                    continue
+                norm_key = re.sub(r"\s+", " ", txt).casefold()
+                out_row = {"text": txt, "split": sp, "source": clean_source}
+            else:
+                raise ValueError(f"Split {sp!r} row {idx} must contain ('input','target') or 'text'.")
+
+            if detected_mode is None:
+                detected_mode = mode
+            elif detected_mode != mode:
+                raise ValueError("Mixed SFT and text record schemas within the same dataset are not allowed.")
+
+            if norm_key in seen_norms:
+                continue
+            seen_norms.add(norm_key)
+            cleaned_splits[sp].append(out_row)
+
+        if not cleaned_splits[sp]:
+            raise ValueError(f"Split {sp!r} has no unique non-empty records after cleaning/deduplication.")
+
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".ingest_{clean_version}_", dir=str(resolved_root)))
+    try:
+        files_meta: dict[str, dict[str, Any]] = {}
+        split_hashes: list[str] = []
+        for sp in V11_SPLITS:
+            sp_file = staging_dir / f"{sp}.jsonl"
+            with sp_file.open("w", encoding="utf-8") as fh:
+                for item in cleaned_splits[sp]:
+                    fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+            sha = _sha256_file(sp_file)
+            files_meta[f"{sp}.jsonl"] = {"documents": len(cleaned_splits[sp]), "sha256": sha}
+            split_hashes.append(sha)
+
+        content_sha = hashlib.sha256("".join(split_hashes).encode("utf-8")).hexdigest()
+        manifest = {
+            "schema": SCHEMA,
+            "dataset": "nagi_v11",
+            "version": clean_version,
+            "content_sha256": content_sha,
+            "provenance": clean_provenance,
+            "sources": {
+                clean_source: {
+                    "license": clean_license,
+                    "provenance": clean_provenance,
+                    "sha256": content_sha,
+                }
+            },
+            "files": files_meta,
+        }
+        (staging_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        adapter = DataAdapter(staging_dir, verify_on_init=True)
+        leak_report = adapter.detect_leakage(raise_on_leakage=False)
+        if not leak_report.passed:
+            raise DatasetLeakageError(
+                f"V11 leakage gate failed; dataset rejected: {', '.join(leak_report.violations)}"
+            )
+
+        staging_dir.rename(target_dir)
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    return inspect_dataset_directory(target_dir, allowed_root=resolved_root, check_v11_leakage=True)
+
