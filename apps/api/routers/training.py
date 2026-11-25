@@ -93,7 +93,8 @@ def require_training_admin(
 
 
 def _verify_training_approval_readonly(
-    engine, approval_id: str, *, expected_scope: str | None = None
+    engine, approval_id: str, *, expected_scope: str | None = None,
+    expected_step_key: str | None = None,
 ) -> dict:
     """Verify Tier-2 approval status, action/scope binding, expiry, and HMAC without consuming."""
     approval = engine.governance.store.get_approval(approval_id)
@@ -108,6 +109,11 @@ def _verify_training_approval_readonly(
         raise ApprovalViolationError(
             f"Approval {approval_id} scope={approval.get('scope')!r} "
             f"does not match required scope={expected_scope!r}."
+        )
+    if expected_step_key is not None and approval.get("step_key") != expected_step_key:
+        raise ApprovalViolationError(
+            f"Approval {approval_id} step_key={approval.get('step_key')!r} "
+            f"does not match required step_key={expected_step_key!r}."
         )
     if approval.get("status") != "approved":
         raise ApprovalViolationError(
@@ -159,7 +165,10 @@ def start_training(
     engine = get_workflow_engine()
     try:
         _verify_training_approval_readonly(
-            engine, approval_id, expected_scope=f"dataset:{request.dataset_version}"
+            engine,
+            approval_id,
+            expected_scope=f"dataset:{request.dataset_version}",
+            expected_step_key="execute_training",
         )
     except ApprovalViolationError as exc:
         raise HTTPException(
@@ -191,6 +200,7 @@ def start_training(
                 approval_id,
                 expected_action_type="training.execute",
                 expected_scope=f"dataset:{request.dataset_version}",
+                expected_step_key="execute_training",
             ),
         )
     except ApprovalViolationError as exc:
