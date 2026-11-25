@@ -699,15 +699,15 @@ export function WorkspaceView({
                   void handleSubmit();
                 }
               }}
-              placeholder="พิมพ์ข้อความถึงแกนสมอง ZYRQUEN..."
-              aria-label="ช่องพิมพ์ข้อความ"
+              placeholder="ระบุเป้าหมายหรือรายละเอียดงานที่ต้องการให้ ZYRQUEN ดำเนินการ..."
+              aria-label="รายละเอียดงาน"
               className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
             />
 
             <button
               type="submit"
               disabled={sending || (!input.trim() && !attachment)}
-              aria-label="ส่งข้อความ"
+              aria-label="ส่งรายละเอียดงาน"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[var(--color-primary)] text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-40"
             >
               <Send className="h-4 w-4" />
