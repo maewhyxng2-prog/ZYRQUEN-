@@ -25,6 +25,10 @@ from apps.core.native.dataset import (
     resolve_dataset_splits,
     verify_dataset_manifest,
 )
+from apps.core.dataset_leakage_detector import (
+    DatasetLeakageDetector,
+    SemanticHashLeakageError,
+)
 from apps.core.native.dataset_v11 import DataAdapter, DatasetLeakageError
 
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -139,6 +143,7 @@ def inspect_dataset_directory(
     ]
 
     leakage_summary: dict[str, Any] = {"status": "NOT RUN"}
+    semantic_summary: dict[str, Any] = {"status": "NOT RUN"}
     if check_v11_leakage and four_split_compliant:
         try:
             adapter = DataAdapter(resolved_dir, verify_on_init=False)
@@ -149,13 +154,25 @@ def inspect_dataset_directory(
                 "passed": leak_report.passed,
                 "violations": leak_report.violations,
             }
-        except (OSError, ValueError) as exc:
+            splits_data = adapter.load_all_splits()
+            sem_report = DatasetLeakageDetector().check_entries(
+                splits_data,
+                check_internal_splits=True,
+                raise_on_leakage=False,
+            )
+            semantic_summary = sem_report.to_dict()
+        except (OSError, ValueError, SemanticHashLeakageError) as exc:
             leakage_summary = {"status": "FAIL", "passed": False, "error": str(exc)}
+            semantic_summary = {"status": "FAIL", "passed": False, "error": str(exc)}
 
+    leakage_failed = (
+        leakage_summary.get("status") == "FAIL"
+        or semantic_summary.get("status") == "FAIL"
+    )
     return {
         "exists": True,
         "verified": True,
-        "status": "verified" if leakage_summary.get("status") != "FAIL" else "leakage_failed",
+        "status": "leakage_failed" if leakage_failed else "verified",
         "version": manifest.get("version"),
         "schema": manifest.get("schema"),
         "format": fmt,
@@ -170,6 +187,7 @@ def inspect_dataset_directory(
         "licensed_sources_count": len(licensed_sources),
         "licensed_sources": licensed_sources,
         "v11_leakage_check": leakage_summary,
+        "semantic_leakage_check": semantic_summary,
     }
 
 
@@ -611,10 +629,27 @@ def ingest_v11_dataset(
                 f"V11 leakage gate failed; dataset rejected: {', '.join(leak_report.violations)}"
             )
 
+        existing_dirs = [
+            p
+            for p in resolved_root.iterdir()
+            if p.is_dir() and not p.is_symlink() and not p.name.startswith(".") and p != staging_dir
+        ]
+        semantic_detector = DatasetLeakageDetector()
+        semantic_report = semantic_detector.check_entries(
+            cleaned_splits,
+            reference_dirs=existing_dirs,
+            allowed_root=resolved_root,
+            check_internal_splits=True,
+            raise_on_leakage=False,
+        )
+        if not semantic_report.passed:
+            raise DatasetLeakageError(
+                f"Semantic hash leakage gate failed; dataset rejected: {', '.join(semantic_report.violations)}"
+            )
+
         staging_dir.rename(target_dir)
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
 
     return inspect_dataset_directory(target_dir, allowed_root=resolved_root, check_v11_leakage=True)
-

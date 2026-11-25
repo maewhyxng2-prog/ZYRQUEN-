@@ -1136,6 +1136,46 @@ class DatasetIngestionPipelineTests(unittest.TestCase):
             self.assertFalse(train_attempt["ok"])
             self.assertIn("Baseline", train_attempt["error"])
 
+    def test_cross_dataset_semantic_hashing_blocks_leaked_second_ingest(self) -> None:
+        with isolated_core_env():
+            base_lines = [
+                "Native Transformer computes causal self attention with RMSNorm layers across tokens.",
+                "SQLite WAL persistence commits provenance hashes and immutable audit trails atomically.",
+                "Deterministic BPE tokenizers normalize UTF-8 text using NFC before subword merging.",
+                "Topological DAG planners validate dependencies and enforce node postconditions.",
+                "Controlled experiments compare baseline validation loss before requesting admin promotion.",
+                "Strict leakage gates isolate held-out evaluation benchmarks from training splits.",
+            ]
+            first = zc.handle_ingest_dataset({
+                "name": "base-semantic-corpus",
+                "provenance": "verified_eng_docs",
+                "content": "\n".join(base_lines),
+                "user_id": "dev-1",
+            })
+            self.assertTrue(first["ok"])
+            self.assertEqual(first["dataset"]["leakage_detected"], 0)
+
+            # Second dataset includes a near-duplicate paraphrase of an entry from base corpus
+            paraphrase_lines = [
+                "Native Transformer computes causal self attention with RMSNorm layers over tokens.",
+                "Cosine learning rate schedules decay step sizes smoothly during bounded CPU epochs.",
+                "Byte-level subword vocabularies prevent out-of-vocabulary failures across scripts.",
+                "Resource monitors stop runs cleanly when memory margins drop below safe thresholds.",
+                "Causal graph engines reject circular comparative claims before recording facts.",
+                "External tool policies quarantine untrusted web text against directive injection.",
+            ]
+            second = zc.handle_ingest_dataset({
+                "name": "paraphrase-leaked-corpus",
+                "provenance": "verified_eng_docs_v2",
+                "content": "\n".join(paraphrase_lines),
+                "user_id": "dev-1",
+            })
+            self.assertTrue(second["ok"])
+            self.assertEqual(second["dataset"]["leakage_detected"], 1)
+            self.assertEqual(second["dataset"]["status"], "LEAKAGE_BLOCKED")
+            viols = second["leakage_report"]["violations"]
+            self.assertTrue(any(v.startswith("semantic_hash:") for v in viols), viols)
+
 
 if __name__ == "__main__":
     unittest.main()

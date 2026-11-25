@@ -39,12 +39,19 @@ import random
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 import time
 import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, Callable
+
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from apps.core.dataset_leakage_detector import DatasetLeakageDetector
 
 SCHEMA_VERSION = "zyrquen.dataset-manifest.v1"
 
@@ -474,11 +481,14 @@ def run_leakage_detection(
     strict_entity_isolation: bool = False,
     heldout_prompts: list[str] | None = None,
     near_dup_threshold: float = 0.72,
+    reference_conn: sqlite3.Connection | None = None,
+    reference_splits: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Comprehensive cross-split & benchmark leakage check across all split pairs:
+    Comprehensive cross-split, cross-dataset semantic hash, & benchmark leakage check:
     - Exact / canonical normalized text overlap
     - Near-duplicate token Jaccard overlap
+    - 64-bit SimHash + structural semantic hashing against existing train/validation splits
     - Template skeleton overlap (for slotted records)
     - Entity overlap audit (flagged when strict_entity_isolation=True)
     - Held-out evaluation / benchmark prompt contamination
@@ -571,6 +581,21 @@ def run_leakage_detection(
                 eval_contamination.append({"split": sp, "count": len(hits), "samples": hits[:3]})
                 violations.append(f"eval_contamination:{sp}:{len(hits)}")
 
+    # Semantic hashing comparison against existing train/val splits + internal cross-split pairs
+    semantic_detector = DatasetLeakageDetector()
+    semantic_report = semantic_detector.check_entries(
+        splits,
+        reference_splits=reference_splits,
+        reference_conn=reference_conn,
+        check_internal_splits=True,
+        raise_on_leakage=False,
+    )
+    if not semantic_report.passed:
+        for sv in semantic_report.violations:
+            tag = f"semantic_hash:{sv}"
+            if tag not in violations:
+                violations.append(tag)
+
     passed = len(violations) == 0
     return {
         "passed": passed,
@@ -582,6 +607,7 @@ def run_leakage_detection(
         "template_overlaps": template_overlaps,
         "entity_overlaps": entity_overlaps,
         "eval_contamination": eval_contamination,
+        "semantic_hash_report": semantic_report.to_dict(),
         "strict_entity_isolation": bool(strict_entity_isolation),
         "violations": violations,
     }
@@ -846,6 +872,7 @@ def ingest_dataset(
         tokenize_fn=tok_fn,
         strict_entity_isolation=strict_entity_isolation,
         heldout_prompts=[str(x) for x in heldout_prompts] if heldout_prompts else None,
+        reference_conn=conn,
     )
     leakage = int(leakage_report["leakage_detected"])
 
