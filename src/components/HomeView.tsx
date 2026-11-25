@@ -9,7 +9,6 @@ import type {
   AutonomousMissionItem,
   ConversationSummary,
   HomeSummary,
-  ReasoningMode,
   User,
 } from '../types';
 import { SpacetimeFabric } from './SpacetimeFabric';
@@ -20,7 +19,7 @@ interface HomeViewProps {
   nativeReady: boolean;
   loading: boolean;
   error: string | null;
-  onStartPrompt: (prompt: string, mode: ReasoningMode) => void;
+  onStartTask: (goal: string) => Promise<void>;
   onOpenConversation: (conversationId: string) => void;
   onNavigate: (screen: AppScreen) => void;
   onRetry: () => void;
@@ -42,12 +41,29 @@ export function HomeView({
   nativeReady: _nativeReady,
   loading,
   error,
-  onStartPrompt,
+  onStartTask,
   onOpenConversation,
   onNavigate,
   onRetry,
 }: HomeViewProps) {
   const [prompt, setPrompt] = useState('');
+  const [taskSubmitting, setTaskSubmitting] = useState(false);
+  const [taskError, setTaskError] = useState<string | null>(null);
+
+  async function startTask(goal: string) {
+    const cleanGoal = goal.trim();
+    if (!cleanGoal || taskSubmitting) return;
+    setTaskSubmitting(true);
+    setTaskError(null);
+    try {
+      await onStartTask(cleanGoal);
+      setPrompt('');
+    } catch (err) {
+      setTaskError(err instanceof Error ? err.message : 'เริ่มดำเนินงานไม่สำเร็จ');
+    } finally {
+      setTaskSubmitting(false);
+    }
+  }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -56,8 +72,7 @@ export function HomeView({
       onNavigate('create');
       return;
     }
-    onStartPrompt(trimmed, 'auto');
-    setPrompt('');
+    void startTask(trimmed);
   }
 
   const recent: ConversationSummary[] = (homeSummary?.recent_conversations || []).slice(0, 5);
@@ -100,7 +115,7 @@ export function HomeView({
             { label: 'แก้โจทย์และปัญหา', detail: 'วิเคราะห์สาเหตุและหาทางแก้', prompt: 'ช่วยวิเคราะห์โจทย์นี้ แยกขั้นตอนและตรวจสอบคำตอบ', icon: 'solve' },
             { label: 'วางแผนโครงการ', detail: 'แตกงานเป็นขั้นตอนและติดตามผล', prompt: 'ช่วยวางแผนโครงการ แยกงานย่อยและสิ่งที่ต้องตรวจสอบ', icon: 'plan' },
           ].map((item) => (
-            <button key={item.label} type="button" onClick={() => onStartPrompt(item.prompt, 'auto')} className="group flex min-h-[112px] flex-col items-start rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 text-left transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]">
+            <button key={item.label} type="button" onClick={() => void startTask(item.prompt)} className="group flex min-h-[112px] flex-col items-start rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 text-left transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]">
               <span className="text-sm font-semibold text-[var(--color-text)]">{item.label}</span>
               <span className="mt-1 text-xs leading-relaxed text-[var(--color-text-secondary)]">{item.detail}</span>
               <span className="mt-auto pt-3 text-xs font-medium text-[var(--color-accent)]">เริ่มงาน <ArrowRight className="ml-1 inline h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" /></span>
@@ -114,9 +129,10 @@ export function HomeView({
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-[var(--color-text-muted)]">ZYRQUEN จะรับเป้าหมายและเริ่มกระบวนการทำงานตามความสามารถที่ระบบรองรับ</p>
             <button type="submit" className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] px-5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary-hover)]">
-              เริ่มดำเนินงาน <ArrowRight className="h-4 w-4" />
+              {taskSubmitting ? 'กำลังส่งงาน...' : 'เริ่มดำเนินงาน'} <ArrowRight className="h-4 w-4" />
             </button>
           </div>
+          {taskError && <p role="alert" className="text-sm text-[var(--color-danger)]">{taskError}</p>}
         </form>
       </section>
 
