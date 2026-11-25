@@ -102,10 +102,7 @@ async def trigger_evaluation(
             },
         )
 
-    run = create_evaluation_run(db, current_user.id, payload)
-    run.status = "running"
-    run.started_at = datetime.utcnow()
-    db.commit()
+    run = None
     engine = EvaluationEngine(checkpoint_dir=checkpoint_dir)
     try:
         engine.verify_dataset(
@@ -116,6 +113,10 @@ async def trigger_evaluation(
             payload.model_version,
             checkpoint_id=payload.checkpoint_id,
         )
+        run = create_evaluation_run(db, current_user.id, payload)
+        run.status = "running"
+        run.started_at = datetime.utcnow()
+        db.commit()
         results = engine.run_evaluation(
             payload.model_version,
             dataset_dir=dataset_dir,
@@ -143,32 +144,35 @@ async def trigger_evaluation(
             "results": results,
         }
     except EvaluationEvidenceError as exc:
-        run.status = "failed"
-        run.error_message = str(exc)
-        run.completed_at = datetime.utcnow()
-        db.commit()
+        if run is not None:
+            run.status = "failed"
+            run.error_message = str(exc)
+            run.completed_at = datetime.utcnow()
+            db.commit()
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
     except EvaluationNotConfiguredError as exc:
-        run.status = "failed"
-        run.error_message = str(exc)
-        run.completed_at = datetime.utcnow()
-        db.commit()
+        if run is not None:
+            run.status = "failed"
+            run.error_message = str(exc)
+            run.completed_at = datetime.utcnow()
+            db.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "status": "not_configured",
                 "detail": str(exc),
-                "run_id": str(run.id),
+                "run_id": str(run.id) if run is not None else None,
             },
         ) from exc
     except Exception as exc:
-        run.status = "failed"
-        run.error_message = str(exc)
-        run.completed_at = datetime.utcnow()
-        db.commit()
+        if run is not None:
+            run.status = "failed"
+            run.error_message = str(exc)
+            run.completed_at = datetime.utcnow()
+            db.commit()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Native evaluation failed; inspect the recorded evaluation run.",
