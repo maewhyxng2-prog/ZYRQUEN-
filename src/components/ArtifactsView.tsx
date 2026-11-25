@@ -15,15 +15,7 @@ interface ToolsOverviewResponse {
 interface FileReadResponse {
   ok: boolean;
   status?: string;
-  invocation?: {
-    result?: {
-      content?: string;
-      filename?: string;
-      size_bytes?: number;
-    };
-    output?: { content?: string; filename?: string };
-    [key: string]: unknown;
-  };
+  raw_output?: { content?: string; filename?: string; size_bytes?: number };
   error?: string;
 }
 
