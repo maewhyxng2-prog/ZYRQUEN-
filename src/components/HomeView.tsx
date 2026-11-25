@@ -53,7 +53,7 @@ export function HomeView({
     e.preventDefault();
     const trimmed = prompt.trim();
     if (!trimmed) {
-      onNavigate('workspace');
+      onNavigate('create');
       return;
     }
     onStartPrompt(trimmed, 'auto');
@@ -88,7 +88,7 @@ export function HomeView({
             <h3 className="mt-1 text-xl font-semibold text-[var(--color-text)] sm:text-2xl">คุณต้องการทำงานอะไร?</h3>
             <p className="mt-1 text-sm text-[var(--color-text-secondary)]">เริ่มโปรเจกต์ใหม่ วิเคราะห์โจทย์ หรือดำเนินงานต่อจากสิ่งที่ทำค้างไว้</p>
           </div>
-          <button type="button" onClick={() => onNavigate('workspace')} className="min-h-[40px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 text-sm font-medium text-[var(--color-text)] hover:border-[var(--color-accent)]">
+          <button type="button" onClick={() => onNavigate('create')} className="min-h-[40px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 text-sm font-medium text-[var(--color-text)] hover:border-[var(--color-accent)]">
             เปิดพื้นที่ทำงาน <ArrowRight className="ml-1 inline h-4 w-4" />
           </button>
         </div>
@@ -183,7 +183,7 @@ export function HomeView({
               </h3>
               <button
                 type="button"
-                onClick={() => onNavigate('workspace')}
+                onClick={() => onNavigate('memory')}
                 className="min-h-[36px] px-2 text-xs font-medium text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] whitespace-nowrap"
               >
                 ดูงานทั้งหมด
@@ -200,7 +200,7 @@ export function HomeView({
                   </p>
                   <button
                     type="button"
-                    onClick={() => onNavigate('workspace')}
+                    onClick={() => onNavigate('create')}
                     className="min-h-[38px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 text-xs font-medium text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
                   >
                     เปิดพื้นที่ทำงาน
