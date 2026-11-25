@@ -258,6 +258,33 @@ def test_training_start_enforces_tier2_approval_when_artifacts_configured(api_cl
             reason="API gate test",
         )
 
+        # A valid HMAC token for a different dataset must not authorize this run.
+        wrong_scope_pending = isolated_engine.governance.ensure_pending_approval(
+            run_id=wf_run["id"],
+            step=WorkflowStepSpec(
+                step_key="execute_training",
+                handler_key="training.execute",
+                description="Execute training for another dataset",
+                tier="tier2_approval",
+                action_type="training.execute",
+            ),
+            requested_by_user_id=str(user.id),
+            scope="dataset:another-version",
+        )
+        wrong_scope_approved = isolated_engine.governance.decide_approval(
+            wrong_scope_pending["id"],
+            approve=True,
+            approver_user_id=str(user.id),
+            approver_role="admin",
+            reason="Scope binding regression test",
+        )
+        wrong_scope = client.post(
+            "/training/runs",
+            json={"dataset_version": "0.1.0", "approval_id": wrong_scope_approved["id"]},
+        )
+        assert wrong_scope.status_code == 403
+        assert isolated_engine.store.get_approval(wrong_scope_approved["id"])["status"] == "approved"
+
         # 503 during prepare() preserves approved status without burning single-use token
         resp_503 = client.post(
             "/training/runs",
