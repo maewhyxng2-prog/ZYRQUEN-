@@ -212,6 +212,55 @@ def test_evaluation_rejects_missing_or_tampered_dataset_and_checkpoint(
         assert "PyTorch runtime is not installed" in runs[0].error_message
 
 
+
+def test_evaluation_persists_successful_native_results(eval_client, tmp_path, monkeypatch):
+    test_client, session_factory, _, user_a, _ = eval_client
+    ds_root, ckpt_dir, checksum = _create_verified_dataset_and_checkpoint(tmp_path)
+    monkeypatch.setenv("ZYRQUEN_EVALUATION_CHECKPOINT_DIR", str(ckpt_dir))
+    monkeypatch.setenv("ZYRQUEN_DATASET_ROOT", str(ds_root))
+
+    class SuccessfulEvaluationEngine:
+        def __init__(self, checkpoint_dir):
+            self.checkpoint_dir = checkpoint_dir
+
+        def verify_dataset(self, *args, **kwargs):
+            return {"version": "0.1.0"}
+
+        def verify_checkpoint_version(self, *args, **kwargs):
+            return {"model_version": "v0.1.0"}
+
+        def run_evaluation(self, *args, **kwargs):
+            assert kwargs["run_inference"] is True
+            return {
+                "schema": "zyrquen.native_inference_evaluation.v1",
+                "model_version": "v0.1.0",
+                "inference_status": "PASS",
+                "metrics": {"examples_evaluated": 12.0, "exact_match": 0.5},
+            }
+
+    monkeypatch.setattr(
+        evaluation_router, "EvaluationEngine", SuccessfulEvaluationEngine
+    )
+    response = test_client.post(
+        "/v1/evaluation/runs",
+        json={
+            "model_version": "v0.1.0",
+            "dataset_id": "pilot-v1",
+            "dataset_checksum": checksum,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["run"]["status"] == "completed"
+    with session_factory() as db:
+        run = db.query(EvaluationRun).one()
+        assert run.user_id == user_a.id
+        assert run.status == "completed"
+        assert run.sample_count == 12
+        assert run.metrics["exact_match"] == 0.5
+        assert run.metadata_json["inference_status"] == "PASS"
+
+
+
 def test_list_evaluation_runs_enforces_ownership(eval_client):
     test_client, session_factory, active_user, user_a, user_b = eval_client
     with session_factory() as db:
