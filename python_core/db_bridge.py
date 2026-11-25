@@ -771,6 +771,71 @@ def handle_action(action: str, payload: dict) -> dict:
         conn.close()
         return {"ok": True}
 
+    if action == "projects_list":
+        uid = str(payload.get("user_id", ""))
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, name, description, status, created_at, updated_at FROM workspace_projects WHERE user_id=? ORDER BY updated_at DESC, id DESC",
+            (uid,),
+        ).fetchall()]
+        conn.close()
+        return {"ok": True, "projects": rows}
+
+    if action == "projects_create":
+        uid = str(payload.get("user_id", ""))
+        name = str(payload.get("name", "")).strip()[:120]
+        description = str(payload.get("description", "")).strip()[:2000]
+        if not uid or not name:
+            conn.close()
+            return {"ok": False, "error": "Project name is required"}
+        project_id = str(uuid.uuid4())
+        ts = now_iso()
+        with conn:
+            conn.execute(
+                "INSERT INTO workspace_projects (id, user_id, name, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)",
+                (project_id, uid, name, description, ts, ts),
+            )
+        row = row_to_dict(conn.execute(
+            "SELECT id, name, description, status, created_at, updated_at FROM workspace_projects WHERE id=? AND user_id=?",
+            (project_id, uid),
+        ).fetchone())
+        conn.close()
+        return {"ok": True, "project": row}
+
+    if action == "projects_update":
+        uid = str(payload.get("user_id", ""))
+        project_id = str(payload.get("project_id", ""))
+        name = str(payload.get("name", "")).strip()[:120]
+        description = str(payload.get("description", "")).strip()[:2000]
+        project_status = str(payload.get("status", "active")).strip().lower()
+        if not name or project_status not in {"active", "archived"}:
+            conn.close()
+            return {"ok": False, "error": "Invalid project fields"}
+        with conn:
+            cursor = conn.execute(
+                "UPDATE workspace_projects SET name=?, description=?, status=?, updated_at=? WHERE id=? AND user_id=?",
+                (name, description, project_status, now_iso(), project_id, uid),
+            )
+        if cursor.rowcount != 1:
+            conn.close()
+            return {"ok": False, "error": "Project not found"}
+        row = row_to_dict(conn.execute(
+            "SELECT id, name, description, status, created_at, updated_at FROM workspace_projects WHERE id=? AND user_id=?",
+            (project_id, uid),
+        ).fetchone())
+        conn.close()
+        return {"ok": True, "project": row}
+
+    if action == "projects_delete":
+        uid = str(payload.get("user_id", ""))
+        project_id = str(payload.get("project_id", ""))
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM workspace_projects WHERE id=? AND user_id=?",
+                (project_id, uid),
+            )
+        conn.close()
+        return {"ok": cursor.rowcount == 1}
+
     if action == "tools_overview":
         uid = str(payload.get("user_id", ""))
         tools = [dict(r) for r in conn.execute("SELECT * FROM external_tools ORDER BY id ASC").fetchall()]
