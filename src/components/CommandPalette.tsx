@@ -1,10 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Archive,
+  BarChart3,
   BrainCircuit,
+  CheckSquare,
   Command,
-  Home,
+  FolderKanban,
+  LayoutDashboard,
   MessageSquarePlus,
-  MessageSquareText,
+  PenTool,
   Search,
   Settings,
   Shield,
@@ -59,42 +63,74 @@ export function CommandPalette({
   const actions = useMemo<PaletteAction[]>(() => {
     const base: PaletteAction[] = [
       {
-        id: 'new-conversation',
-        label: 'เริ่มบทสนทนาใหม่ (New Conversation)',
+        id: 'new-task-workspace',
+        label: 'เริ่มงานใหม่ในพื้นที่ดำเนินงาน (New Task)',
         hint: 'Alt+N',
-        keywords: 'new chat conversation workspace เริ่มใหม่ บทสนทนา',
+        keywords: 'new task project workspace เริ่มงานใหม่ โปรเจกต์',
         icon: MessageSquarePlus,
         onSelect: () => onNewConversation(),
       },
       {
-        id: 'nav-home',
-        label: 'ไปที่ หน้าหลัก (Home)',
+        id: 'nav-overview',
+        label: 'ไปที่ ภาพรวม (Overview)',
         hint: 'Alt+1',
-        keywords: 'home หน้าหลัก dashboard start',
-        icon: Home,
-        onSelect: () => onNavigate('home'),
+        keywords: 'overview home ภาพรวม workspace dashboard',
+        icon: LayoutDashboard,
+        onSelect: () => onNavigate('overview'),
       },
       {
-        id: 'nav-workspace',
-        label: 'ไปที่ เวิร์กสเปซ (Workspace)',
+        id: 'nav-projects',
+        label: 'ไปที่ โปรเจกต์ (Projects)',
         hint: 'Alt+2',
-        keywords: 'workspace เวิร์กสเปซ สนทนา chat ast',
-        icon: MessageSquareText,
-        onSelect: () => onNavigate('workspace'),
+        keywords: 'projects โปรเจกต์ workspace files โฟลเดอร์งาน',
+        icon: FolderKanban,
+        onSelect: () => onNavigate('projects'),
       },
       {
-        id: 'nav-memory',
-        label: 'ไปที่ ความจำและเวิร์กโฟลว์ (Memory & Workflows)',
+        id: 'nav-tasks',
+        label: 'ไปที่ งานของฉัน (My Tasks)',
         hint: 'Alt+3',
-        keywords: 'memory workflow knowledge กราฟความรู้ เวิร์กโฟลว์',
+        keywords: 'tasks งานของฉัน ประวัติ รันงาน สถานะ missions workflows',
+        icon: CheckSquare,
+        onSelect: () => onNavigate('tasks'),
+      },
+      {
+        id: 'nav-create',
+        label: 'ไปที่ สร้างงาน (Create)',
+        hint: 'Alt+4',
+        keywords: 'create สร้างงาน ซอฟต์แวร์ เอกสาร โค้ด artifact',
+        icon: PenTool,
+        onSelect: () => onNavigate('create'),
+      },
+      {
+        id: 'nav-analysis',
+        label: 'ไปที่ วิเคราะห์ (Analysis)',
+        hint: 'Alt+5',
+        keywords: 'analysis วิเคราะห์ ข้อมูล คำนวณ แก้ปัญหา ast knowledge',
+        icon: BarChart3,
+        onSelect: () => onNavigate('analysis'),
+      },
+      {
+        id: 'nav-artifacts',
+        label: 'ไปที่ คลังผลงาน (Artifacts)',
+        hint: 'Alt+6',
+        keywords: 'artifacts คลังผลงาน ไฟล์ รายงาน ดาวน์โหลด export',
+        icon: Archive,
+        onSelect: () => onNavigate('artifacts'),
+      },
+      {
+        id: 'nav-memory-internal',
+        label: 'ไปที่ ความจำและเวิร์กโฟลว์ภายใน (Internal Memory & Workflows)',
+        hint: 'Internal',
+        keywords: 'memory workflow knowledge กราฟความรู้ เวิร์กโฟลว์ภายใน',
         icon: BrainCircuit,
         onSelect: () => onNavigate('memory'),
       },
       {
         id: 'nav-settings-account',
-        label: 'ไปที่ ตั้งค่าบัญชีผู้ใช้ (Account Settings)',
-        hint: 'Alt+4',
-        keywords: 'settings account ตั้งค่า บัญชี',
+        label: 'ไปที่ ตั้งค่าบัญชีผู้ใช้และโมเดล (Account & Model Settings)',
+        hint: 'ตั้งค่า',
+        keywords: 'settings account model ตั้งค่า บัญชี โมเดล',
         icon: Settings,
         onSelect: () => onNavigate('settings', 'account'),
       },
@@ -123,9 +159,9 @@ export function CommandPalette({
       base.push({
         id: `conv-${conv.id}`,
         label: conv.title,
-        hint: `${conv.mode} · ${conv.message_count} ข้อความ`,
-        keywords: `conversation history บทสนทนา ${conv.title} ${conv.mode}`,
-        icon: MessageSquareText,
+        hint: `${conv.message_count} รายการ`,
+        keywords: `project task workspace โปรเจกต์ งาน ${conv.title}`,
+        icon: FolderKanban,
         onSelect: () => onOpenConversation(conv.id),
       });
     }
@@ -205,7 +241,7 @@ export function CommandPalette({
               setQuery(e.target.value);
               setSelectedIndex(0);
             }}
-            placeholder="พิมพ์คำสั่ง ข้ามหน้า หรือค้นหาบทสนทนา..."
+            placeholder="พิมพ์คำสั่ง ข้ามหน้า หรือค้นหาโปรเจกต์..."
             aria-label="ค้นหาคำสั่งด่วน"
             className="flex-1 bg-transparent text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
           />

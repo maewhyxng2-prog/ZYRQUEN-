@@ -15,20 +15,20 @@ import {
   Paperclip,
   Plus,
   Send,
+  Settings,
   Trash2,
   X,
 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { redactSensitiveData } from '../lib/clipboard';
 import { detectPendingToolActivity, type ToolId } from '../lib/tools';
-import {
-  MODEL_VARIANTS,
-  type ConversationSmartSummary,
-  type ConversationSummary,
-  type MessageItem,
-  type ModelVariantId,
-  type NativeTrace,
-  type ReasoningMode,
+import type {
+  ConversationSmartSummary,
+  ConversationSummary,
+  MessageItem,
+  ModelVariantId,
+  NativeTrace,
+  ReasoningMode,
 } from '../types';
 import { CopyButton } from './CopyButton';
 import { SafeMessageText, toPlainAssistantCopyText } from './SafeMessageText';
@@ -57,7 +57,7 @@ interface WorkspaceViewProps {
     attachment?: string,
     modelVariant?: ModelVariantId
   ) => Promise<void>;
-  onModelVariantChange?: (variant: ModelVariantId) => void;
+  onOpenSettings?: () => void;
   onRetryLast?: () => void;
 }
 
@@ -119,24 +119,10 @@ export function WorkspaceView({
   onNewConversation,
   onDeleteConversation,
   onSendMessage,
-  onModelVariantChange,
+  onOpenSettings,
   onRetryLast,
 }: WorkspaceViewProps) {
   const [input, setInput] = useState('');
-  const [mode, setMode] = useState<ReasoningMode>(defaultMode);
-  const [prevDefaultMode, setPrevDefaultMode] = useState<ReasoningMode>(defaultMode);
-  if (prevDefaultMode !== defaultMode) {
-    setPrevDefaultMode(defaultMode);
-    setMode(defaultMode);
-  }
-  const [selectedModelVariant, setSelectedModelVariant] =
-    useState<ModelVariantId>(defaultModelVariant);
-  const [prevDefaultVariant, setPrevDefaultVariant] =
-    useState<ModelVariantId>(defaultModelVariant);
-  if (prevDefaultVariant !== defaultModelVariant) {
-    setPrevDefaultVariant(defaultModelVariant);
-    setSelectedModelVariant(defaultModelVariant);
-  }
   const [attachment, setAttachment] = useState<{ name: string; content: string } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
@@ -224,14 +210,14 @@ export function WorkspaceView({
     }
     const contentToSend = trimmed;
     const attachmentContent = attachment?.content;
-    setActiveToolStatus(detectPendingToolActivity(contentToSend, mode));
+    setActiveToolStatus(detectPendingToolActivity(contentToSend, defaultMode));
     setInput('');
     setAttachment(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
     try {
-      await onSendMessage(contentToSend, mode, attachmentContent, selectedModelVariant);
+      await onSendMessage(contentToSend, defaultMode, attachmentContent, defaultModelVariant);
     } finally {
       setActiveToolStatus(null);
     }
@@ -345,17 +331,17 @@ export function WorkspaceView({
           <button
             type="button"
             onClick={() => setHistoryOpen(true)}
-            aria-label="เปิดประวัติบทสนทนา"
+            aria-label="เปิดประวัติโปรเจกต์"
             className="flex min-h-[40px] items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
           >
             <History className="h-4 w-4 text-[var(--color-accent)]" />
-            <span>ประวัติ</span>
+            <span>รายการงาน</span>
             <span className="text-[var(--color-text-muted)] tabular-nums">({conversations.length})</span>
           </button>
           <span className="hidden text-[var(--color-border)] sm:inline" aria-hidden="true">
             /
           </span>
-          <p className="hidden max-w-[260px] truncate text-xs font-medium text-[var(--color-text-secondary)] sm:block">
+          <p className="hidden max-w-[280px] truncate text-xs font-medium text-[var(--color-text-secondary)] sm:block">
             {activeTitle}
           </p>
         </div>
@@ -369,7 +355,7 @@ export function WorkspaceView({
               className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
             >
               <ListChecks className="h-4 w-4 text-[var(--color-accent)]" />
-              <span className="hidden sm:inline">สรุปสำคัญ</span>
+              <span className="hidden sm:inline">สรุปผลลัพธ์</span>
               {summaryOpen ? (
                 <ChevronUp className="h-3.5 w-3.5" />
               ) : (
@@ -383,12 +369,12 @@ export function WorkspaceView({
             className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
           >
             <Plus className="h-4 w-4" />
-            <span>เซสชันใหม่</span>
+            <span>เริ่มงานใหม่</span>
           </button>
         </div>
       </div>
 
-      {/* Collapsible Native Smart Summary Panel (collapsed by default) */}
+      {/* Collapsible Smart Summary Panel */}
       {summaryOpen && activeConversationId && messages.length > 0 && (
         <section
           aria-label="สรุปประเด็นสำคัญอัตโนมัติ"
@@ -422,7 +408,7 @@ export function WorkspaceView({
               </div>
             </div>
             {summaryLoading ? (
-              <p className="mt-2 text-xs text-[var(--color-text-secondary)]">กำลังสรุปจากแกนสมองภายใน...</p>
+              <p className="mt-2 text-xs text-[var(--color-text-secondary)]">กำลังสรุปผลลัพธ์ภายใน...</p>
             ) : smartSummary && smartSummary.bullets.length > 0 ? (
               <ul className="mt-2 space-y-1 text-xs text-[var(--color-text)]">
                 {smartSummary.bullets.map((bullet) => (
@@ -436,19 +422,19 @@ export function WorkspaceView({
               </ul>
             ) : (
               <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
-                ยังไม่มีผลลัพธ์เชิงโครงสร้างในบทสนทนานี้
+                ยังไม่มีผลลัพธ์เชิงโครงสร้างในโปรเจกต์นี้
               </p>
             )}
           </div>
         </section>
       )}
 
-      {/* Scrollable Conversation Area */}
+      {/* Scrollable Task Execution Log */}
       <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
           {loadingThread ? (
             <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-6 text-sm text-[var(--color-text-secondary)]">
-              กำลังโหลดประวัติข้อความ...
+              กำลังโหลดข้อมูลงาน...
             </div>
           ) : messages.length === 0 ? (
             <div className="zyrq-glow relative my-4 overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 sm:my-6 sm:p-8">
@@ -457,45 +443,60 @@ export function WorkspaceView({
                 <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
                   <TemporalIntelligenceCore
                     variant="compact"
-                    size={96}
+                    size={90}
                     active={sending || streamingContent !== null}
                   />
                   <div>
                     <h2 className="text-lg font-bold text-[var(--color-text)]">
-                      แกนประมวลผลและเหตุผล ZYRQUEN Ω∞
+                      พื้นที่ดำเนินงาน ZYRQUEN
                     </h2>
-                    <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                      การรับรู้ · การวิเคราะห์ข้อมูล/โค้ด · การให้เหตุผล · การวางแผนงานภายใน
+                    <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                      อธิบายเป้าหมาย แนบไฟล์ข้อมูล หรือซอร์สโค้ด เพื่อให้ระบบวิเคราะห์ วางแผน และสร้างผลงานจริง
                     </p>
                     <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-                      Web Workspace Client เชื่อมต่อ Python Native Core (แยกจากแอป Native Android/Desktop)
+                      Web Workspace Client เชื่อมต่อ Python Core (แยกจากแอป Native Android/Desktop)
                     </p>
                   </div>
                 </div>
-                <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
-                  ทำงานร่วมกับ ZYRQUEN ได้ทั้งการสนทนา วิเคราะห์ไฟล์ข้อมูล/โครงสร้างโค้ดที่แนบ คำนวณเชิงสัญลักษณ์ เชื่อมโยงกราฟความรู้ และวางแผนงานแบบมีขั้นตอนตรวจสอบ
-                </p>
+
                 <div className="grid w-full gap-2.5 sm:grid-cols-2">
                   {[
-                    { text: 'สวัสดี', m: 'auto' as ReasoningMode },
-                    { text: 'คำนวณ (144 / 12) + sqrt(81)', m: 'math' as ReasoningMode },
-                    { text: 'สอน: ZYRQUEN -> บังคับใช้ -> Approval Gate', m: 'knowledge' as ReasoningMode },
-                    { text: 'วางแผน: ตรวจสอบและวิเคราะห์ชุดข้อมูลในเวิร์กสเปซ', m: 'plan' as ReasoningMode },
+                    {
+                      label: 'พัฒนาซอฟต์แวร์',
+                      text: 'วางแผนและออกแบบโครงสร้างโมดูลบริการ API พร้อมขั้นตอนทดสอบ',
+                      m: 'plan' as ReasoningMode,
+                    },
+                    {
+                      label: 'สร้างเอกสาร',
+                      text: 'สร้างเอกสารสรุปสถาปัตยกรรมและรายการตรวจสอบความพร้อมระบบ',
+                      m: 'auto' as ReasoningMode,
+                    },
+                    {
+                      label: 'วิเคราะห์ข้อมูล',
+                      text: 'คำนวณค่าเฉลี่ย ส่วนเบี่ยงเบนมาตรฐาน และตรวจสอบสมการ (144 / 12) + sqrt(81)',
+                      m: 'math' as ReasoningMode,
+                    },
+                    {
+                      label: 'แก้ปัญหา',
+                      text: 'วางแผน: ตรวจสอบและวิเคราะห์ชุดข้อมูลหรือจุดคอขวดในเวิร์กสเปซ',
+                      m: 'plan' as ReasoningMode,
+                    },
                   ].map((q) => (
                     <button
-                      key={q.text}
+                      key={q.label}
                       type="button"
                       onClick={async () => {
                         setActiveToolStatus(detectPendingToolActivity(q.text, q.m));
                         try {
-                          await onSendMessage(q.text, q.m, undefined, selectedModelVariant);
+                          await onSendMessage(q.text, q.m, undefined, defaultModelVariant);
                         } finally {
                           setActiveToolStatus(null);
                         }
                       }}
-                      className="min-h-[48px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]/90 px-4 py-2.5 text-left text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
+                      className="min-h-[56px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]/90 px-4 py-3 text-left transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
                     >
-                      {q.text}
+                      <p className="text-xs font-semibold text-[var(--color-accent)]">{q.label}</p>
+                      <p className="mt-0.5 line-clamp-1 text-xs text-[var(--color-text)]">{q.text}</p>
                     </button>
                   ))}
                 </div>
@@ -540,14 +541,14 @@ export function WorkspaceView({
                       <CopyButton
                         getText={() => toPlainAssistantCopyText(msg.content)}
                         ariaLabel="คัดลอกข้อความตอบกลับ"
-                        title="คัดลอกข้อความตอบกลับทั้งหมดเป็นข้อความธรรมดา"
+                        title="คัดลอกผลลัพธ์ทั้งหมดเป็นข้อความธรรมดา"
                         size="sm"
                       />
 
                       <button
                         type="button"
                         onClick={() => handleExportMessage(msg)}
-                        aria-label="ส่งออกข้อความเป็นไฟล์ Markdown"
+                        aria-label="ส่งออกผลลัพธ์เป็นไฟล์ Markdown"
                         title="ดาวน์โหลดเป็นไฟล์ .md"
                         className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
                       >
@@ -653,7 +654,7 @@ export function WorkspaceView({
                   <Cpu className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
                 )}
                 <span>
-                  {activeToolStatus?.label || 'กำลังประมวลผลผ่านแกนสมอง Python ภายใน...'}
+                  {activeToolStatus?.label || 'กำลังดำเนินการในพื้นที่ทำงาน...'}
                 </span>
               </div>
               {streamingContent && (
@@ -697,49 +698,22 @@ export function WorkspaceView({
         </div>
       </div>
 
-      {/* Bottom-Docked Message Composer */}
+      {/* Bottom-Docked Task Composer (Clean, mode-free, model selector moved to Settings) */}
       <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 pb-safe sm:px-6 sm:py-3">
         <form onSubmit={handleSubmit} className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-1">
-              {(
-                [
-                  { id: 'auto', label: 'อัตโนมัติ' },
-                  { id: 'math', label: 'คณิต' },
-                  { id: 'knowledge', label: 'ความจำ' },
-                  { id: 'plan', label: 'วางแผน' },
-                  { id: 'model', label: 'โมเดล' },
-                ] as const
-              ).map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => setMode(m.id)}
-                  className={`min-h-[32px] rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
-                    mode === m.id
-                      ? 'bg-[var(--color-primary)] text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
-                  }`}
-                >
-                  {m.label}
-                </button>
-              ))}
+          {attachment && (
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 py-1.5 text-xs text-[var(--color-accent)]">
+              <span className="truncate">ไฟล์แนบ: {attachment.name}</span>
+              <button
+                type="button"
+                onClick={() => setAttachment(null)}
+                aria-label="ลบไฟล์แนบ"
+                className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
             </div>
-
-            {attachment && (
-              <div className="flex min-w-0 items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-xs text-[var(--color-accent)]">
-                <span className="max-w-[140px] truncate">{attachment.name}</span>
-                <button
-                  type="button"
-                  onClick={() => setAttachment(null)}
-                  aria-label="ลบไฟล์แนบ"
-                  className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            )}
-          </div>
+          )}
 
           {(speechError || listening) && (
             <div className="flex items-center justify-between gap-2 text-xs">
@@ -770,7 +744,7 @@ export function WorkspaceView({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt,.md,.json,.csv,.py"
+              accept=".txt,.md,.json,.csv,.py,.ts,.tsx,.js"
               onChange={handleFileChange}
               className="hidden"
             />
@@ -811,82 +785,52 @@ export function WorkspaceView({
                   void handleSubmit();
                 }
               }}
-              placeholder="พิมพ์ข้อความถึงแกนสมอง ZYRQUEN..."
-              aria-label="ช่องพิมพ์ข้อความ"
+              placeholder="บอกงานที่ต้องการให้ดำเนินการ..."
+              aria-label="ช่องพิมพ์คำสั่งงาน"
               className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
             />
 
             <button
               type="submit"
               disabled={sending || (!input.trim() && !attachment)}
-              aria-label="ส่งข้อความ"
+              aria-label="ส่งคำสั่งงาน"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[var(--color-primary)] text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-40"
             >
               <Send className="h-4 w-4" />
             </button>
           </div>
 
-          {/* Composer Footer: Consistent Model Variant Selector across Mobile & Desktop */}
-          <footer
-            aria-label="ส่วนท้ายช่องข้อความ"
-            className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2"
-          >
-            <div className="relative flex min-w-0 items-center">
-              <Cpu
-                className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--color-primary)]"
-                aria-hidden="true"
-              />
-              <select
-                aria-label="เลือกรุ่นโมเดล (Model Variant)"
-                value={selectedModelVariant}
-                onChange={(e) => {
-                  const nextVariant = e.target.value as ModelVariantId;
-                  setSelectedModelVariant(nextVariant);
-                  onModelVariantChange?.(nextVariant);
-                }}
-                className="h-9 max-w-[230px] cursor-pointer appearance-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] pl-8 pr-8 font-mono text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-primary)] focus:border-[var(--color-focus)] focus:outline-none sm:max-w-none"
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-[var(--color-text-muted)]">
+            <span>Enter เพื่อดำเนินการ · Shift+Enter ขึ้นบรรทัดใหม่</span>
+            {onOpenSettings && (
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                className="inline-flex items-center gap-1 text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-accent)]"
               >
-                {MODEL_VARIANTS.map((variant) => (
-                  <option
-                    key={variant.id}
-                    value={variant.id}
-                    className="bg-[var(--color-surface-raised)] text-[var(--color-text)]"
-                  >
-                    {variant.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown
-                className="pointer-events-none absolute right-2.5 h-3.5 w-3.5 text-[var(--color-primary)]"
-                aria-hidden="true"
-              />
-            </div>
-
-            <span className="truncate font-mono text-[11px] text-[var(--color-accent)]">
-              <span className="sm:hidden">{selectedModelVariant}</span>
-              <span className="hidden sm:inline">
-                {selectedModelVariant} · Enter ส่ง
-              </span>
-            </span>
-          </footer>
+                <Settings className="h-3 w-3" />
+                <span>ตั้งค่าโมเดลและพื้นที่ทำงาน</span>
+              </button>
+            )}
+          </div>
         </form>
       </div>
 
-      {/* Adaptive History Sheet (Bottom Sheet on Mobile, Slide-over Drawer on Tablet/Desktop) */}
+      {/* Adaptive Project/Task History Sheet */}
       {historyOpen && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm md:items-stretch md:justify-start">
           <div
             className="flex max-h-[82dvh] w-full flex-col rounded-t-3xl border-t border-[var(--color-border)] bg-[var(--color-surface-raised)] md:h-full md:max-h-none md:w-80 md:rounded-none md:border-r md:border-t-0"
             role="dialog"
-            aria-label="ประวัติบทสนทนา"
+            aria-label="รายการโปรเจกต์และงาน"
           >
             <div className="mx-auto mt-3 h-1.5 w-10 rounded-full bg-[var(--color-border)] md:hidden" />
             <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4">
-              <h3 className="text-base font-semibold text-[var(--color-text)]">ประวัติบทสนทนา</h3>
+              <h3 className="text-base font-semibold text-[var(--color-text)]">รายการงานและโปรเจกต์</h3>
               <button
                 type="button"
                 onClick={() => setHistoryOpen(false)}
-                aria-label="ปิดประวัติ"
+                aria-label="ปิดรายการงาน"
                 className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               >
                 <X className="h-4 w-4" />
@@ -903,13 +847,13 @@ export function WorkspaceView({
                 className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] text-sm font-medium text-white hover:bg-[var(--color-primary-hover)]"
               >
                 <Plus className="h-4 w-4" />
-                <span>เริ่มบทสนทนาใหม่</span>
+                <span>เริ่มงานใหม่</span>
               </button>
             </div>
 
             <div className="flex-1 divide-y divide-[var(--color-border)] overflow-y-auto px-3 pb-6">
               {conversations.length === 0 ? (
-                <p className="p-4 text-sm text-[var(--color-text-secondary)]">ยังไม่มีบทสนทนาที่บันทึกไว้</p>
+                <p className="p-4 text-sm text-[var(--color-text-secondary)]">ยังไม่มีงานที่บันทึกไว้</p>
               ) : (
                 conversations.map((conv) => (
                   <div
@@ -928,14 +872,14 @@ export function WorkspaceView({
                     >
                       <p className="truncate text-sm font-medium text-[var(--color-text)]">{conv.title}</p>
                       <p className="text-xs text-[var(--color-text-secondary)] tabular-nums">
-                        {conv.mode} · {conv.message_count} ข้อความ
+                        {conv.message_count} รายการ
                       </p>
                     </button>
                     <button
                       type="button"
                       onClick={() => onDeleteConversation(conv.id)}
-                      aria-label={`ลบ ${conv.title}`}
-                      className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl text-[var(--color-text-muted)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
+                      aria-label={`ลบงาน ${conv.title}`}
+                      className="flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
@@ -944,12 +888,6 @@ export function WorkspaceView({
               )}
             </div>
           </div>
-          <button
-            type="button"
-            aria-label="ปิดแถบประวัติ"
-            className="hidden flex-1 md:block"
-            onClick={() => setHistoryOpen(false)}
-          />
         </div>
       )}
     </div>

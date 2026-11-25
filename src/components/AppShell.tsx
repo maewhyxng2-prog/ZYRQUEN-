@@ -1,10 +1,13 @@
 import React from 'react';
 import {
+  Archive,
   ArrowLeft,
-  BrainCircuit,
-  Home,
-  MessageSquareText,
+  BarChart3,
+  CheckSquare,
+  FolderKanban,
+  LayoutDashboard,
   Moon,
+  PenTool,
   Settings,
   Sun,
   User as UserIcon,
@@ -27,11 +30,17 @@ interface AppShellProps {
   children: React.ReactNode;
 }
 
-const NAV_ITEMS: Array<{ id: AppScreen; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: 'home', label: 'หน้าหลัก', icon: Home },
-  { id: 'workspace', label: 'เวิร์กสเปซ', icon: MessageSquareText },
-  { id: 'memory', label: 'ความจำ', icon: BrainCircuit },
-  { id: 'settings', label: 'ตั้งค่า', icon: Settings },
+const NAV_ITEMS: Array<{
+  id: AppScreen;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'overview', label: 'ภาพรวม', icon: LayoutDashboard },
+  { id: 'projects', label: 'โปรเจกต์', icon: FolderKanban },
+  { id: 'tasks', label: 'งานของฉัน', icon: CheckSquare },
+  { id: 'create', label: 'สร้างงาน', icon: PenTool },
+  { id: 'analysis', label: 'วิเคราะห์', icon: BarChart3 },
+  { id: 'artifacts', label: 'คลังผลงาน', icon: Archive },
 ];
 
 export function AppShell({
@@ -51,7 +60,7 @@ export function AppShell({
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
-      {/* Compact Application Header: Mobile App Bar + Adaptive 3-Zone Desktop/Tablet Top Bar */}
+      {/* Compact Workspace Header: Mobile App Bar + 3-Zone Desktop/Tablet Top Bar */}
       <header className="sticky top-0 z-30 border-b border-[var(--color-border)] bg-[var(--color-surface)]/92 backdrop-blur-md">
         {/* Mobile Header (52px) */}
         <div className="flex h-[52px] items-center justify-between px-3 md:hidden">
@@ -68,11 +77,11 @@ export function AppShell({
             ) : (
               <button
                 type="button"
-                onClick={() => onNavigate('home')}
-                aria-label="หน้าหลัก ZYRQUEN"
+                onClick={() => onNavigate('overview')}
+                aria-label="ภาพรวม ZYRQUEN"
                 className="flex min-h-[44px] min-w-[44px] items-center justify-center"
               >
-                <ZyrquenEmblem size={28} active={isProcessing} />
+                <ZyrquenEmblem size={26} active={isProcessing} />
               </button>
             )}
           </div>
@@ -97,7 +106,7 @@ export function AppShell({
             <button
               type="button"
               onClick={onOpenProfile}
-              aria-label="โปรไฟล์บัญชี"
+              aria-label="ตั้งค่า"
               className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
             >
               <div className="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-xs font-semibold text-[var(--color-accent)]">
@@ -111,24 +120,28 @@ export function AppShell({
         <div className="mx-auto hidden h-[60px] max-w-6xl items-center justify-between gap-8 px-6 md:flex">
           <button
             type="button"
-            onClick={() => onNavigate('home')}
+            onClick={() => onNavigate('overview')}
             className="flex shrink-0 items-center gap-2.5 rounded-lg text-left whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus)]"
           >
-            <ZyrquenEmblem size={28} active={isProcessing} />
+            <ZyrquenEmblem size={26} active={isProcessing} />
             <span className="font-display text-base font-bold tracking-tight text-[var(--color-text)]">
-              ZYRQUEN Ω∞
+              ZYRQUEN
             </span>
           </button>
 
-          <nav aria-label="เมนูหลัก" className="flex items-center gap-6">
+          <nav aria-label="เมนูหลัก" className="flex min-w-0 items-center gap-5 lg:gap-6">
             {NAV_ITEMS.map((item) => {
-              const active = activeScreen === item.id;
+              const active =
+                activeScreen === item.id ||
+                (activeScreen === 'workspace' && item.id === 'projects') ||
+                (activeScreen === 'memory' && item.id === 'tasks');
               return (
                 <button
                   key={item.id}
                   type="button"
                   onClick={() => onNavigate(item.id)}
-                  className={`relative py-2 text-sm font-medium whitespace-nowrap shrink-0 transition-colors ${
+                  aria-current={active ? 'page' : undefined}
+                  className={`relative py-2 text-sm font-medium whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus)] ${
                     active
                       ? 'text-[var(--color-accent)]'
                       : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
@@ -151,7 +164,7 @@ export function AppShell({
               type="button"
               onClick={toggleTheme}
               aria-label={theme === 'dark' ? 'เปลี่ยนเป็นโหมดสว่าง (Light Mode)' : 'เปลี่ยนเป็นโหมดมืด (Dark Mode)'}
-              className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
             >
               {theme === 'dark' ? (
                 <Sun className="h-4 w-4 text-[var(--color-accent)]" />
@@ -165,7 +178,7 @@ export function AppShell({
                 type="button"
                 onClick={onOpenCommandPalette}
                 aria-label="เปิดแผงคำสั่งด่วน (Ctrl+K)"
-                className="flex h-10 items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 font-mono text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
+                className="flex h-9 items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 font-mono text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
               >
                 <span>⌘K</span>
               </button>
@@ -173,11 +186,25 @@ export function AppShell({
 
             <button
               type="button"
+              onClick={() => onNavigate('settings')}
+              aria-label="ตั้งค่า"
+              className={`flex h-9 w-9 items-center justify-center rounded-xl border transition-colors ${
+                activeScreen === 'settings'
+                  ? 'border-[var(--color-accent)] bg-[var(--color-surface-hover)] text-[var(--color-accent)]'
+                  : 'border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]'
+              }`}
+            >
+              <Settings className="h-4 w-4" />
+            </button>
+
+            <button
+              type="button"
               onClick={onOpenProfile}
-              className="flex h-10 shrink-0 items-center gap-2.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
+              aria-label="โปรไฟล์ผู้ใช้และการตั้งค่า"
+              className="flex h-9 shrink-0 items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
             >
               <UserIcon className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-              <span className="max-w-[120px] truncate">{user.display_name}</span>
+              <span className="max-w-[110px] truncate">{user.display_name}</span>
             </button>
           </div>
         </div>
@@ -192,30 +219,33 @@ export function AppShell({
         {children}
       </main>
 
-      {/* Native-Feeling Mobile Bottom Navigation Bar */}
+      {/* Mobile Bottom Navigation Bar */}
       {!hideBottomBarOnMobile && (
         <nav
           aria-label="แถบนำทางมือถือ"
           className="fixed bottom-0 left-0 right-0 z-40 border-t border-[var(--color-border)] bg-[var(--color-surface)]/95 backdrop-blur-md pb-safe md:hidden"
         >
-          <div className="grid h-[56px] grid-cols-4 items-center">
+          <div className="grid h-[56px] grid-cols-6 items-center">
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
-              const active = activeScreen === item.id;
+              const active =
+                activeScreen === item.id ||
+                (activeScreen === 'workspace' && item.id === 'projects') ||
+                (activeScreen === 'memory' && item.id === 'tasks');
               return (
                 <button
                   key={item.id}
                   type="button"
                   onClick={() => onNavigate(item.id)}
                   aria-current={active ? 'page' : undefined}
-                  className={`flex min-h-[44px] flex-col items-center justify-center gap-1 transition-colors ${
+                  className={`flex min-h-[44px] flex-col items-center justify-center gap-1 px-0.5 transition-colors ${
                     active
                       ? 'text-[var(--color-accent)]'
                       : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                   }`}
                 >
-                  <Icon className="h-5 w-5" />
-                  <span className="text-[11px] font-medium leading-none tracking-tight">
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="max-w-full truncate text-[10px] font-medium leading-none tracking-tight">
                     {item.label}
                   </span>
                 </button>

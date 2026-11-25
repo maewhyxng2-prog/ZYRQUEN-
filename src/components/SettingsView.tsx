@@ -49,12 +49,18 @@ interface SettingsViewProps {
   activeTab: SettingsTab;
   autoExpandTrace: boolean;
   defaultMode: ReasoningMode;
+  selectedModelVariant?: ModelVariantId;
   perfSamples?: MemorySnapshot[];
   clientLatencies?: ClientLatencySample[];
   cleanupVerification?: ThreadCleanupVerification | null;
   onCapturePerfSample?: () => void;
   onChangeTab: (tab: SettingsTab) => void;
-  onUpdatePreferences: (prefs: { autoExpandTrace?: boolean; defaultMode?: ReasoningMode }) => void;
+  onOpenMemory?: () => void;
+  onUpdatePreferences: (prefs: {
+    autoExpandTrace?: boolean;
+    defaultMode?: ReasoningMode;
+    modelVariant?: ModelVariantId;
+  }) => void;
   onLogout: () => void;
 }
 
@@ -64,11 +70,13 @@ export function SettingsView({
   activeTab,
   autoExpandTrace,
   defaultMode,
+  selectedModelVariant = 'zyrquen-omega-v1',
   perfSamples = [],
   clientLatencies = [],
   cleanupVerification = null,
   onCapturePerfSample,
   onChangeTab,
+  onOpenMemory,
   onUpdatePreferences,
   onLogout,
 }: SettingsViewProps) {
@@ -594,6 +602,49 @@ export function SettingsView({
                   <option value="model">Checkpoint N-Gram</option>
                 </select>
               </div>
+
+              <div className="flex flex-col gap-2 border-t border-[var(--color-border)] pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text)]">รุ่นโมเดลและแกนประมวลผลภายใน (Model Variant)</p>
+                  <p className="text-xs text-[var(--color-text-secondary)]">
+                    เลือกสถาปัตยกรรมภายในสำหรับประมวลผลคำสั่งในพื้นที่ดำเนินงาน
+                  </p>
+                </div>
+                <select
+                  aria-label="เลือกรุ่นโมเดล (Model Variant)"
+                  value={selectedModelVariant}
+                  onChange={(e) =>
+                    onUpdatePreferences({ modelVariant: e.target.value as ModelVariantId })
+                  }
+                  className="h-11 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 font-mono text-xs text-[var(--color-text)] focus:border-[var(--color-focus)] focus:outline-none"
+                >
+                  {MODEL_VARIANTS.map((variant) => (
+                    <option key={variant.id} value={variant.id}>
+                      {variant.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {onOpenMemory && (
+                <div className="flex flex-col gap-2 border-t border-[var(--color-border)] pt-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-[var(--color-text)]">
+                      ความจำ กราฟความรู้ และเวิร์กโฟลว์ภายใน
+                    </p>
+                    <p className="text-xs text-[var(--color-text-secondary)]">
+                      จัดการข้อเท็จจริงถาวร สถานะเวิร์กโฟลว์กลางทั้ง 8 กลุ่ม และร่องรอยเหตุผลย้อนหลัง
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onOpenMemory}
+                    className="flex h-10 shrink-0 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 text-xs font-medium text-[var(--color-accent)] hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
+                  >
+                    เปิดหน้าความจำและเวิร์กโฟลว์
+                  </button>
+                </div>
+              )}
 
               <div className="flex items-center justify-between gap-4 border-t border-[var(--color-border)] pt-4">
                 <div>

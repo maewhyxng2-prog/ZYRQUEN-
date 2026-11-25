@@ -17,6 +17,22 @@ const SettingsView = lazy(() =>
 const WorkspaceView = lazy(() =>
   import('./components/WorkspaceView').then((m) => ({ default: m.WorkspaceView }))
 );
+const ProjectsView = lazy(() =>
+  import('./components/IntelligenceWorkspaceViews').then((m) => ({ default: m.ProjectsView }))
+);
+const MyTasksView = lazy(() =>
+  import('./components/IntelligenceWorkspaceViews').then((m) => ({ default: m.MyTasksView }))
+);
+const CreateArtifactView = lazy(() =>
+  import('./components/IntelligenceWorkspaceViews').then((m) => ({ default: m.CreateArtifactView }))
+);
+const AnalysisView = lazy(() =>
+  import('./components/IntelligenceWorkspaceViews').then((m) => ({ default: m.AnalysisView }))
+);
+const ArtifactsView = lazy(() =>
+  import('./components/IntelligenceWorkspaceViews').then((m) => ({ default: m.ArtifactsView }))
+);
+import type { CreatePresetKind } from './components/IntelligenceWorkspaceViews';
 import { apiRequest, ApiError, streamConversationMessage } from './lib/api';
 import { useZyrquenTheme } from './lib/theme';
 import type {
@@ -46,7 +62,16 @@ function readRouteFromUrl(): {
   const tab = params.get('tab');
 
   const screen: AppScreen =
-    view === 'workspace' || view === 'memory' || view === 'settings' ? view : 'home';
+    view === 'projects' ||
+    view === 'tasks' ||
+    view === 'create' ||
+    view === 'analysis' ||
+    view === 'artifacts' ||
+    view === 'workspace' ||
+    view === 'memory' ||
+    view === 'settings'
+      ? view
+      : 'overview';
   const settingsTab: SettingsTab =
     tab === 'developer' || tab === 'admin' ? tab : 'account';
 
@@ -59,7 +84,7 @@ function buildUrl(
   settingsTab: SettingsTab
 ): string {
   const params = new URLSearchParams();
-  if (screen !== 'home') {
+  if (screen !== 'overview') {
     params.set('view', screen);
   }
   if (screen === 'workspace' && conversationId) {
@@ -327,6 +352,7 @@ export default function App() {
   const [defaultMode, setDefaultMode] = useState<ReasoningMode>('auto');
   const [selectedModelVariant, setSelectedModelVariant] =
     useState<ModelVariantId>('zyrquen-omega-v1');
+  const [createPreset, setCreatePreset] = useState<CreatePresetKind>('software');
   const [autoExpandTrace, setAutoExpandTrace] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean>(() =>
@@ -619,14 +645,15 @@ export default function App() {
     };
   }, [activeConversationId, loadConversationThread, screen, token]);
 
-  async function handleStartPrompt(prompt: string, mode: ReasoningMode) {
+  async function handleStartPrompt(prompt: string, mode: ReasoningMode, attachment?: string) {
     if (!token) return;
     setWorkspaceError(null);
+    const titleSeed = prompt.trim() || (attachment ? 'วิเคราะห์เอกสารที่แนบ' : 'งานใหม่');
     try {
       const created = await apiRequest<{ conversation: ConversationSummary }>('/api/conversations', {
         method: 'POST',
         token,
-        body: { title: prompt.slice(0, 48), mode },
+        body: { title: titleSeed.slice(0, 48), mode },
       });
       const cid = created.conversation.id;
       skipNextLoadCidRef.current = cid;
@@ -637,9 +664,33 @@ export default function App() {
       setActiveTitle(created.conversation.title);
       setMessages([]);
       pushRoute('workspace', cid, settingsTab);
-      await sendMessageToConversation(cid, prompt, mode, undefined, selectedModelVariant);
+      await sendMessageToConversation(cid, prompt, mode, attachment, selectedModelVariant);
     } catch (err) {
-      setWorkspaceError(err instanceof ApiError ? err.message : 'Failed to start conversation');
+      setWorkspaceError(err instanceof ApiError ? err.message : 'Failed to start task');
+    }
+  }
+
+  async function handleCreateProject(title: string, initialPrompt?: string) {
+    if (!token) return;
+    setWorkspaceError(null);
+    const created = await apiRequest<{ conversation: ConversationSummary }>('/api/conversations', {
+      method: 'POST',
+      token,
+      body: { title: title.slice(0, 80), mode: defaultMode },
+    });
+    const cid = created.conversation.id;
+    skipNextLoadCidRef.current = cid;
+    setConversations((prev) => [
+      { ...created.conversation, message_count: 0 },
+      ...prev,
+    ]);
+    setActiveTitle(created.conversation.title);
+    setMessages([]);
+    pushRoute('workspace', cid, settingsTab);
+    if (initialPrompt && initialPrompt.trim()) {
+      await sendMessageToConversation(cid, initialPrompt.trim(), defaultMode, undefined, selectedModelVariant);
+    } else {
+      void loadHomeAndConversations();
     }
   }
 
@@ -808,16 +859,22 @@ export default function App() {
       if (e.altKey && !e.ctrlKey && !e.metaKey) {
         if (e.key === '1') {
           e.preventDefault();
-          pushRoute('home', null, settingsTab);
+          pushRoute('overview', null, settingsTab);
         } else if (e.key === '2') {
           e.preventDefault();
-          pushRoute('workspace', activeConversationId, settingsTab);
+          pushRoute('projects', null, settingsTab);
         } else if (e.key === '3') {
           e.preventDefault();
-          pushRoute('memory', null, settingsTab);
+          pushRoute('tasks', null, settingsTab);
         } else if (e.key === '4') {
           e.preventDefault();
-          pushRoute('settings', null, 'account');
+          pushRoute('create', null, settingsTab);
+        } else if (e.key === '5') {
+          e.preventDefault();
+          pushRoute('analysis', null, settingsTab);
+        } else if (e.key === '6') {
+          e.preventDefault();
+          pushRoute('artifacts', null, settingsTab);
         } else if (e.key.toLowerCase() === 'n') {
           e.preventDefault();
           handleNewConversation();
@@ -826,7 +883,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onGlobalKeyDown);
     return () => window.removeEventListener('keydown', onGlobalKeyDown);
-  }, [activeConversationId, handleNewConversation, pushRoute, settingsTab, token, user]);
+  }, [handleNewConversation, pushRoute, settingsTab, token, user]);
 
   async function handleDeleteConversation(cid: string) {
     if (!token) return;
@@ -840,7 +897,7 @@ export default function App() {
       }
       void loadHomeAndConversations();
     } catch (err) {
-      setWorkspaceError(err instanceof ApiError ? err.message : 'ลบบทสนทนาไม่สำเร็จ');
+      setWorkspaceError(err instanceof ApiError ? err.message : 'ลบโปรเจกต์ไม่สำเร็จ');
     }
   }
 
@@ -860,7 +917,7 @@ export default function App() {
     setHomeSummary(null);
     setConversations([]);
     setMessages([]);
-    pushRoute('home', null, 'account');
+    pushRoute('overview', null, 'account');
     void bootstrapAuthAndHealth();
   }
 
@@ -954,24 +1011,38 @@ export default function App() {
   }
 
   const screenTitle =
-    screen === 'home'
-      ? 'ZYRQUEN Ω∞'
-      : screen === 'workspace'
-        ? activeTitle
-        : screen === 'memory'
-          ? 'ความจำและเวิร์กโฟลว์'
-          : settingsTab === 'developer'
-            ? 'เครื่องมือนักพัฒนา'
-            : settingsTab === 'admin'
-              ? 'ผู้ดูแลระบบ'
-              : 'ตั้งค่าบัญชี';
+    screen === 'overview'
+      ? 'ZYRQUEN'
+      : screen === 'projects'
+        ? 'โปรเจกต์'
+        : screen === 'tasks'
+          ? 'งานของฉัน'
+          : screen === 'create'
+            ? 'สร้างงาน'
+            : screen === 'analysis'
+              ? 'วิเคราะห์'
+              : screen === 'artifacts'
+                ? 'คลังผลงาน'
+                : screen === 'workspace'
+                  ? activeTitle
+                  : screen === 'memory'
+                    ? 'ความจำและเวิร์กโฟลว์'
+                    : settingsTab === 'developer'
+                      ? 'เครื่องมือนักพัฒนา'
+                      : settingsTab === 'admin'
+                        ? 'ผู้ดูแลระบบ'
+                        : 'ตั้งค่าบัญชี';
 
   return (
     <AppShell
       activeScreen={screen}
       screenTitle={screenTitle}
       user={user}
-      showBackOnMobile={screen === 'workspace' || (screen === 'settings' && settingsTab !== 'account')}
+      showBackOnMobile={
+        screen === 'workspace' ||
+        screen === 'memory' ||
+        (screen === 'settings' && settingsTab !== 'account')
+      }
       hideBottomBarOnMobile={screen === 'workspace'}
       isProcessing={isCoreProcessing}
       onNavigate={(next) => {
@@ -987,7 +1058,7 @@ export default function App() {
         if (window.history.length > 1) {
           window.history.back();
         } else {
-          pushRoute('home', null, 'account');
+          pushRoute('overview', null, 'account');
         }
       }}
       onOpenProfile={() => pushRoute('settings', null, 'account')}
@@ -1002,16 +1073,31 @@ export default function App() {
           exit={{ opacity: 0, y: -4 }}
           transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
         >
-          {screen === 'home' && (
+          {screen === 'overview' && (
             <HomeView
               user={user}
               homeSummary={homeSummary}
               nativeReady={nativeReady}
               loading={homeLoading}
               error={homeError}
-              onStartPrompt={(prompt, mode) => void handleStartPrompt(prompt, mode)}
+              onStartPrompt={(prompt, mode, attachment) =>
+                void handleStartPrompt(prompt, mode, attachment)
+              }
               onOpenConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
-              onNavigate={(next) => pushRoute(next, null, settingsTab)}
+              onNavigate={(next, options) => {
+                if (next === 'create' && options?.preset) {
+                  const preset = options.preset;
+                  if (
+                    preset === 'software' ||
+                    preset === 'document' ||
+                    preset === 'data' ||
+                    preset === 'direct_file'
+                  ) {
+                    setCreatePreset(preset);
+                  }
+                }
+                pushRoute(next, null, settingsTab);
+              }}
               onRetry={() => void loadHomeAndConversations()}
             />
           )}
@@ -1036,6 +1122,53 @@ export default function App() {
               </div>
             }
           >
+            {screen === 'projects' && (
+              <ProjectsView
+                token={token}
+                conversations={conversations}
+                onOpenConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
+                onCreateProject={handleCreateProject}
+                onDeleteProject={handleDeleteConversation}
+                onNavigate={(next) => pushRoute(next, null, settingsTab)}
+              />
+            )}
+
+            {screen === 'tasks' && (
+              <MyTasksView
+                token={token}
+                user={user}
+                conversations={conversations}
+                onOpenConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
+                onNavigate={(next) => pushRoute(next, null, settingsTab)}
+              />
+            )}
+
+            {screen === 'create' && (
+              <CreateArtifactView
+                token={token}
+                initialKind={createPreset}
+                onStartTask={handleStartPrompt}
+                onNavigate={(next) => pushRoute(next, null, settingsTab)}
+              />
+            )}
+
+            {screen === 'analysis' && (
+              <AnalysisView
+                token={token}
+                user={user}
+                onStartTask={handleStartPrompt}
+                onNavigate={(next) => pushRoute(next, null, settingsTab)}
+              />
+            )}
+
+            {screen === 'artifacts' && (
+              <ArtifactsView
+                token={token}
+                onOpenConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
+                onNavigate={(next) => pushRoute(next, null, settingsTab)}
+              />
+            )}
+
             {screen === 'workspace' && (
               <WorkspaceView
                 token={token}
@@ -1068,7 +1201,7 @@ export default function App() {
                     variant || selectedModelVariant
                   )
                 }
-                onModelVariantChange={(variant) => setSelectedModelVariant(variant)}
+                onOpenSettings={() => pushRoute('settings', null, 'account')}
                 onRetryLast={
                   lastFailedPrompt
                     ? () =>
@@ -1093,14 +1226,17 @@ export default function App() {
                 activeTab={user.role !== 'admin' && settingsTab === 'admin' ? 'account' : settingsTab}
                 autoExpandTrace={autoExpandTrace}
                 defaultMode={defaultMode}
+                selectedModelVariant={selectedModelVariant}
                 perfSamples={perfSamples}
                 clientLatencies={clientLatencies}
                 cleanupVerification={cleanupVerification}
                 onCapturePerfSample={handleCapturePerfSampleNow}
                 onChangeTab={(nextTab) => pushRoute('settings', null, nextTab)}
+                onOpenMemory={() => pushRoute('memory', null, 'account')}
                 onUpdatePreferences={(prefs) => {
                   if (prefs.autoExpandTrace !== undefined) setAutoExpandTrace(prefs.autoExpandTrace);
                   if (prefs.defaultMode !== undefined) setDefaultMode(prefs.defaultMode);
+                  if (prefs.modelVariant !== undefined) setSelectedModelVariant(prefs.modelVariant);
                 }}
                 onLogout={() => void handleLogout()}
               />

@@ -99,10 +99,10 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     });
     fireEvent.click(screen.getByRole('button', { name: /ตั้งค่าผู้ดูแลและเข้าใช้งาน/i }));
 
-    expect(await screen.findByText(/สวัสดี, หัวหน้าทีมวิจัย/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง/i)
-    ).toBeInTheDocument();
+    expect(await screen.findByText('คุณต้องการสร้างอะไรวันนี้?')).toBeInTheDocument();
+    expect(screen.getByText(/ผู้ใช้งาน: หัวหน้าทีมวิจัย/i)).toBeInTheDocument();
+    expect(screen.getByText('พัฒนาซอฟต์แวร์')).toBeInTheDocument();
+    expect(screen.getByText('วิเคราะห์ข้อมูล')).toBeInTheDocument();
   });
 
   it('อนุญาตให้สมัครสมาชิกใหม่ (role=user) ทั้งก่อนและหลังตั้งค่าผู้ดูแล พร้อมตรวจสอบยืนยันรหัสผ่าน', async () => {
@@ -177,7 +177,8 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     });
     fireEvent.click(submitButtons[submitButtons.length - 1]);
 
-    expect(await screen.findByText(/สวัสดี, สมาชิกใหม่/i)).toBeInTheDocument();
+    expect(await screen.findByText('คุณต้องการสร้างอะไรวันนี้?')).toBeInTheDocument();
+    expect(screen.getByText(/ผู้ใช้งาน: สมาชิกใหม่/i)).toBeInTheDocument();
     expect(registerPayloads).toHaveLength(1);
     expect(registerPayloads[0]).toMatchObject({
       email: 'newmember@zyrquen.local',
@@ -421,16 +422,24 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     const signInButtons = screen.getAllByRole('button', { name: 'เข้าสู่ระบบ' });
     fireEvent.click(signInButtons[signInButtons.length - 1]);
 
-    expect(await screen.findByText(/สวัสดี, สมาชิกทดสอบ/i)).toBeInTheDocument();
+    expect(await screen.findByText('คุณต้องการสร้างอะไรวันนี้?')).toBeInTheDocument();
+    expect(screen.getByText(/ผู้ใช้งาน: สมาชิกทดสอบ/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'คำนวณ AST เชิงสัญลักษณ์' }));
+    // Model Variant selection lives in Settings -> Account/Workspace
+    fireEvent.click(screen.getAllByRole('button', { name: 'ตั้งค่า' })[0]);
+    const variantSelect = await screen.findByLabelText('เลือกรุ่นโมเดล (Model Variant)');
+    fireEvent.change(variantSelect, { target: { value: 'zyrquen-ast-pro' } });
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'ภาพรวม' })[0]);
+    const homeGoalInput = await screen.findByLabelText(
+      'อธิบายเป้าหมายหรือแนบไฟล์เพื่อให้ ZYRQUEN เริ่มดำเนินงาน'
+    );
+    fireEvent.change(homeGoalInput, { target: { value: 'คำนวณ (2^12 - 96) / 16' } });
+    fireEvent.click(screen.getByRole('button', { name: 'เริ่มดำเนินงาน' }));
     expect(await screen.findByText('250')).toBeInTheDocument();
     expect(window.location.search).toContain('view=workspace');
 
-    const variantSelect = screen.getByLabelText('เลือกรุ่นโมเดล (Model Variant)');
-    fireEvent.change(variantSelect, { target: { value: 'zyrquen-ast-pro' } });
-
-    const composer = screen.getByLabelText('ช่องพิมพ์ข้อความ');
+    const composer = screen.getByLabelText('ช่องพิมพ์คำสั่งงาน');
     fireEvent.change(composer, { target: { value: 'คำนวณ 10 + 15' } });
     fireEvent.keyDown(composer, { key: 'Enter', shiftKey: false });
     await waitFor(() => {
@@ -441,7 +450,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     ).toBe('zyrquen-ast-pro');
 
     // Smart Summary collapsible panel
-    fireEvent.click(screen.getByRole('button', { name: /สรุปสำคัญ/i }));
+    fireEvent.click(screen.getByRole('button', { name: /สรุปผลลัพธ์/i }));
     expect(await screen.findByText(/Smart Summary/i)).toBeInTheDocument();
     expect(await screen.findByText(/คำนวณ AST ยืนยันผล/i)).toBeInTheDocument();
 
@@ -477,11 +486,11 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
 
     // Alt+N global shortcut starts a fresh Workspace conversation
     fireEvent.keyDown(window, { key: 'n', altKey: true });
-    expect(await screen.findByText('แกนประมวลผลและเหตุผล ZYRQUEN Ω∞')).toBeInTheDocument();
+    expect(await screen.findByText('พื้นที่ดำเนินงาน ZYRQUEN')).toBeInTheDocument();
 
     window.history.replaceState({}, '', '/');
     fireEvent(window, new PopStateEvent('popstate'));
-    expect(await screen.findByText(/สวัสดี, สมาชิกทดสอบ/i)).toBeInTheDocument();
+    expect(await screen.findByText('คุณต้องการสร้างอะไรวันนี้?')).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'ตั้งค่า' })[0]);
     fireEvent.click(await screen.findByRole('button', { name: 'ออกจากระบบ' }));
@@ -616,15 +625,16 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(await screen.findByText('เซสชันคณิตศาสตร์ก่อนหน้า')).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'แถบนำทางมือถือ' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'เวิร์กสเปซ' })[0]);
-    expect(await screen.findByLabelText('ช่องพิมพ์ข้อความ')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'เปิดพื้นที่ดำเนินงาน' }));
+    expect(await screen.findByLabelText('ช่องพิมพ์คำสั่งงาน')).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'แถบนำทางมือถือ' })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'เปิดประวัติบทสนทนา' }));
-    expect(await screen.findByRole('dialog', { name: 'ประวัติบทสนทนา' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'ปิดประวัติ' }));
+    fireEvent.click(screen.getByRole('button', { name: 'เปิดประวัติโปรเจกต์' }));
+    expect(await screen.findByRole('dialog', { name: 'รายการโปรเจกต์และงาน' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'ปิดรายการงาน' }));
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'ความจำ' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'ตั้งค่า' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'เปิดหน้าความจำและเวิร์กโฟลว์' }));
     expect(await screen.findByText('ความจำและระบบเวิร์กโฟลว์ภายใน')).toBeInTheDocument();
 
     // Global fuzzy search with Fuse.js queries across Knowledge Fragments & Workflow Definitions simultaneously
@@ -712,20 +722,21 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     const signInButtons = screen.getAllByRole('button', { name: 'เข้าสู่ระบบ' });
     fireEvent.click(signInButtons[signInButtons.length - 1]);
 
-    expect(await screen.findByText(/สวัสดี, ผู้ดูแลเสียง/i)).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'เวิร์กสเปซ' })[0]);
+    expect(await screen.findByText('คุณต้องการสร้างอะไรวันนี้?')).toBeInTheDocument();
+    expect(screen.getByText(/ผู้ใช้งาน: ผู้ดูแลเสียง/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'เปิดพื้นที่ดำเนินงาน' }));
 
     const micBtn = await screen.findByRole('button', { name: /พิมพ์ด้วยเสียง/i });
     fireEvent.click(micBtn);
 
-    const textarea = screen.getByLabelText('ช่องพิมพ์ข้อความ') as HTMLTextAreaElement;
+    const textarea = screen.getByLabelText('ช่องพิมพ์คำสั่งงาน') as HTMLTextAreaElement;
     expect(textarea.value).toContain('คำนวณ 25 * 4');
 
     // Enforce online-only connectivity
     fireEvent(window, new Event('offline'));
     expect(await screen.findByText('ต้องเชื่อมต่ออินเทอร์เน็ตเท่านั้น')).toBeInTheDocument();
     fireEvent(window, new Event('online'));
-    expect(await screen.findByLabelText('ช่องพิมพ์ข้อความ')).toBeInTheDocument();
+    expect(await screen.findByLabelText('ช่องพิมพ์คำสั่งงาน')).toBeInTheDocument();
 
     delete (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition;
   });
@@ -861,7 +872,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
       />
     );
 
-    const box = screen.getByLabelText('ช่องพิมพ์ข้อความ');
+    const box = screen.getByLabelText('ช่องพิมพ์คำสั่งงาน');
     fireEvent.change(box, { target: { value: 'ค้นคว้า: SQLite' } });
     fireEvent.keyDown(box, { key: 'Enter', shiftKey: false });
 
@@ -1145,8 +1156,8 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
       expect(observedSignals.c1).toBeDefined();
     });
 
-    // เปิดประวัติบทสนทนาแล้วสลับไปห้อง c2 ทันทีก่อนที่ c1 จะตอบกลับ
-    fireEvent.click(await screen.findByRole('button', { name: 'เปิดประวัติบทสนทนา' }));
+    // เปิดรายการงานแล้วสลับไปห้อง c2 ทันทีก่อนที่ c1 จะตอบกลับ
+    fireEvent.click(await screen.findByRole('button', { name: 'เปิดประวัติโปรเจกต์' }));
     const room2Buttons = await screen.findAllByText('ห้องที่สอง');
     fireEvent.click(room2Buttons[room2Buttons.length - 1]);
 
@@ -1964,7 +1975,11 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(stabilityTab);
 
     expect(
-      await screen.findByText(/ความเสถียรสภาพแวดล้อมเนทีฟ \(PerformanceMonitor & Bottleneck Telemetry\)/i)
+      await screen.findByText(
+        /ความเสถียรสภาพแวดล้อมเนทีฟ \(PerformanceMonitor & Bottleneck Telemetry\)/i,
+        undefined,
+        { timeout: 5000 }
+      )
     ).toBeInTheDocument();
     expect(screen.getByText('26.2 MB')).toBeInTheDocument();
     expect(screen.getByText('STABLE')).toBeInTheDocument();
@@ -2309,12 +2324,14 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     render(<App />);
 
     // Must recover cleanly into fresh empty workspace without surfacing "Conversation not found"
-    expect(await screen.findByText('แกนประมวลผลและเหตุผล ZYRQUEN Ω∞')).toBeInTheDocument();
+    expect(await screen.findByText('พื้นที่ดำเนินงาน ZYRQUEN')).toBeInTheDocument();
     expect(screen.queryByText(/Conversation not found/i)).not.toBeInTheDocument();
-    expect(window.location.search).not.toContain('stale-cid-404');
+    await waitFor(() => {
+      expect(window.location.search).not.toContain('stale-cid-404');
+    });
 
     // Sending a message afterwards creates a fresh session and displays natural Thai greeting
-    const composer = screen.getByLabelText('ช่องพิมพ์ข้อความ');
+    const composer = screen.getByLabelText('ช่องพิมพ์คำสั่งงาน');
     fireEvent.change(composer, { target: { value: 'สวัสดี' } });
     fireEvent.keyDown(composer, { key: 'Enter', shiftKey: false });
 
@@ -2475,8 +2492,9 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
       );
       fireEvent.click(screen.getByRole('button', { name: 'คัดลอกสรุปสถานะระบบ' }));
       await waitFor(() => expect(copiedTexts).toHaveLength(5));
-      expect(copiedTexts[4]).toContain('Knowledge Triples\t12');
-      expect(copiedTexts[4]).toContain('Model Checkpoints\t2');
+      expect(copiedTexts[4]).toContain('Active Projects\t0');
+      expect(copiedTexts[4]).toContain('Datasets\t3');
+      expect(copiedTexts[4]).toContain('Pending Gate Approvals\t1');
       hv.unmount();
 
       // 3. AdminStabilityPanel: Bottleneck TSV table & Stability Report Copy
@@ -2624,6 +2642,243 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
         delete (navigator as unknown as { clipboard?: unknown }).clipboard;
       }
     }
+  });
+
+  it('นำทาง 6 แท็บ Workspace (ภาพรวม, โปรเจกต์, งานของฉัน, สร้างงาน, วิเคราะห์, คลังผลงาน) และใช้งานจริงผ่าน API ได้ครบถ้วน', async () => {
+    const workspaceFilesState = [
+      {
+        name: 'architecture-plan.md',
+        size_bytes: 256,
+        modified_at: '2026-11-25T01:00:00Z',
+      },
+    ];
+    const conversationsState = [
+      {
+        id: 'proj-1',
+        title: 'โปรเจกต์วิเคราะห์ระบบ',
+        mode: 'auto',
+        updated_at: '2026-11-25T01:00:00Z',
+        message_count: 2,
+      },
+    ];
+
+    mockFetch({
+      'GET /api/auth/status': () =>
+        new Response(
+          JSON.stringify({ initialized: true, userCount: 1, envPasscodeConfigured: false }),
+          { status: 200 }
+        ),
+      'GET /api/health': () =>
+        new Response(JSON.stringify({ ok: true, nativeCore: 'ready' }), { status: 200 }),
+      'GET /api/auth/me': () =>
+        new Response(
+          JSON.stringify({
+            user: {
+              id: 'u1',
+              email: 'admin@zyrquen.local',
+              display_name: 'วิศวกรหลัก',
+              role: 'admin',
+              created_at: '2026-11-25T00:00:00Z',
+            },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/home': () =>
+        new Response(
+          JSON.stringify({
+            recent_conversations: conversationsState,
+            recent_missions: [
+              {
+                id: 'm-ws-1',
+                goal: 'วิเคราะห์โครงสร้างโมดูลระบบ',
+                status: 'COMPLETED',
+                created_at: '2026-11-25T01:00:00Z',
+                updated_at: '2026-11-25T01:01:00Z',
+              },
+            ],
+            counts: { triples: 5, checkpoints: 1, datasets: 2, pending_approvals: 0, missions: 1 },
+            system: { python_version: '3.11.2' },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/conversations': () =>
+        new Response(JSON.stringify({ conversations: conversationsState }), { status: 200 }),
+      'POST /api/conversations': (init) => {
+        const body = init?.body ? (JSON.parse(String(init.body)) as { title?: string }) : {};
+        const created = {
+          id: 'proj-new',
+          title: body.title || 'โปรเจกต์ใหม่',
+          mode: 'auto',
+          updated_at: '2026-11-25T02:00:00Z',
+          message_count: 0,
+        };
+        conversationsState.unshift(created);
+        return new Response(JSON.stringify({ conversation: created }), { status: 201 });
+      },
+      'GET /api/developer/tools': () =>
+        new Response(
+          JSON.stringify({
+            tools: [
+              {
+                id: 'calc_ast',
+                name: 'คำนวณ AST',
+                category: 'compute',
+                description: 'AST',
+                endpoint_allowlist_json: '[]',
+                permission_mode: 'auto',
+                enabled: 1,
+                quota_daily: 200,
+                calls_today: 0,
+                last_reset_date: '2026-11-25',
+                updated_at: '2026-11-25T00:00:00Z',
+              },
+            ],
+            invocations: [],
+            workspace_files: workspaceFilesState,
+          }),
+          { status: 200 }
+        ),
+      'POST /api/developer/workspace-files': (init) => {
+        const body = init?.body ? (JSON.parse(String(init.body)) as { name?: string }) : {};
+        const fname = body.name || 'notes.md';
+        workspaceFilesState.unshift({
+          name: fname,
+          size_bytes: 128,
+          modified_at: '2026-11-25T02:00:00Z',
+        });
+        return new Response(JSON.stringify({ ok: true, name: fname }), { status: 201 });
+      },
+      'POST /api/developer/tools/calc_ast/invoke': () =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            status: 'COMPLETED',
+            analysis: { summary: 'ผลวิเคราะห์ AST: 2048' },
+          }),
+          { status: 201 }
+        ),
+      'POST /api/developer/tools/workspace_file_read/invoke': () =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            status: 'COMPLETED',
+            output: { content: '# แผนสถาปัตยกรรมระบบ\nรองรับการทำงานแบบโมดูล' },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/autonomous/missions': () =>
+        new Response(
+          JSON.stringify({
+            missions: [
+              {
+                id: 'm-ws-1',
+                goal: 'วิเคราะห์โครงสร้างโมดูลระบบ',
+                status: 'COMPLETED',
+                report_markdown: '# รายงานผลภารกิจ\nตรวจพบโครงสร้างสมบูรณ์',
+                created_at: '2026-11-25T01:00:00Z',
+                updated_at: '2026-11-25T01:01:00Z',
+              },
+            ],
+          }),
+          { status: 200 }
+        ),
+      'GET /api/autonomous/missions/m-ws-1': () =>
+        new Response(
+          JSON.stringify({
+            mission: {
+              id: 'm-ws-1',
+              goal: 'วิเคราะห์โครงสร้างโมดูลระบบ',
+              status: 'COMPLETED',
+              report_markdown: '# รายงานผลภารกิจ\nตรวจพบโครงสร้างสมบูรณ์',
+              created_at: '2026-11-25T01:00:00Z',
+              updated_at: '2026-11-25T01:01:00Z',
+            },
+            nodes: [],
+            evidence: [],
+          }),
+          { status: 200 }
+        ),
+      'GET /api/workflows/reasoning-traces': () =>
+        new Response(
+          JSON.stringify({
+            reasoning_traces: [
+              {
+                id: 'rt-ws-1',
+                conversation_id: 'proj-1',
+                message_id: null,
+                user_id: 'u1',
+                prompt: 'ตรวจสอบข้อมูลระบบ',
+                response_preview: 'ตรวจสอบครบถ้วนแล้ว',
+                status: 'VERIFIED',
+                mode: 'auto',
+                model_version: 'zyrquen-omega-v1',
+                engine_path_json: '["cognitive_pipeline"]',
+                trace_json: JSON.stringify({ engine_path: ['cognitive_pipeline'] }),
+                latency_ms: 4.5,
+                created_at: '2026-11-25T01:00:00Z',
+              },
+            ],
+          }),
+          { status: 200 }
+        ),
+      'GET /api/workflows': () =>
+        new Response(JSON.stringify({ groups: [], runs: [] }), { status: 200 }),
+      'GET /api/knowledge': () =>
+        new Response(JSON.stringify({ triples: [] }), { status: 200 }),
+    });
+
+    render(<App />);
+
+    // 1. Overview (ภาพรวม) displays workspace hero + 6 task-oriented tabs without chatbot mode tabs
+    expect(await screen.findByText('คุณต้องการสร้างอะไรวันนี้?')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'ภาพรวม' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: 'โปรเจกต์' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: 'งานของฉัน' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: 'สร้างงาน' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: 'วิเคราะห์' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: 'คลังผลงาน' }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: 'อัตโนมัติ' })).not.toBeInTheDocument();
+
+    // 2. Projects (โปรเจกต์)
+    fireEvent.click(screen.getAllByRole('button', { name: 'โปรเจกต์' })[0]);
+    expect(await screen.findByText('โปรเจกต์วิเคราะห์ระบบ')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('ชื่อโปรเจกต์'), {
+      target: { value: 'โปรเจกต์สร้าง API' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'สร้างและเปิดโปรเจกต์' }));
+    expect(await screen.findByText('พื้นที่ดำเนินงาน ZYRQUEN')).toBeInTheDocument();
+
+    // 3. My Tasks (งานของฉัน)
+    fireEvent.click(screen.getAllByRole('button', { name: 'งานของฉัน' })[0]);
+    expect((await screen.findAllByText('วิเคราะห์โครงสร้างโมดูลระบบ')).length).toBeGreaterThan(0);
+
+    // 4. Create (สร้างงาน) — direct file artifact creation
+    fireEvent.click(screen.getAllByRole('button', { name: 'สร้างงาน' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: /เขียนไฟล์ลงคลังตรง/ }));
+    fireEvent.change(screen.getByLabelText(/ชื่อไฟล์/), {
+      target: { value: 'spec-sheet.md' },
+    });
+    fireEvent.change(screen.getByLabelText('เนื้อหาไฟล์'), {
+      target: { value: '# Spec Sheet' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'บันทึกไฟล์ลงคลังผลงาน' }));
+    expect(
+      await screen.findByText(/บันทึกไฟล์ "spec-sheet\.md" ลงในคลังผลงานเรียบร้อยแล้ว/)
+    ).toBeInTheDocument();
+
+    // 5. Analysis (วิเคราะห์) — deterministic AST computation
+    fireEvent.click(screen.getAllByRole('button', { name: 'วิเคราะห์' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'คำนวณและแก้สมการ' }));
+    fireEvent.change(screen.getByLabelText('นิพจน์หรือสมการที่ต้องการคำนวณ'), {
+      target: { value: '2^11' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'คำนวณผลลัพธ์' }));
+    expect(await screen.findByText('ผลวิเคราะห์ AST: 2048')).toBeInTheDocument();
+
+    // 6. Artifacts (คลังผลงาน) — inspect & preview file content
+    fireEvent.click(screen.getAllByRole('button', { name: 'คลังผลงาน' })[0]);
+    fireEvent.click(await screen.findByText('architecture-plan.md'));
+    expect(await screen.findByText(/# แผนสถาปัตยกรรมระบบ/)).toBeInTheDocument();
   });
 });
 

@@ -1,4 +1,13 @@
-export type AppScreen = 'home' | 'workspace' | 'memory' | 'settings';
+export type AppScreen =
+  | 'overview'
+  | 'projects'
+  | 'tasks'
+  | 'create'
+  | 'analysis'
+  | 'artifacts'
+  | 'workspace'
+  | 'memory'
+  | 'settings';
 export type SettingsTab = 'account' | 'developer' | 'admin';
 export type ReasoningMode = 'auto' | 'math' | 'knowledge' | 'model' | 'plan';
 export type ModelVariantId =
