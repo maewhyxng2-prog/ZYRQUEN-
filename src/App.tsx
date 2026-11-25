@@ -39,7 +39,7 @@ function readRouteFromUrl(): {
   const tab = params.get('tab');
 
   const screen: AppScreen =
-    view === 'workspace' || view === 'memory' || view === 'settings' || view === 'projects' || view === 'analysis' || view === 'artifacts' ? view : 'home';
+    view === 'workspace' || view === 'memory' || view === 'settings' || view === 'projects' || view === 'create' || view === 'analysis' || view === 'artifacts' ? view : 'home';
   const settingsTab: SettingsTab =
     tab === 'developer' || tab === 'admin' || tab === 'knowledge' ? tab : 'account';
 
@@ -894,7 +894,9 @@ export default function App() {
       ? 'ภาพรวม'
       : screen === 'projects'
         ? 'โปรเจกต์'
-        : screen === 'workspace'
+        : screen === 'create'
+          ? 'สร้างงาน'
+          : screen === 'workspace'
           ? activeTitle
           : screen === 'memory'
             ? 'งานของฉัน'
@@ -1020,7 +1022,9 @@ export default function App() {
 
           {screen === 'projects' && <ProjectsView token={token} />}
 
-          {screen === 'memory' && <TasksView token={token} />}
+          {screen === 'create' && <TasksView token={token} mode="create" />}
+
+          {screen === 'memory' && <TasksView token={token} mode="list" />}
 
           {screen === 'artifacts' && <ArtifactsView token={token} />}
 
