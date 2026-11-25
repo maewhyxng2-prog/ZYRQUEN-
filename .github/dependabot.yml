@@ -1,31 +1,68 @@
 version: 2
+
 updates:
+  # Python API dependencies. Keep runtime and test dependencies visible to Dependabot.
   - package-ecosystem: "pip"
     directory: "/apps/api"
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
     labels:
       - "dependencies"
+      - "python"
       - "automated"
+    commit-message:
+      prefix: "deps(python)"
+    groups:
+      python-non-major:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
+  # Root package.json + bun.lock (the active frontend / Node.js workspace).
   - package-ecosystem: "npm"
-    directory: "/apps/web"
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
     labels:
       - "dependencies"
+      - "javascript"
       - "automated"
+    commit-message:
+      prefix: "deps(node)"
+    groups:
+      node-non-major:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
+  # Keep GitHub Actions pinned/up-to-date independently from application packages.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
     labels:
       - "dependencies"
+      - "github-actions"
       - "automated"
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions-non-major:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
