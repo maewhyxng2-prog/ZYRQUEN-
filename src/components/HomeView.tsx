@@ -26,28 +26,7 @@ interface HomeViewProps {
   onRetry: () => void;
 }
 
-const STARTER_PROMPTS: Array<{ label: string; prompt: string; mode: ReasoningMode }> = [
-  {
-    label: 'คำนวณ AST เชิงสัญลักษณ์',
-    prompt: 'คำนวณ (2^12 - 96) / 16',
-    mode: 'math',
-  },
-  {
-    label: 'ปฏิบัติการ 7 ขั้นตอน (Mission)',
-    prompt: 'ภารกิจ: ค้นคว้าและพัฒนาองค์ความรู้เกี่ยวกับ SQLite',
-    mode: 'auto',
-  },
-  {
-    label: 'วางแผน DAG จากสถานะจริง',
-    prompt: 'วางแผน: ตรวจสอบความจำ ฝึกโมเดล และประเมินผล',
-    mode: 'plan',
-  },
-  {
-    label: 'ทดสอบขอบเขตความซื่อสัตย์',
-    prompt: 'อธิบายทฤษฎีที่ยังไม่ได้สอนในแกนความจำ',
-    mode: 'auto',
-  },
-];
+
 
 
 
