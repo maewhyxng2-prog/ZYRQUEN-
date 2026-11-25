@@ -908,6 +908,8 @@ export default function App() {
                   ? 'เครื่องมือนักพัฒนา'
                   : settingsTab === 'admin'
                     ? 'ผู้ดูแลระบบ'
+                  : settingsTab === 'knowledge'
+                    ? 'ความรู้และโฟลว์'
                     : 'ตั้งค่าบัญชี';
 
   return (
