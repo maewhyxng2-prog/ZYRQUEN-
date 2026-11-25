@@ -45,14 +45,14 @@ interface SettingsViewProps {
   activeTab: SettingsTab;
   autoExpandTrace: boolean;
   defaultMode: ReasoningMode;
-  selectedModelVariant: ModelVariantId;
+  selectedModelVariant?: ModelVariantId;
   perfSamples?: MemorySnapshot[];
   clientLatencies?: ClientLatencySample[];
   cleanupVerification?: ThreadCleanupVerification | null;
   onCapturePerfSample?: () => void;
   onChangeTab: (tab: SettingsTab) => void;
   onUpdatePreferences: (prefs: { autoExpandTrace?: boolean; defaultMode?: ReasoningMode }) => void;
-  onChangeModelVariant: (variant: ModelVariantId) => void;
+  onChangeModelVariant?: (variant: ModelVariantId) => void;
   onLogout: () => void;
 }
 
@@ -62,14 +62,14 @@ export function SettingsView({
   activeTab,
   autoExpandTrace,
   defaultMode,
-  selectedModelVariant,
+  selectedModelVariant = 'zyrquen-omega-v1',
   perfSamples = [],
   clientLatencies = [],
   cleanupVerification = null,
   onCapturePerfSample,
   onChangeTab,
   onUpdatePreferences,
-  onChangeModelVariant,
+  onChangeModelVariant = () => {},
   onLogout,
 }: SettingsViewProps) {
   const { theme, setTheme } = useZyrquenTheme();
