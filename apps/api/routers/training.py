@@ -93,10 +93,9 @@ def require_training_admin(
 
 
 def _verify_training_approval_readonly(
-    engine, approval_id: str, *, expected_scope: str | None = None,
-    expected_step_key: str | None = None,
+    engine, approval_id: str, *, expected_dataset_version: str | None = None
 ) -> dict:
-    """Verify Tier-2 approval status, action/scope binding, expiry, and HMAC without consuming."""
+    """Verify approval HMAC and bind it to the exact workflow step and dataset."""
     approval = engine.governance.store.get_approval(approval_id)
     if approval is None:
         raise ApprovalViolationError(f"Approval request not found: {approval_id}")
@@ -105,16 +104,32 @@ def _verify_training_approval_readonly(
             f"Approval {approval_id} action_type={approval.get('action_type')!r} "
             "does not match required 'training.execute'."
         )
-    if expected_scope is not None and approval.get("scope") != expected_scope:
+
+    workflow_run = engine.store.get_run(str(approval.get("run_id") or ""))
+    if workflow_run is None:
+        raise ApprovalViolationError(
+            f"Approval {approval_id} references a missing workflow run."
+        )
+    step_key = str(approval.get("step_key") or "")
+    workflow_steps = workflow_run.get("steps") or []
+    if not step_key or not any(step.get("step_key") == step_key for step in workflow_steps):
+        raise ApprovalViolationError(
+            f"Approval {approval_id} does not reference a step in its workflow run."
+        )
+    expected_scope = f"{workflow_run.get('workflow_key')}:{step_key}"
+    if approval.get("scope") != expected_scope:
         raise ApprovalViolationError(
             f"Approval {approval_id} scope={approval.get('scope')!r} "
-            f"does not match required scope={expected_scope!r}."
+            f"does not match workflow scope={expected_scope!r}."
         )
-    if expected_step_key is not None and approval.get("step_key") != expected_step_key:
-        raise ApprovalViolationError(
-            f"Approval {approval_id} step_key={approval.get('step_key')!r} "
-            f"does not match required step_key={expected_step_key!r}."
-        )
+    if expected_dataset_version is not None:
+        trigger_payload = workflow_run.get("trigger_payload") or {}
+        approved_dataset_version = str(trigger_payload.get("dataset_version") or "").strip()
+        if approved_dataset_version != expected_dataset_version:
+            raise ApprovalViolationError(
+                f"Approval {approval_id} is not bound to dataset version "
+                f"{expected_dataset_version!r}."
+            )
     if approval.get("status") != "approved":
         raise ApprovalViolationError(
             f"Approval {approval_id} is not in 'approved' state (status={approval.get('status')!r})."
@@ -167,8 +182,7 @@ def start_training(
         _verify_training_approval_readonly(
             engine,
             approval_id,
-            expected_scope=f"dataset:{request.dataset_version}",
-            expected_step_key="execute_training",
+            expected_dataset_version=request.dataset_version,
         )
     except ApprovalViolationError as exc:
         raise HTTPException(
@@ -189,6 +203,9 @@ def start_training(
             training_values=training_cfg,
             model_values=model_cfg,
         )
+        approval = _verify_training_approval_readonly(
+            engine, approval_id, expected_dataset_version=request.dataset_version
+        )
         return jobs.submit_prepared(
             db,
             owner_id=current_user.id,
@@ -199,8 +216,9 @@ def start_training(
             before_enqueue=lambda: engine.governance.verify_and_consume_by_id(
                 approval_id,
                 expected_action_type="training.execute",
-                expected_scope=f"dataset:{request.dataset_version}",
-                expected_step_key="execute_training",
+                expected_run_id=str(approval["run_id"]),
+                expected_step_key=str(approval["step_key"]),
+                expected_scope=str(approval["scope"]),
             ),
         )
     except ApprovalViolationError as exc:
@@ -300,8 +318,7 @@ def get_training_readiness(
                 _verify_training_approval_readonly(
                     engine,
                     str(item["id"]),
-                    expected_scope=expected_dataset_scope,
-                    expected_step_key="execute_training",
+                    expected_dataset_version=active_dataset_version,
                 )
             except (ApprovalViolationError, OSError, ValueError, KeyError, TypeError):
                 continue
