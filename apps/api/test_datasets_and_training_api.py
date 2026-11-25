@@ -458,8 +458,19 @@ def test_training_readiness_counts_only_valid_signed_approvals(api_client, monke
         def get_approval(self, approval_id):
             return approval if approval_id == approval["id"] else None
 
+        def get_run(self, run_id):
+            if run_id != "run-1":
+                return None
+            return {
+                "workflow_key": "training.native_controlled_run",
+                "trigger_payload": {"dataset_version": "0.1.0"},
+                "steps": [{"step_key": "execute_training"}],
+            }
+
+    fake_store = FakeStore()
+
     class FakeGovernance:
-        store = FakeStore()
+        store = fake_store
 
         @staticmethod
         def _compute_signature(**kwargs):
@@ -467,6 +478,7 @@ def test_training_readiness_counts_only_valid_signed_approvals(api_client, monke
 
     class FakeEngine:
         governance = FakeGovernance()
+        store = fake_store
 
     monkeypatch.setattr(
         training_router, "get_workflow_engine", lambda: FakeEngine()
