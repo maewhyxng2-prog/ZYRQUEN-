@@ -1005,10 +1005,10 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
     res.status(201).json(result);
   });
 
-  app.get('/api/autonomous/missions', requireAuth, async (_req: AuthedRequest, res: Response) => {
+  app.get('/api/autonomous/missions', requireAuth, async (req: AuthedRequest, res: Response) => {
     const data = await runPythonScript('db_bridge.py', {
       action: 'missions_list',
-      payload: {},
+      payload: { user_id: req.user!.id, is_admin: req.user!.role === 'admin' },
     });
     res.json(data);
   });
