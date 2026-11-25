@@ -2,5 +2,5 @@
   "name": "ZYRQUEN Ω∞",
   "description": "Independent Native General Intelligence (NGI) workspace with native reasoning, knowledge memory, and auditable workflow engine.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }
