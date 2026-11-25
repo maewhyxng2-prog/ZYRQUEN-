@@ -1,11 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  AlertCircle,
+  ArrowDown,
   Calculator,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
   Cpu,
   Download,
+  FileCode2,
   FileText,
+  FolderKanban,
   FolderSearch,
   Globe,
   History,
@@ -15,12 +21,11 @@ import {
   Paperclip,
   Plus,
   Send,
-  Settings,
+  ShieldAlert,
   Trash2,
   X,
 } from 'lucide-react';
-import { apiRequest } from '../lib/api';
-import { redactSensitiveData } from '../lib/clipboard';
+import { ApiError, apiRequest } from '../lib/api';
 import { detectPendingToolActivity, type ToolId } from '../lib/tools';
 import type {
   ConversationSmartSummary,
@@ -37,6 +42,7 @@ import { TemporalIntelligenceCore } from './TemporalIntelligenceCore';
 
 interface WorkspaceViewProps {
   token: string;
+  userRole?: 'admin' | 'user';
   conversations: ConversationSummary[];
   activeConversationId: string | null;
   activeTitle: string;
@@ -45,7 +51,7 @@ interface WorkspaceViewProps {
   sending: boolean;
   streamingContent?: string | null;
   error: string | null;
-  autoExpandTrace: boolean;
+  autoExpandTrace?: boolean;
   defaultMode: ReasoningMode;
   defaultModelVariant?: ModelVariantId;
   onSelectConversation: (id: string) => void;
@@ -58,6 +64,7 @@ interface WorkspaceViewProps {
     modelVariant?: ModelVariantId
   ) => Promise<void>;
   onOpenSettings?: () => void;
+  onRefreshConversation?: () => Promise<void> | void;
   onRetryLast?: () => void;
 }
 
@@ -102,8 +109,63 @@ function parseTrace(traceJson: string | null): NativeTrace | null {
   }
 }
 
+function splitUserAttachmentNotice(rawContent: string): {
+  body: string;
+  attachmentChars: number | null;
+} {
+  const match = rawContent.match(/\n\n\[Attachment:\s*(\d+)\s*chars\]\s*$/);
+  if (!match) {
+    return { body: rawContent, attachmentChars: null };
+  }
+  const body = rawContent.slice(0, match.index).trim();
+  const chars = Number(match[1]);
+  return {
+    body: body === 'Attached snippet' ? 'ส่งไฟล์แนบเพื่อวิเคราะห์' : body,
+    attachmentChars: Number.isFinite(chars) ? chars : null,
+  };
+}
+
+function downloadArtifactFile(filename: string, content: string, mime = 'text/plain;charset=utf-8') {
+  if (!content || typeof document === 'undefined' || typeof URL === 'undefined') return;
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function getStatusMeta(status: string): {
+  label: string;
+  tone: 'verified' | 'approval' | 'blocked' | 'boundary' | 'neutral';
+} | null {
+  switch (status) {
+    case 'VERIFIED':
+    case 'COMPLETED':
+      return { label: 'ดำเนินการและตรวจสอบแล้ว', tone: 'verified' };
+    case 'PENDING_APPROVAL':
+    case 'AWAITING_APPROVAL':
+      return { label: 'รอการอนุมัติ', tone: 'approval' };
+    case 'BLOCKED':
+    case 'FAILED':
+    case 'REJECTED':
+      return { label: 'ไม่สามารถดำเนินการต่อได้', tone: 'blocked' };
+    case 'NOT_LEARNED':
+    case 'UNABLE_TO_INFER':
+      return { label: 'ต้องการข้อมูลเพิ่มเติม', tone: 'boundary' };
+    case 'UNDERSTOOD':
+      return null;
+    default:
+      return null;
+  }
+}
+
 export function WorkspaceView({
   token,
+  userRole = 'user',
   conversations,
   activeConversationId,
   activeTitle,
@@ -112,14 +174,13 @@ export function WorkspaceView({
   sending,
   streamingContent,
   error,
-  autoExpandTrace,
   defaultMode,
   defaultModelVariant = 'zyrquen-omega-v1',
   onSelectConversation,
   onNewConversation,
   onDeleteConversation,
   onSendMessage,
-  onOpenSettings,
+  onRefreshConversation,
   onRetryLast,
 }: WorkspaceViewProps) {
   const [input, setInput] = useState('');
@@ -131,11 +192,15 @@ export function WorkspaceView({
   const [listening, setListening] = useState(false);
   const [speechLang, setSpeechLang] = useState<'th-TH' | 'en-US'>('th-TH');
   const [speechError, setSpeechError] = useState<string | null>(null);
-  const [expandedTraces, setExpandedTraces] = useState<Record<string, boolean>>({});
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [approvalBusyId, setApprovalBusyId] = useState<string | null>(null);
+  const [approvalFeedback, setApprovalFeedback] = useState<Record<string, string>>({});
   const [activeToolStatus, setActiveToolStatus] = useState<{
     toolId: ToolId | 'native_core';
     label: string;
   } | null>(null);
+
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -152,7 +217,7 @@ export function WorkspaceView({
 
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, sending]);
+  }, [messages.length, sending, streamingContent]);
 
   useEffect(() => {
     if (!summaryOpen || !activeConversationId || messages.length === 0) {
@@ -179,25 +244,20 @@ export function WorkspaceView({
     };
   }, [activeConversationId, messages.length, summaryOpen, token]);
 
-  function toggleTrace(msgId: string) {
-    setExpandedTraces((prev) => ({
-      ...prev,
-      [msgId]: !(prev[msgId] ?? autoExpandTrace),
-    }));
+  function handleStreamScroll() {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollBottom(distanceFromBottom > 160);
   }
 
   function handleExportMessage(msg: MessageItem) {
     const plainText = toPlainAssistantCopyText(msg.content);
-    if (!plainText || typeof document === 'undefined' || typeof URL === 'undefined') return;
-    const blob = new Blob([plainText], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `zyrquen-output-${msg.id.slice(0, 8)}.md`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    downloadArtifactFile(
+      `zyrquen-output-${msg.id.slice(0, 8)}.md`,
+      plainText,
+      'text/markdown;charset=utf-8'
+    );
   }
 
   async function handleSubmit(e?: React.FormEvent) {
@@ -223,6 +283,71 @@ export function WorkspaceView({
     }
   }
 
+  async function handleStarterPrompt(text: string, mode: ReasoningMode) {
+    if (sending) return;
+    setActiveToolStatus(detectPendingToolActivity(text, mode));
+    try {
+      await onSendMessage(text, mode, undefined, defaultModelVariant);
+    } finally {
+      setActiveToolStatus(null);
+    }
+  }
+
+  async function handleApprovalDecision(
+    msgId: string,
+    decision: 'approve' | 'reject',
+    trace: NativeTrace | null
+  ) {
+    const invocationId = trace?.external_tool?.invocation_id;
+    const missionId = trace?.autonomous_mission?.mission_id;
+    if (!invocationId && !missionId) return;
+
+    setApprovalBusyId(msgId);
+    try {
+      if (invocationId) {
+        const res = await apiRequest<{ ok: boolean; status?: string }>(
+          `/api/admin/tool-invocations/${invocationId}/decide`,
+          {
+            method: 'POST',
+            token,
+            body: { decision },
+          }
+        );
+        setApprovalFeedback((prev) => ({
+          ...prev,
+          [msgId]:
+            decision === 'approve'
+              ? `อนุมัติแล้ว (${res.status || 'COMPLETED'})`
+              : 'ปฏิเสธคำขอเรียบร้อยแล้ว',
+        }));
+      } else if (missionId) {
+        if (decision === 'approve') {
+          await apiRequest(`/api/autonomous/missions/${missionId}/resume`, {
+            method: 'POST',
+            token,
+          });
+          setApprovalFeedback((prev) => ({ ...prev, [msgId]: 'อนุมัติและดำเนินการต่อแล้ว' }));
+        } else {
+          await apiRequest(`/api/autonomous/missions/${missionId}/cancel`, {
+            method: 'POST',
+            token,
+          });
+          setApprovalFeedback((prev) => ({ ...prev, [msgId]: 'ยกเลิกคำขอเรียบร้อยแล้ว' }));
+        }
+      }
+      if (onRefreshConversation) {
+        await onRefreshConversation();
+      }
+    } catch (err) {
+      setApprovalFeedback((prev) => ({
+        ...prev,
+        [msgId]: err instanceof ApiError ? err.message : 'ไม่สามารถบันทึกผลการอนุมัติได้',
+      }));
+    } finally {
+      setApprovalBusyId(null);
+    }
+  }
+
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -237,7 +362,7 @@ export function WorkspaceView({
 
   function handleTextareaResize(el: HTMLTextAreaElement) {
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 176)}px`;
   }
 
   function startSpeechRecognition(targetLang: 'th-TH' | 'en-US') {
@@ -325,28 +450,33 @@ export function WorkspaceView({
 
   return (
     <div className="relative flex h-[calc(100dvh-52px)] min-h-0 flex-1 flex-col overflow-hidden bg-[var(--color-bg)] text-[var(--color-text)] md:h-[calc(100dvh-60px)]">
-      {/* Compact Workspace Toolbar */}
-      <div className="flex min-h-[48px] shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 sm:px-6">
-        <div className="flex min-w-0 items-center gap-2">
+      {/* Minimal Workspace Toolbar */}
+      <header className="flex min-h-[48px] shrink-0 items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 sm:px-6">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <button
             type="button"
             onClick={() => setHistoryOpen(true)}
             aria-label="เปิดประวัติโปรเจกต์"
-            className="flex min-h-[40px] items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
+            className="flex min-h-[40px] shrink-0 items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
           >
-            <History className="h-4 w-4 text-[var(--color-accent)]" />
+            <History className="h-4 w-4 text-[var(--color-accent)]" aria-hidden="true" />
             <span>รายการงาน</span>
-            <span className="text-[var(--color-text-muted)] tabular-nums">({conversations.length})</span>
+            <span className="text-[var(--color-text-muted)] tabular-nums">
+              ({conversations.length})
+            </span>
           </button>
-          <span className="hidden text-[var(--color-border)] sm:inline" aria-hidden="true">
+          <span className="text-[var(--color-border)]" aria-hidden="true">
             /
           </span>
-          <p className="hidden max-w-[280px] truncate text-xs font-medium text-[var(--color-text-secondary)] sm:block">
+          <p
+            title={activeTitle}
+            className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--color-text-secondary)] sm:max-w-[320px]"
+          >
             {activeTitle}
           </p>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           {activeConversationId && messages.length > 0 && (
             <button
               type="button"
@@ -354,12 +484,12 @@ export function WorkspaceView({
               aria-expanded={summaryOpen}
               className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
             >
-              <ListChecks className="h-4 w-4 text-[var(--color-accent)]" />
+              <ListChecks className="h-4 w-4 text-[var(--color-accent)]" aria-hidden="true" />
               <span className="hidden sm:inline">สรุปผลลัพธ์</span>
               {summaryOpen ? (
-                <ChevronUp className="h-3.5 w-3.5" />
+                <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
               ) : (
-                <ChevronDown className="h-3.5 w-3.5" />
+                <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
               )}
             </button>
           )}
@@ -368,11 +498,11 @@ export function WorkspaceView({
             onClick={onNewConversation}
             className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
           >
-            <Plus className="h-4 w-4" />
+            <Plus className="h-4 w-4" aria-hidden="true" />
             <span>เริ่มงานใหม่</span>
           </button>
         </div>
-      </div>
+      </header>
 
       {/* Collapsible Smart Summary Panel */}
       {summaryOpen && activeConversationId && messages.length > 0 && (
@@ -383,7 +513,7 @@ export function WorkspaceView({
           <div className="mx-auto max-w-3xl">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs font-semibold text-[var(--color-accent)]">
-                Smart Summary · ประเด็นและผลลัพธ์ยืนยันแล้ว
+                Smart Summary — สรุปผลลัพธ์ยืนยันแล้ว
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 {smartSummary && (
@@ -396,7 +526,7 @@ export function WorkspaceView({
                   <CopyButton
                     getText={() =>
                       [
-                        `Smart Summary (${smartSummary.metrics.verified_count} ยืนยัน / ${smartSummary.metrics.not_learned_count} รอข้อมูลเพิ่ม)`,
+                        `สรุปผลลัพธ์ (${smartSummary.metrics.verified_count} ยืนยัน / ${smartSummary.metrics.not_learned_count} รอข้อมูลเพิ่ม)`,
                         ...smartSummary.bullets.map((b) => `- ${toPlainAssistantCopyText(b)}`),
                       ].join('\n')
                     }
@@ -408,12 +538,14 @@ export function WorkspaceView({
               </div>
             </div>
             {summaryLoading ? (
-              <p className="mt-2 text-xs text-[var(--color-text-secondary)]">กำลังสรุปผลลัพธ์ภายใน...</p>
+              <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
+                กำลังรวบรวมสรุปผลลัพธ์...
+              </p>
             ) : smartSummary && smartSummary.bullets.length > 0 ? (
               <ul className="mt-2 space-y-1 text-xs text-[var(--color-text)]">
                 {smartSummary.bullets.map((bullet) => (
                   <li key={bullet} className="flex items-start gap-2">
-                    <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
+                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
                     <div className="min-w-0 flex-1">
                       <SafeMessageText content={bullet} />
                     </div>
@@ -429,32 +561,37 @@ export function WorkspaceView({
         </section>
       )}
 
-      {/* Scrollable Task Execution Log */}
-      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+      {/* Main Scrollable Conversation & Deliverables Area */}
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleStreamScroll}
+        className="relative flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-6"
+      >
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
           {loadingThread ? (
-            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-6 text-sm text-[var(--color-text-secondary)]">
-              กำลังโหลดข้อมูลงาน...
+            <div
+              role="status"
+              aria-live="polite"
+              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 text-sm text-[var(--color-text-secondary)]"
+            >
+              กำลังโหลดประวัติการทำงาน...
             </div>
           ) : messages.length === 0 ? (
-            <div className="zyrq-glow relative my-4 overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 sm:my-6 sm:p-8">
+            <div className="zyrq-glow relative my-2 overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 sm:my-6 sm:p-8">
               <SpacetimeFabric density="minimal" className="pointer-events-none absolute inset-0" />
               <div className="relative z-10 flex flex-col items-start gap-5">
                 <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
                   <TemporalIntelligenceCore
                     variant="compact"
-                    size={90}
+                    size={84}
                     active={sending || streamingContent !== null}
                   />
                   <div>
-                    <h2 className="text-lg font-bold text-[var(--color-text)]">
+                    <h2 className="text-lg font-bold tracking-tight text-[var(--color-text)] sm:text-xl">
                       พื้นที่ดำเนินงาน ZYRQUEN
                     </h2>
-                    <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-                      อธิบายเป้าหมาย แนบไฟล์ข้อมูล หรือซอร์สโค้ด เพื่อให้ระบบวิเคราะห์ วางแผน และสร้างผลงานจริง
-                    </p>
-                    <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-                      Web Workspace Client เชื่อมต่อ Python Core (แยกจากแอป Native Android/Desktop)
+                    <p className="mt-1.5 text-sm leading-relaxed text-[var(--color-text-secondary)]">
+                      พิมพ์คำสั่ง แนบไฟล์ หรือเลือกโปรเจกต์ด้านล่าง เพื่อวิเคราะห์ วางแผน และสร้างผลงานจริง
                     </p>
                   </div>
                 </div>
@@ -485,18 +622,12 @@ export function WorkspaceView({
                     <button
                       key={q.label}
                       type="button"
-                      onClick={async () => {
-                        setActiveToolStatus(detectPendingToolActivity(q.text, q.m));
-                        try {
-                          await onSendMessage(q.text, q.m, undefined, defaultModelVariant);
-                        } finally {
-                          setActiveToolStatus(null);
-                        }
-                      }}
-                      className="min-h-[56px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]/90 px-4 py-3 text-left transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
+                      disabled={sending}
+                      onClick={() => void handleStarterPrompt(q.text, q.m)}
+                      className="min-h-[60px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]/90 px-4 py-3 text-left transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
                     >
                       <p className="text-xs font-semibold text-[var(--color-accent)]">{q.label}</p>
-                      <p className="mt-0.5 line-clamp-1 text-xs text-[var(--color-text)]">{q.text}</p>
+                      <p className="mt-1 line-clamp-2 text-xs text-[var(--color-text)]">{q.text}</p>
                     </button>
                   ))}
                 </div>
@@ -506,38 +637,172 @@ export function WorkspaceView({
             messages.map((msg) => {
               const isUser = msg.role === 'user';
               const trace = !isUser ? parseTrace(msg.trace_json) : null;
-              const isTraceOpen = expandedTraces[msg.id] ?? autoExpandTrace;
+              const statusMeta = !isUser ? getStatusMeta(msg.status) : null;
+              const userParsed = isUser ? splitUserAttachmentNotice(msg.content) : null;
+              const deliverable = trace?.deliverable;
+              const needsApproval =
+                !isUser &&
+                (msg.status === 'PENDING_APPROVAL' || msg.status === 'AWAITING_APPROVAL');
+              const canAdminApprove =
+                needsApproval &&
+                userRole === 'admin' &&
+                Boolean(
+                  trace?.external_tool?.invocation_id || trace?.autonomous_mission?.mission_id
+                );
+              const decidedText = approvalFeedback[msg.id];
 
               return (
-                <div
+                <article
                   key={msg.id}
                   className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
                 >
                   <div
-                    className={`select-text max-w-[94%] sm:max-w-[85%] rounded-2xl px-4 py-3.5 ${
+                    className={`select-text rounded-2xl px-4 py-3.5 ${
                       isUser
-                        ? 'bg-[var(--color-primary)] text-white'
-                        : 'border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text)]'
+                        ? 'max-w-[90%] bg-[var(--color-primary)] text-white sm:max-w-[78%]'
+                        : 'w-full max-w-[98%] border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text)] sm:max-w-[90%]'
                     }`}
                   >
                     {!isUser && (
-                      <div className="mb-1.5 flex items-center justify-between gap-2">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)]/70 pb-2">
                         <span className="text-xs font-semibold tracking-wide text-[var(--color-accent)]">
                           ZYRQUEN
                         </span>
+                        {statusMeta && (
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-medium ${
+                              statusMeta.tone === 'verified'
+                                ? 'text-[var(--color-success)]'
+                                : statusMeta.tone === 'approval'
+                                  ? 'text-[var(--color-warning)]'
+                                  : statusMeta.tone === 'blocked'
+                                    ? 'text-[var(--color-danger)]'
+                                    : 'text-[var(--color-text-secondary)]'
+                            }`}
+                          >
+                            {statusMeta.tone === 'verified' ? (
+                              <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                            ) : statusMeta.tone === 'approval' ? (
+                              <Clock className="h-3.5 w-3.5" aria-hidden="true" />
+                            ) : statusMeta.tone === 'blocked' ? (
+                              <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                            ) : (
+                              <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                            )}
+                            <span>{statusMeta.label}</span>
+                          </span>
+                        )}
                       </div>
                     )}
-                    {isUser ? (
-                      <p className="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
-                        {msg.content}
-                      </p>
+
+                    {isUser && userParsed ? (
+                      <div className="space-y-2">
+                        <p className="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
+                          {userParsed.body}
+                        </p>
+                        {userParsed.attachmentChars !== null && (
+                          <div className="inline-flex items-center gap-1.5 rounded-lg bg-white/15 px-2.5 py-1 text-[11px] text-white/95">
+                            <Paperclip className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            <span>ไฟล์แนบ ({userParsed.attachmentChars.toLocaleString()} ตัวอักษร)</span>
+                          </div>
+                        )}
+                      </div>
                     ) : (
                       <SafeMessageText content={msg.content} />
+                    )}
+
+                    {/* Artifact / Deliverable Card when produced */}
+                    {deliverable && deliverable.title && (
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5">
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <FileCode2
+                            className="h-4 w-4 shrink-0 text-[var(--color-accent)]"
+                            aria-hidden="true"
+                          />
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-semibold text-[var(--color-text)]">
+                              {deliverable.title}
+                            </p>
+                            <p className="truncate font-mono text-[11px] text-[var(--color-text-muted)]">
+                              {deliverable.filename || deliverable.kind}
+                              {deliverable.sha256 ? ` · ${deliverable.sha256.slice(0, 10)}` : ''}
+                            </p>
+                          </div>
+                        </div>
+                        {deliverable.content && (
+                          <div className="flex items-center gap-1.5">
+                            <CopyButton
+                              getText={() => deliverable.content || ''}
+                              label="คัดลอกผลงาน"
+                              ariaLabel="คัดลอกเนื้อหาผลงาน"
+                              size="xs"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                downloadArtifactFile(
+                                  deliverable.filename || `zyrquen-artifact-${msg.id.slice(0, 6)}.md`,
+                                  deliverable.content || '',
+                                  deliverable.language === 'markdown'
+                                    ? 'text/markdown;charset=utf-8'
+                                    : 'text/plain;charset=utf-8'
+                                )
+                              }
+                              aria-label="ดาวน์โหลดผลงาน"
+                              className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                            >
+                              <Download className="h-3 w-3" aria-hidden="true" />
+                              <span>ดาวน์โหลด</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Inline Approval Gate Action when execution awaits confirmation */}
+                    {needsApproval && (
+                      <div
+                        role="region"
+                        aria-label="การอนุมัติคำสั่งงาน"
+                        className="mt-3 rounded-xl border border-[var(--color-warning)]/40 bg-[var(--color-surface)] p-3 text-xs"
+                      >
+                        {decidedText ? (
+                          <p className="font-medium text-[var(--color-accent)]">{decidedText}</p>
+                        ) : canAdminApprove ? (
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-[var(--color-text-secondary)]">
+                              ขั้นตอนนี้อยู่ในคิวรออนุมัติ สามารถยืนยันเพื่อดำเนินการต่อได้ทันที
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={approvalBusyId === msg.id}
+                                onClick={() => void handleApprovalDecision(msg.id, 'approve', trace)}
+                                className="min-h-[34px] rounded-lg bg-[var(--color-primary)] px-3 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-50"
+                              >
+                                อนุมัติและทำต่อ
+                              </button>
+                              <button
+                                type="button"
+                                disabled={approvalBusyId === msg.id}
+                                onClick={() => void handleApprovalDecision(msg.id, 'reject', trace)}
+                                className="min-h-[34px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-text-secondary)] hover:border-[var(--color-danger)] hover:text-[var(--color-danger)] disabled:opacity-50"
+                              >
+                                ปฏิเสธ
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-[var(--color-text-secondary)]">
+                            รออนุมัติจากผู้ดูแลระบบก่อนดำเนินการขั้นถัดไป
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
 
                   {!isUser && (
-                    <div className="mt-1.5 flex w-full max-w-[94%] flex-wrap items-center gap-2 px-1 sm:max-w-[85%]">
+                    <div className="mt-1.5 flex w-full max-w-[98%] flex-wrap items-center gap-2 px-1 sm:max-w-[90%]">
                       <CopyButton
                         getText={() => toPlainAssistantCopyText(msg.content)}
                         ariaLabel="คัดลอกข้อความตอบกลับ"
@@ -555,93 +820,16 @@ export function WorkspaceView({
                         <Download className="h-3.5 w-3.5" aria-hidden="true" />
                         <span className="hidden sm:inline">ส่งออก .md</span>
                       </button>
-
-                      {trace && (
-                        <button
-                          type="button"
-                          onClick={() => toggleTrace(msg.id)}
-                          aria-expanded={isTraceOpen}
-                          className="ml-auto inline-flex min-h-[36px] items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-accent)]"
-                        >
-                          <span>Developer Trace</span>
-                          {isTraceOpen ? (
-                            <ChevronUp className="h-3.5 w-3.5" />
-                          ) : (
-                            <ChevronDown className="h-3.5 w-3.5" />
-                          )}
-                        </button>
-                      )}
                     </div>
                   )}
-
-                  {!isUser && trace && isTraceOpen && (
-                    <div className="mt-1.5 w-full max-w-[94%] space-y-2 sm:max-w-[85%]">
-                      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">
-                        <span>Status: {msg.status}</span>
-                        <span>·</span>
-                        <span>{(trace.engine_path || []).join(' → ')}</span>
-                        <span>·</span>
-                        <span className="tabular-nums">{trace.latency_ms ?? 0}ms</span>
-                      </div>
-                      {trace.task_timings && trace.task_timings.length > 0 && (
-                        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs">
-                          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                            <span className="font-semibold text-[var(--color-warning)]">
-                              เวลาทำงานราย Task ({trace.task_timings.length})
-                            </span>
-                            {trace.bottleneck_task && (
-                              <span className="font-mono text-[11px] text-[var(--color-warning)] tabular-nums">
-                                Bottleneck: {trace.bottleneck_task.task} ({trace.bottleneck_task.duration_ms} ms · {trace.bottleneck_task.share_pct}%)
-                              </span>
-                            )}
-                          </div>
-                          <div className="grid gap-1.5 sm:grid-cols-2">
-                            {trace.task_timings.map((t, idx) => (
-                              <div
-                                key={`${t.task}-${idx}`}
-                                className="flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1.5 font-mono text-[11px]"
-                              >
-                                <span className="truncate text-[var(--color-text)]">{t.task}</span>
-                                <span
-                                  className={`shrink-0 tabular-nums ${
-                                    trace.bottleneck_task?.task === t.task
-                                      ? 'font-semibold text-[var(--color-warning)]'
-                                      : 'text-[var(--color-accent)]'
-                                  }`}
-                                >
-                                  {t.duration_ms} ms
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
-                        <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] px-3 py-1.5">
-                          <span className="font-mono text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                            trace.json
-                          </span>
-                          <CopyButton
-                            getText={() => JSON.stringify(redactSensitiveData(trace), null, 2)}
-                            ariaLabel="คัดลอก Developer Trace"
-                            title="คัดลอก Developer Trace JSON (คัดกรองข้อมูลสำคัญแล้ว)"
-                            size="xs"
-                          />
-                        </div>
-                        <pre className="overflow-x-auto p-3 font-mono text-[11px] leading-relaxed text-[var(--color-accent)]">
-                          {JSON.stringify(redactSensitiveData(trace), null, 2)}
-                        </pre>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                </article>
               );
             })
           )}
 
           {sending && (
-            <div className="flex flex-col items-start gap-2" role="status" aria-live="polite">
-              <div className="inline-flex items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-xs font-medium text-[var(--color-accent)]">
+            <div className="flex flex-col items-start gap-2.5" role="status" aria-live="polite">
+              <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-xs font-medium text-[var(--color-accent)]">
                 {activeToolStatus?.toolId === 'web_search' ? (
                   <Globe className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
                 ) : activeToolStatus?.toolId === 'doc_fetch' ? (
@@ -653,12 +841,13 @@ export function WorkspaceView({
                 ) : (
                   <Cpu className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
                 )}
-                <span>
-                  {activeToolStatus?.label || 'กำลังดำเนินการในพื้นที่ทำงาน...'}
+                <span>{activeToolStatus?.label || 'กำลังดำเนินการในพื้นที่ทำงาน...'}</span>
+                <span className="hidden text-[11px] font-normal text-[var(--color-text-muted)] sm:inline">
+                  · วิเคราะห์ · วางแผน · ดำเนินการ · ตรวจสอบผล
                 </span>
               </div>
               {streamingContent && (
-                <div className="max-w-[94%] sm:max-w-[85%] rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-surface-raised)] px-4 py-3.5 text-[var(--color-text)]">
+                <div className="w-full max-w-[98%] rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-surface-raised)] px-4 py-3.5 text-[var(--color-text)] sm:max-w-[90%]">
                   <div className="mb-1.5 text-xs font-semibold tracking-wide text-[var(--color-accent)]">
                     ZYRQUEN
                   </div>
@@ -696,24 +885,71 @@ export function WorkspaceView({
 
           <div ref={scrollEndRef} />
         </div>
+
+        {showScrollBottom && (
+          <div className="sticky bottom-3 z-20 flex justify-center pointer-events-none">
+            <button
+              type="button"
+              onClick={() => scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' })}
+              aria-label="เลื่อนลงล่างสุด"
+              className="pointer-events-auto inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]/95 px-3 py-1.5 text-xs font-medium text-[var(--color-text)] shadow-lg backdrop-blur-sm transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+            >
+              <ArrowDown className="h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden="true" />
+              <span>เลื่อนลงล่างสุด</span>
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Bottom-Docked Task Composer (Clean, mode-free, model selector moved to Settings) */}
+      {/* Bottom-Docked Clean Command Composer */}
       <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 pb-safe sm:px-6 sm:py-3">
         <form onSubmit={handleSubmit} className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-          {attachment && (
-            <div className="flex items-center justify-between gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 py-1.5 text-xs text-[var(--color-accent)]">
-              <span className="truncate">ไฟล์แนบ: {attachment.name}</span>
-              <button
-                type="button"
-                onClick={() => setAttachment(null)}
-                aria-label="ลบไฟล์แนบ"
-                className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          {/* Context Row: Project Selector & Attachment Preview */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <FolderKanban
+                className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]"
+                aria-hidden="true"
+              />
+              <select
+                aria-label="เลือกโปรเจกต์"
+                value={activeConversationId ?? '__new__'}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === '__new__') {
+                    onNewConversation();
+                  } else {
+                    onSelectConversation(val);
+                  }
+                }}
+                className="max-w-[220px] truncate rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-xs font-medium text-[var(--color-text)] focus:border-[var(--color-focus)] focus:outline-none sm:max-w-[280px]"
               >
-                <X className="h-3.5 w-3.5" />
-              </button>
+                <option value="__new__">+ โปรเจกต์ / งานใหม่</option>
+                {conversations.map((conv) => (
+                  <option key={conv.id} value={conv.id}>
+                    {conv.title}
+                  </option>
+                ))}
+              </select>
             </div>
-          )}
+
+            {attachment && (
+              <div className="flex max-w-full items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-xs text-[var(--color-accent)]">
+                <Paperclip className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <span className="truncate">
+                  ไฟล์แนบ: {attachment.name} ({attachment.content.length.toLocaleString()} ตัวอักษร)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAttachment(null)}
+                  aria-label="ลบไฟล์แนบ"
+                  className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
 
           {(speechError || listening) && (
             <div className="flex items-center justify-between gap-2 text-xs">
@@ -744,7 +980,7 @@ export function WorkspaceView({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt,.md,.json,.csv,.py,.ts,.tsx,.js"
+              accept=".txt,.md,.json,.csv,.py,.ts,.tsx,.js,.jsx,.xml,.yaml,.yml,.sql,.html,.css,.log"
               onChange={handleFileChange}
               className="hidden"
             />
@@ -752,9 +988,10 @@ export function WorkspaceView({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               aria-label="แนบไฟล์ข้อความ"
+              title="แนบไฟล์ข้อความ โค้ด หรือข้อมูล"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
             >
-              <Paperclip className="h-4 w-4" />
+              <Paperclip className="h-4 w-4" aria-hidden="true" />
             </button>
 
             <button
@@ -785,9 +1022,9 @@ export function WorkspaceView({
                   void handleSubmit();
                 }
               }}
-              placeholder="บอกงานที่ต้องการให้ดำเนินการ..."
+              placeholder="พิมพ์คำสั่งงาน หรืออธิบายสิ่งที่ต้องการสร้าง..."
               aria-label="ช่องพิมพ์คำสั่งงาน"
-              className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
+              className="max-h-44 min-h-[44px] flex-1 resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
             />
 
             <button
@@ -796,22 +1033,12 @@ export function WorkspaceView({
               aria-label="ส่งคำสั่งงาน"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[var(--color-primary)] text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-40"
             >
-              <Send className="h-4 w-4" />
+              <Send className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-[var(--color-text-muted)]">
-            <span>Enter เพื่อดำเนินการ · Shift+Enter ขึ้นบรรทัดใหม่</span>
-            {onOpenSettings && (
-              <button
-                type="button"
-                onClick={onOpenSettings}
-                className="inline-flex items-center gap-1 text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-accent)]"
-              >
-                <Settings className="h-3 w-3" />
-                <span>ตั้งค่าโมเดลและพื้นที่ทำงาน</span>
-              </button>
-            )}
+            <span>Enter เพื่อส่งคำสั่ง · Shift+Enter ขึ้นบรรทัดใหม่</span>
           </div>
         </form>
       </div>

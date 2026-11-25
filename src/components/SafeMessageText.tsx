@@ -1,4 +1,5 @@
 import React from 'react';
+import { Download } from 'lucide-react';
 import {
   copyTextToClipboard,
   parseMarkdownPipeTable,
@@ -17,8 +18,52 @@ export {
   toPlainAssistantCopyText,
 };
 
+const CODE_EXTENSION_MAP: Record<string, string> = {
+  python: 'py',
+  py: 'py',
+  typescript: 'ts',
+  ts: 'ts',
+  tsx: 'tsx',
+  javascript: 'js',
+  js: 'js',
+  jsx: 'jsx',
+  json: 'json',
+  markdown: 'md',
+  md: 'md',
+  sql: 'sql',
+  bash: 'sh',
+  sh: 'sh',
+  yaml: 'yml',
+  yml: 'yml',
+  html: 'html',
+  css: 'css',
+};
+
+function downloadCodeSnippet(lang: string, code: string) {
+  if (typeof document === 'undefined' || typeof URL === 'undefined') return;
+  const ext = CODE_EXTENSION_MAP[lang.toLowerCase()] || 'txt';
+  const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `zyrquen-snippet.${ext}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function isSafeHttpUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 function renderInlineSegments(line: string): React.ReactNode[] {
-  const parts = line.split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g);
+  const parts = line.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|\*[^*]+\*)/g);
   return parts.map((part, idx) => {
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
       return (
@@ -37,6 +82,20 @@ function renderInlineSegments(line: string): React.ReactNode[] {
         </code>
       );
     }
+    const linkMatch = part.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+    if (linkMatch && isSafeHttpUrl(linkMatch[2])) {
+      return (
+        <a
+          key={idx}
+          href={linkMatch[2]}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline decoration-[var(--color-accent)]/60 underline-offset-2 text-[var(--color-accent)] hover:opacity-85"
+        >
+          {linkMatch[1]}
+        </a>
+      );
+    }
     if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
       return (
         <em key={idx} className="italic text-[var(--color-text-secondary)]">
@@ -52,9 +111,11 @@ type MessageBlock =
   | { kind: 'code'; lang: string; code: string }
   | { kind: 'table'; headers: string[]; rows: string[][] }
   | { kind: 'spacer' }
+  | { kind: 'divider' }
   | { kind: 'blockquote'; text: string }
   | { kind: 'bullet'; text: string }
-  | { kind: 'heading'; text: string }
+  | { kind: 'numbered'; num: string; text: string }
+  | { kind: 'heading'; level: number; text: string }
   | { kind: 'paragraph'; text: string };
 
 function parseMessageBlocks(sanitized: string): MessageBlock[] {
@@ -88,14 +149,21 @@ function parseMessageBlocks(sanitized: string): MessageBlock[] {
     }
 
     const trimmed = line.trim();
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    const numberedMatch = trimmed.match(/^(\d+)\.\s+(.+)$/);
+
     if (!trimmed) {
       blocks.push({ kind: 'spacer' });
+    } else if (/^[-*_]{3,}$/.test(trimmed)) {
+      blocks.push({ kind: 'divider' });
     } else if (trimmed.startsWith('> ')) {
       blocks.push({ kind: 'blockquote', text: trimmed.slice(2) });
-    } else if (trimmed.startsWith('- ')) {
+    } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
       blocks.push({ kind: 'bullet', text: trimmed.slice(2) });
-    } else if (/^#{1,6}\s+/.test(trimmed)) {
-      blocks.push({ kind: 'heading', text: trimmed.replace(/^#{1,6}\s+/, '') });
+    } else if (numberedMatch) {
+      blocks.push({ kind: 'numbered', num: numberedMatch[1], text: numberedMatch[2] });
+    } else if (headingMatch) {
+      blocks.push({ kind: 'heading', level: headingMatch[1].length, text: headingMatch[2] });
     } else {
       blocks.push({ kind: 'paragraph', text: line });
     }
@@ -115,6 +183,9 @@ export const SafeMessageText = React.memo(function SafeMessageText({ content }: 
         if (block.kind === 'spacer') {
           return <div key={i} className="h-1" />;
         }
+        if (block.kind === 'divider') {
+          return <hr key={i} className="my-2 border-[var(--color-border)]" />;
+        }
         if (block.kind === 'code') {
           return (
             <div
@@ -125,13 +196,25 @@ export const SafeMessageText = React.memo(function SafeMessageText({ content }: 
                 <span className="font-mono text-[11px] font-medium text-[var(--color-text-secondary)]">
                   {block.lang}
                 </span>
-                <CopyButton
-                  getText={() => block.code}
-                  label="คัดลอกโค้ด"
-                  ariaLabel="คัดลอกโค้ด"
-                  title="คัดลอกโค้ดทั้งหมดแบบไม่ติดเลขบรรทัด"
-                  size="xs"
-                />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => downloadCodeSnippet(block.lang, block.code)}
+                    aria-label="ดาวน์โหลดไฟล์โค้ด"
+                    title="ดาวน์โหลดไฟล์โค้ดนี้"
+                    className="inline-flex min-h-[28px] items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  >
+                    <Download className="h-3 w-3" aria-hidden="true" />
+                    <span className="hidden sm:inline">บันทึกไฟล์</span>
+                  </button>
+                  <CopyButton
+                    getText={() => block.code}
+                    label="คัดลอกโค้ด"
+                    ariaLabel="คัดลอกโค้ด"
+                    title="คัดลอกโค้ดทั้งหมดแบบไม่ติดเลขบรรทัด"
+                    size="xs"
+                  />
+                </div>
               </div>
               <pre className="overflow-x-auto p-3 font-mono text-xs leading-relaxed text-[var(--color-text)]">
                 <code>{block.code}</code>
@@ -205,9 +288,25 @@ export const SafeMessageText = React.memo(function SafeMessageText({ content }: 
             </div>
           );
         }
-        if (block.kind === 'heading') {
+        if (block.kind === 'numbered') {
           return (
-            <p key={i} className="font-semibold text-[var(--color-text)]">
+            <div key={i} className="flex items-start gap-2.5 pl-1">
+              <span className="mt-0.5 min-w-[1.25rem] shrink-0 text-right font-mono text-xs font-semibold text-[var(--color-accent)] tabular-nums">
+                {block.num}.
+              </span>
+              <span className="min-w-0 flex-1">{renderInlineSegments(block.text)}</span>
+            </div>
+          );
+        }
+        if (block.kind === 'heading') {
+          const sizeCls =
+            block.level === 1
+              ? 'text-base font-bold text-[var(--color-text)]'
+              : block.level === 2
+                ? 'pt-1 text-[15px] font-semibold text-[var(--color-accent)]'
+                : 'font-semibold text-[var(--color-text)]';
+          return (
+            <p key={i} className={sizeCls}>
               {renderInlineSegments(block.text)}
             </p>
           );

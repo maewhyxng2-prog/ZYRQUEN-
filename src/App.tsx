@@ -1175,6 +1175,7 @@ export default function App() {
             {screen === 'workspace' && (
               <WorkspaceView
                 token={token}
+                userRole={user.role}
                 conversations={conversations}
                 activeConversationId={activeConversationId}
                 activeTitle={activeTitle}
@@ -1183,7 +1184,6 @@ export default function App() {
                 sending={sending}
                 streamingContent={streamingContent}
                 error={workspaceError}
-                autoExpandTrace={autoExpandTrace}
                 defaultMode={defaultMode}
                 defaultModelVariant={selectedModelVariant}
                 onSelectConversation={(cid) => {
@@ -1204,7 +1204,12 @@ export default function App() {
                     variant || selectedModelVariant
                   )
                 }
-                onOpenSettings={() => pushRoute('settings', null, 'account')}
+                onRefreshConversation={async () => {
+                  await Promise.all([
+                    activeConversationId ? loadConversationThread(activeConversationId) : Promise.resolve(),
+                    loadHomeAndConversations(),
+                  ]);
+                }}
                 onRetryLast={
                   lastFailedPrompt
                     ? () =>

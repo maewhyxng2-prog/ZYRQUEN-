@@ -251,6 +251,15 @@ export interface NativeTrace {
     limitations?: string[];
     analysis_summary?: string | null;
   };
+  deliverable?: {
+    kind: 'document' | 'code' | 'plan' | 'analysis' | string;
+    title: string;
+    filename?: string;
+    language?: string;
+    sha256?: string;
+    verified?: boolean;
+    content?: string;
+  };
 }
 
 export interface MessageItem {

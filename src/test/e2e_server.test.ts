@@ -826,6 +826,31 @@ describe('Isolated 6-Step Non-Skippable Native Training Pipeline Gate E2E', () =
       dataset_analysis?: { duplicate_rows?: number };
     };
     expect(csvTrace.dataset_analysis?.duplicate_rows).toBe(1);
+
+    // 3. Real Autonomous Execution from Chat composer goal -> VERIFIED deliverable artifact
+    const docGoalRes = await fetch(`${gateBaseUrl}/api/conversations/${conversation.id}/messages`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        content: 'สร้างเอกสารสรุปสถาปัตยกรรมและรายการตรวจสอบความพร้อมระบบ',
+        mode: 'auto',
+      }),
+    });
+    expect(docGoalRes.status).toBe(201);
+    const docGoalJson = (await docGoalRes.json()) as {
+      assistant_message: { status: string; content: string; trace_json: string };
+    };
+    expect(docGoalJson.assistant_message.status).toBe('VERIFIED');
+    const docTrace = JSON.parse(docGoalJson.assistant_message.trace_json) as {
+      engine_path?: string[];
+      external_models_used: boolean;
+      deliverable?: { kind: string; title: string; filename: string; sha256: string; verified: boolean };
+    };
+    expect(docTrace.external_models_used).toBe(false);
+    expect(docTrace.engine_path).toContain('tool_center');
+    expect(docTrace.deliverable?.verified).toBe(true);
+    expect(docTrace.deliverable?.filename).toMatch(/\.md$/);
+    expect(docTrace.deliverable?.sha256).toMatch(/^[a-f0-9]{64}$/);
   }, 45_000);
 
   it('Executes Native Tool Center (8 Toolkits), 10 Background Support Systems, P5 Gates, Self-Improvement & Software Engineering Benchmark over HTTP', async () => {

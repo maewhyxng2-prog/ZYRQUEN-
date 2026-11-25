@@ -2169,11 +2169,16 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
         />
       );
 
-      // Assistant identity must display "ZYRQUEN" on every assistant card and never expose raw internal JSON fields in user view
+      // Assistant identity must display "ZYRQUEN" on every assistant card and never expose raw internal JSON fields or Developer Trace in Chat UI
       expect(screen.getAllByText('ZYRQUEN').length).toBeGreaterThanOrEqual(4);
       expect(screen.queryByText(/cognitive_pipeline/)).not.toBeInTheDocument();
       expect(screen.queryByText(/model_weights_changed/)).not.toBeInTheDocument();
-      expect(screen.getByText('Developer Trace')).toBeInTheDocument();
+      expect(screen.queryByText('Developer Trace')).not.toBeInTheDocument();
+      expect(screen.queryByText(/Tool Registry/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Toolkit Catalog/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Capability Library/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Execution Engine Dashboard/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'ตั้งค่าโมเดลและพื้นที่ทำงาน' })).not.toBeInTheDocument();
       expect(screen.getByText('สวัสดีครับ ยินดีต้อนรับ มีอะไรให้ช่วยวันนี้ครับ')).toBeInTheDocument();
 
       const copyButtons = screen.getAllByRole('button', { name: 'คัดลอกข้อความตอบกลับ' });
@@ -2346,7 +2351,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     const { WorkspaceView } = await import('../components/WorkspaceView');
     const { HomeView } = await import('../components/HomeView');
     const { AdminStabilityPanel } = await import('../components/AdminStabilityPanel');
-    const { serializeTableToTsv } = await import('../lib/clipboard');
+    const { serializeTableToTsv, redactSensitiveData } = await import('../lib/clipboard');
 
     const origClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     const copiedTexts: string[] = [];
@@ -2441,13 +2446,17 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
       );
       expect(copiedTexts[1]).toContain('\t');
 
-      // Copy Developer Trace JSON — credentials/tokens must NEVER be copied
-      fireEvent.click(screen.getByRole('button', { name: 'คัดลอก Developer Trace' }));
+      // Developer Trace panel must NOT clutter Chat Workspace; verify secret redaction directly & full message copy
+      expect(screen.queryByRole('button', { name: 'คัดลอก Developer Trace' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'คัดลอกข้อความตอบกลับ' }));
       await waitFor(() => expect(copiedTexts).toHaveLength(3));
-      expect(copiedTexts[2]).toContain('"tools_engine"');
-      expect(copiedTexts[2]).not.toContain('secret-jwt-should-not-copy');
-      expect(copiedTexts[2]).not.toContain('zyrq_secret_12345');
-      expect(copiedTexts[2]).not.toContain('hash_xyz');
+      expect(copiedTexts[2]).toContain('สรุปผลวิเคราะห์โครงสร้างโค้ดและตารางข้อมูล:');
+
+      const redactedTraceJson = JSON.stringify(redactSensitiveData(JSON.parse(secretLeakedTrace)));
+      expect(redactedTraceJson).toContain('"tools_engine"');
+      expect(redactedTraceJson).not.toContain('secret-jwt-should-not-copy');
+      expect(redactedTraceJson).not.toContain('zyrq_secret_12345');
+      expect(redactedTraceJson).not.toContain('hash_xyz');
 
       // Copy Error Alert
       fireEvent.click(screen.getByRole('button', { name: 'คัดลอกข้อความข้อผิดพลาด' }));
@@ -3185,7 +3194,163 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(memberDrawerButtons[3]);
     expect(onNavigate).toHaveBeenLastCalledWith('settings', 'account');
   });
+
+  it('WorkspaceView Command Workspace: รองรับการเลือก Project, แนบไฟล์, เอกสาร/โค้ด/Artifacts, Approval Gate และไม่แสดงเครื่องมือภายใน', async () => {
+    const { WorkspaceView } = await import('../components/WorkspaceView');
+    const onSelectConversation = vi.fn();
+    const onNewConversation = vi.fn();
+    const onRefreshConversation = vi.fn(async () => {});
+    const onSendMessage = vi.fn(async () => {});
+
+    let decideCalled = false;
+    mockFetch({
+      'POST /api/admin/tool-invocations/inv-gate-1/decide': () => {
+        decideCalled = true;
+        return new Response(JSON.stringify({ ok: true, status: 'COMPLETED' }), { status: 200 });
+      },
+    });
+
+    const richMarkdown = [
+      '### แผนงานและผลลัพธ์',
+      '',
+      '1. วิเคราะห์เป้าหมายและวางแผน',
+      '2. ดำเนินการตรวจสอบไฟล์ [อ้างอิงเอกสาร](https://example.com/spec) และบล็อกลิงก์ [unsafe](javascript:alert(1))',
+      '',
+      '---',
+      '',
+      '```typescript',
+      'export const ready = true;',
+      '```',
+    ].join('\n');
+
+    render(
+      <WorkspaceView
+        token="tok-cmd"
+        userRole="admin"
+        conversations={[
+          {
+            id: 'proj-1',
+            title: 'โปรเจกต์ระบบฐานข้อมูล',
+            mode: 'auto',
+            created_at: '2026-11-25T00:00:00Z',
+            updated_at: '2026-11-25T00:00:00Z',
+            message_count: 3,
+          },
+          {
+            id: 'proj-2',
+            title: 'โปรเจกต์รายงานอัตโนมัติ',
+            mode: 'auto',
+            created_at: '2026-11-25T00:00:00Z',
+            updated_at: '2026-11-25T00:00:00Z',
+            message_count: 1,
+          },
+        ]}
+        activeConversationId="proj-1"
+        activeTitle="โปรเจกต์ระบบฐานข้อมูล"
+        messages={[
+          {
+            id: 'u-att-1',
+            conversation_id: 'proj-1',
+            role: 'user',
+            content: 'สรุปไฟล์นี้ให้หน่อย\n\n[Attachment: 42 chars]',
+            mode: 'auto',
+            trace_json: null,
+            status: 'USER',
+            created_at: '2026-11-25T00:00:00Z',
+          },
+          {
+            id: 'a-art-1',
+            conversation_id: 'proj-1',
+            role: 'assistant',
+            content: richMarkdown,
+            mode: 'auto',
+            trace_json: JSON.stringify({
+              engine_path: ['tool_center', 'document.spec_generate'],
+              latency_ms: 4.2,
+              deliverable: {
+                kind: 'document',
+                title: 'เอกสารสรุปสถาปัตยกรรม',
+                filename: 'architecture-summary.md',
+                language: 'markdown',
+                sha256: 'abc1234567890def',
+                verified: true,
+                content: '# Architecture Summary\n\nVerified content',
+              },
+            }),
+            status: 'VERIFIED',
+            created_at: '2026-11-25T00:00:01Z',
+          },
+          {
+            id: 'a-gate-1',
+            conversation_id: 'proj-1',
+            role: 'assistant',
+            content: 'ขั้นตอนเชื่อมต่อ Webhook ต้องได้รับการอนุมัติก่อนส่งคำขอจริง',
+            mode: 'auto',
+            trace_json: JSON.stringify({
+              engine_path: ['external_tool', 'approval_gate'],
+              latency_ms: 1.5,
+              external_tool: {
+                invocation_id: 'inv-gate-1',
+                tool_id: 'webhook_dispatch',
+                status: 'PENDING_APPROVAL',
+              },
+            }),
+            status: 'PENDING_APPROVAL',
+            created_at: '2026-11-25T00:00:02Z',
+          },
+        ]}
+        loadingThread={false}
+        sending={false}
+        error={null}
+        defaultMode="auto"
+        onSelectConversation={onSelectConversation}
+        onNewConversation={onNewConversation}
+        onDeleteConversation={vi.fn()}
+        onSendMessage={onSendMessage}
+        onRefreshConversation={onRefreshConversation}
+      />
+    );
+
+    // 1. UI Restrictions: No Developer Tools / Tool Registry / Execution Engine Dashboard
+    expect(screen.queryByText('Developer Trace')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Tool Registry/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Toolkit Catalog/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Capability Library/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Execution Engine Dashboard/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'ตั้งค่าโมเดลและพื้นที่ทำงาน' })).not.toBeInTheDocument();
+
+    // 2. Clean Attachment badge in user message
+    expect(screen.getByText('สรุปไฟล์นี้ให้หน่อย')).toBeInTheDocument();
+    expect(screen.getByText('ไฟล์แนบ (42 ตัวอักษร)')).toBeInTheDocument();
+
+    // 3. Rich Markdown rendering: ordered list, safe external link, sanitized unsafe link, code download button
+    expect(screen.getByText('วิเคราะห์เป้าหมายและวางแผน')).toBeInTheDocument();
+    const safeLink = screen.getByRole('link', { name: 'อ้างอิงเอกสาร' });
+    expect(safeLink).toHaveAttribute('href', 'https://example.com/spec');
+    expect(screen.queryByRole('link', { name: 'unsafe' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'ดาวน์โหลดไฟล์โค้ด' })).toBeInTheDocument();
+
+    // 4. Deliverable artifact card rendered cleanly with copy & download
+    expect(screen.getByText('เอกสารสรุปสถาปัตยกรรม')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'คัดลอกเนื้อหาผลงาน' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'ดาวน์โหลดผลงาน' })).toBeInTheDocument();
+
+    // 5. Project selector switches project and creates new project
+    const projectSelect = screen.getByLabelText('เลือกโปรเจกต์') as HTMLSelectElement;
+    expect(projectSelect.value).toBe('proj-1');
+    fireEvent.change(projectSelect, { target: { value: 'proj-2' } });
+    expect(onSelectConversation).toHaveBeenCalledWith('proj-2');
+    fireEvent.change(projectSelect, { target: { value: '__new__' } });
+    expect(onNewConversation).toHaveBeenCalledTimes(1);
+
+    // 6. Inline Approval Gate submits real decision and refreshes thread
+    fireEvent.click(screen.getByRole('button', { name: 'อนุมัติและทำต่อ' }));
+    expect(await screen.findByText(/อนุมัติแล้ว \(COMPLETED\)/)).toBeInTheDocument();
+    expect(decideCalled).toBe(true);
+    expect(onRefreshConversation).toHaveBeenCalled();
+  });
 });
+
 
 
 
