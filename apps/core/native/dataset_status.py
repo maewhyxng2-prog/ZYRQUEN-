@@ -55,8 +55,6 @@ def inspect_dataset_directory(
 
     try:
         manifest = verify_dataset_manifest(resolved_dir)
-        raw_version = manifest.get("version")
-        dataset_version = str(raw_version).strip() if raw_version is not None else None
         splits = resolve_dataset_splits(manifest)
         fmt = detect_dataset_format(resolved_dir)
     except (OSError, ValueError, KeyError, TypeError) as exc:
