@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import dotenv from 'dotenv';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
