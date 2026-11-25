@@ -92,8 +92,10 @@ def require_training_admin(
     return current_user
 
 
-def _verify_training_approval_readonly(engine, approval_id: str) -> dict:
-    """Verify Tier-2 approval status, action binding, expiry, and HMAC signature without consuming."""
+def _verify_training_approval_readonly(
+    engine, approval_id: str, *, expected_scope: str | None = None
+) -> dict:
+    """Verify Tier-2 approval status, action/scope binding, expiry, and HMAC without consuming."""
     approval = engine.governance.store.get_approval(approval_id)
     if approval is None:
         raise ApprovalViolationError(f"Approval request not found: {approval_id}")
@@ -101,6 +103,11 @@ def _verify_training_approval_readonly(engine, approval_id: str) -> dict:
         raise ApprovalViolationError(
             f"Approval {approval_id} action_type={approval.get('action_type')!r} "
             "does not match required 'training.execute'."
+        )
+    if expected_scope is not None and approval.get("scope") != expected_scope:
+        raise ApprovalViolationError(
+            f"Approval {approval_id} scope={approval.get('scope')!r} "
+            f"does not match required scope={expected_scope!r}."
         )
     if approval.get("status") != "approved":
         raise ApprovalViolationError(
@@ -151,7 +158,9 @@ def start_training(
 
     engine = get_workflow_engine()
     try:
-        _verify_training_approval_readonly(engine, approval_id)
+        _verify_training_approval_readonly(
+            engine, approval_id, expected_scope=f"dataset:{request.dataset_version}"
+        )
     except ApprovalViolationError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -181,6 +190,7 @@ def start_training(
             before_enqueue=lambda: engine.governance.verify_and_consume_by_id(
                 approval_id,
                 expected_action_type="training.execute",
+                expected_scope=f"dataset:{request.dataset_version}",
             ),
         )
     except ApprovalViolationError as exc:
