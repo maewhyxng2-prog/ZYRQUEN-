@@ -128,7 +128,7 @@ export function HomeView({
           <textarea id="home-ai-input" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(e); } }} placeholder="อธิบายสิ่งที่ต้องการสร้าง วิเคราะห์ หรือแก้ไข..." className="mt-3 w-full resize-y rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none" />
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-[var(--color-text-muted)]">ZYRQUEN จะรับเป้าหมายและเริ่มกระบวนการทำงานตามความสามารถที่ระบบรองรับ</p>
-            <button type="submit" className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] px-5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary-hover)]">
+            <button type="submit" disabled={taskSubmitting || !prompt.trim()} className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] px-5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-50">
               {taskSubmitting ? 'กำลังส่งงาน...' : 'เริ่มดำเนินงาน'} <ArrowRight className="h-4 w-4" />
             </button>
           </div>
