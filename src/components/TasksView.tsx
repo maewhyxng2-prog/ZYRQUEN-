@@ -20,7 +20,7 @@ interface MissionResponse {
   mission: Mission;
 }
 
-export function TasksView({ token }: { token: string }) {
+export function TasksView({ token, mode = 'all' }: { token: string; mode?: 'all' | 'create' | 'list' }) {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [goal, setGoal] = useState('');
   const [loading, setLoading] = useState(true);
@@ -103,15 +103,15 @@ export function TasksView({ token }: { token: string }) {
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-accent)]">WORKSPACE / TASKS</p>
-          <h2 className="mt-1 text-2xl font-bold text-[var(--color-text)]">งานของฉัน</h2>
-          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">มอบหมายเป้าหมาย ติดตามการดำเนินงาน และตรวจสอบผลลัพธ์</p>
+          <h2 className="mt-1 text-2xl font-bold text-[var(--color-text)]">{mode === 'create' ? 'สร้างงานใหม่' : 'งานของฉัน'}</h2>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">{mode === 'create' ? 'กำหนดเป้าหมายให้ ZYRQUEN ดำเนินงานและตรวจสอบผลลัพธ์' : 'ติดตามการดำเนินงาน ประวัติ และผลลัพธ์ของงาน'}</p>
         </div>
         <button type="button" onClick={() => void loadTasks()} disabled={loading} className="inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-[var(--color-border)] px-3 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50">
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> รีเฟรช
         </button>
       </header>
 
-      <form onSubmit={runTask} className="space-y-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 sm:p-5">
+      {mode !== 'list' && <form onSubmit={runTask} className="space-y-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 sm:p-5">
         <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-text)]"><Plus className="h-4 w-4 text-[var(--color-accent)]" /> มอบหมายงานใหม่</div>
         <textarea aria-label="เป้าหมายงาน" value={goal} onChange={(event) => setGoal(event.target.value)} rows={3} maxLength={400} placeholder="ระบุเป้าหมายที่ต้องการให้ ZYRQUEN ดำเนินการ..." className="w-full resize-y rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-focus)]" />
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -120,11 +120,13 @@ export function TasksView({ token }: { token: string }) {
             {running ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} เริ่มดำเนินงาน
           </button>
         </div>
-      </form>
+      </form>}
+
+      {mode === 'create' && selected && <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4"><p className="text-sm font-semibold text-[var(--color-text)]">ส่งงานเข้าสู่ระบบแล้ว</p><p className="mt-2 text-sm text-[var(--color-text-secondary)]">{selected.goal}</p><p className="mt-1 text-xs text-[var(--color-accent)]">สถานะ: {statusLabel(selected.status)}</p></section>}
 
       {error && <div role="alert" className="rounded-xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]">{error}</div>}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.8fr)]">
+      {mode !== 'create' && <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.8fr)]">
         <section className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
           <div className="border-b border-[var(--color-border)] px-4 py-3">
             <h3 className="text-sm font-semibold text-[var(--color-text)]">ประวัติการดำเนินงาน ({missions.length})</h3>
@@ -162,7 +164,7 @@ export function TasksView({ token }: { token: string }) {
             </>
           ) : <p className="mt-3 text-sm text-[var(--color-text-secondary)]">เลือกงานจากรายการเพื่อดูรายละเอียดและผลลัพธ์</p>}
         </section>
-      </div>
+      </div>}
     </div>
   );
 }
