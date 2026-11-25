@@ -124,9 +124,11 @@ async def trigger_evaluation(
             run_inference=True,
             tokenizer_path=os.getenv("ZYRQUEN_TOKENIZER_PATH", "").strip() or None,
         )
-        metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
-        if not isinstance(metrics, dict):
-            raise EvaluationEvidenceError("Native evaluation returned invalid metrics.")
+        if not isinstance(results, dict):
+            raise EvaluationEvidenceError("Native evaluation returned an invalid result payload.")
+        metrics = results.get("metrics")
+        if not isinstance(metrics, dict) or not metrics:
+            raise EvaluationEvidenceError("Native evaluation returned missing or invalid metrics.")
         run.status = "completed"
         run.sample_count = int(metrics.get("examples_evaluated") or 0)
         run.token_count = int(metrics.get("tokens_evaluated") or 0)
