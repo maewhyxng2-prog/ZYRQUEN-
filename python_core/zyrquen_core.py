@@ -52,6 +52,13 @@ from continual_learning import (
     run_continual_learning_round,
     synthesize_failure_curriculum,
 )
+from dataset_ingestion import (
+    decide_kg_proposal,
+    ingest_dataset as _ingest_dataset_pipeline,
+    init_dataset_pipeline_schema,
+    verify_all_datasets_for_workflow,
+    verify_dataset_integrity,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("ZYRQUEN_DATA_DIR") or (BASE_DIR / "data"))
@@ -457,6 +464,7 @@ def init_db() -> None:
             """
         )
         init_tools_schema(conn, DATA_DIR)
+        init_dataset_pipeline_schema(conn)
         cols = {
             r["name"]
             for r in conn.execute("PRAGMA table_info(tool_invocations)").fetchall()
@@ -3209,86 +3217,16 @@ DISALLOWED_PROVENANCE_TOKENS = (
 
 def handle_ingest_dataset(payload: dict) -> dict:
     conn = get_db()
-    name = str(payload.get("name", "untitled-corpus")).strip() or "untitled-corpus"
-    raw_text = str(payload.get("content", "")).strip()
-    user_id = str(payload.get("user_id", ""))
-    provenance = str(payload.get("provenance") or "developer_manual_corpus").strip()[:120] or "developer_manual_corpus"
-    prov_lower = provenance.lower()
-    if any(tok in prov_lower for tok in DISALLOWED_PROVENANCE_TOKENS):
-        conn.close()
-        return {"ok": False, "error": f"Dataset rejected: disallowed synthetic or external provenance '{provenance}'."}
-
-    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
-    if len(lines) < 5:
-        conn.close()
-        return {"ok": False, "error": "Dataset requires at least 5 non-empty lines for Train/Val/Test splitting."}
-
-    # Deduplicate preserving order using canonical punctuation-insensitive key
-    seen = set()
-    unique_lines = []
-    for ln in lines:
-        norm = _canonical_record_key(ln) or re.sub(r"\s+", " ", ln.lower())
-        if norm not in seen:
-            seen.add(norm)
-            unique_lines.append(ln)
-
-    if len(unique_lines) < 3:
-        conn.close()
-        return {"ok": False, "error": "Dataset has fewer than 3 unique lines after near-duplicate removal."}
-
-    rng = random.Random(42)
-    shuffled = list(unique_lines)
-    rng.shuffle(shuffled)
-
-    n = len(shuffled)
-    train_end = max(1, int(n * 0.7))
-    val_end = max(train_end + 1, int(n * 0.85))
-    if val_end >= n:
-        val_end = n - 1
-    train_set = shuffled[:train_end]
-    val_set = shuffled[train_end:val_end]
-    test_set = shuffled[val_end:]
-
-    # Check exact & near-duplicate cross-split leakage
-    exact_leak = bool((set(train_set) & set(test_set)) or (set(train_set) & set(val_set)))
-    near_leak = _near_dup_leakage_exists(train_set, test_set) or _near_dup_leakage_exists(train_set, val_set)
-    leakage = 1 if (exact_leak or near_leak) else 0
-    manifest_hash = hashlib.sha256("\n".join(unique_lines).encode("utf-8")).hexdigest()
-    dataset_id = str(uuid.uuid4())
-    records_obj = {
-        "train": train_set,
-        "val": val_set,
-        "test": test_set,
-        "provenance": provenance,
-        "provenance_verified": True,
-        "leakage_checked_at": now_iso(),
-    }
-
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO datasets (id, name, manifest_hash, total_records, train_count, val_count, test_count, leakage_detected, status, created_by, created_at, records_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                dataset_id,
-                name,
-                manifest_hash,
-                len(unique_lines),
-                len(train_set),
-                len(val_set),
-                len(test_set),
-                leakage,
-                "LEAKAGE_BLOCKED" if leakage else "READY",
-                user_id,
-                now_iso(),
-                json.dumps(records_obj),
-            ),
+    try:
+        return _ingest_dataset_pipeline(
+            conn,
+            DATA_DIR,
+            payload,
+            canonical_key_fn=_canonical_record_key,
+            tokenize_fn=tokenize,
         )
-    row = dict(conn.execute("SELECT id, name, manifest_hash, total_records, train_count, val_count, test_count, leakage_detected, status, created_by, created_at FROM datasets WHERE id=?", (dataset_id,)).fetchone())
-    row["provenance"] = provenance
-    conn.close()
-    return {"ok": True, "dataset": row, "deduplicated_removed": len(lines) - len(unique_lines)}
+    finally:
+        conn.close()
 
 
 def check_training_pipeline_prerequisites(
@@ -3516,16 +3454,29 @@ def handle_run_workflow(payload: dict) -> dict:
         summary = f"System Operations verified: {metrics['mem_available_mb']} MB RAM free, {metrics['disk_free_gb']} GB disk free."
 
     elif group_id == "data_pipeline":
-        ds_rows = conn.execute("SELECT id, name, total_records, leakage_detected, manifest_hash FROM datasets").fetchall()
-        leak_count = sum(1 for r in ds_rows if r["leakage_detected"])
+        audit_res = verify_all_datasets_for_workflow(conn)
+        total_ds = audit_res["total"]
+        leak_count = audit_res["leak_count"]
+        checksum_fails = audit_res["checksum_failed_count"]
+        pending_kg = int(
+            conn.execute("SELECT COUNT(*) FROM kg_ingestion_proposals WHERE status='PENDING_APPROVAL'").fetchone()[0]
+        )
         stages_out = [
-            {"stage": "schema_validate", "status": "PASS", "detail": f"Audited {len(ds_rows)} registered dataset(s)"},
-            {"stage": "deduplicate", "status": "PASS", "detail": "Normalization & deduplication rules verified"},
-            {"stage": "leakage_scan", "status": "FAILED" if leak_count else "PASS", "detail": f"{leak_count} dataset(s) with split overlap"},
-            {"stage": "manifest_hash", "status": "PASS", "detail": "SHA-256 manifests intact"},
+            {"stage": "schema_validate", "status": "PASS", "detail": f"Audited {total_ds} registered dataset(s)"},
+            {"stage": "deduplicate", "status": "PASS", "detail": f"Provenance & normalization verified ({pending_kg} KG proposal(s) awaiting gate)"},
+            {"stage": "leakage_scan", "status": "FAILED" if leak_count else "PASS", "detail": f"{leak_count} dataset(s) with split/template/eval leakage"},
+            {
+                "stage": "manifest_hash",
+                "status": "FAILED" if checksum_fails else "PASS",
+                "detail": (
+                    f"{checksum_fails} dataset(s) failed SHA-256 recomputation"
+                    if checksum_fails
+                    else f"Verified SHA-256 manifests & disk checksums for {total_ds} dataset(s)"
+                ),
+            },
         ]
-        status = "FAILED" if leak_count else "COMPLETED"
-        summary = f"Data Pipeline scanned {len(ds_rows)} dataset(s); leakage flags: {leak_count}."
+        status = "FAILED" if (leak_count or checksum_fails) else "COMPLETED"
+        summary = f"Data Pipeline verified {total_ds} dataset(s); leakage={leak_count}, checksum_failures={checksum_fails}, pending_kg_gate={pending_kg}."
 
     elif group_id == "native_training":
         prereq = check_training_pipeline_prerequisites(
@@ -4305,6 +4256,23 @@ def dispatch_command(cmd: str, payload: dict) -> dict:
         return {"ok": True, **res}
     if cmd == "ingest_dataset":
         return handle_ingest_dataset(payload)
+    if cmd == "verify_dataset":
+        conn = get_db()
+        res = verify_dataset_integrity(conn, str(payload.get("dataset_id", "")))
+        conn.close()
+        return res
+    if cmd == "decide_kg_proposal":
+        conn = get_db()
+        res = decide_kg_proposal(
+            conn,
+            proposal_id=str(payload.get("proposal_id", "")),
+            decision=str(payload.get("decision", "approve")),
+            admin_email=str(payload.get("admin_email", "admin")),
+            admin_id=str(payload.get("admin_id", "admin")),
+            reason=payload.get("reason"),
+        )
+        conn.close()
+        return res
     if cmd == "run_workflow":
         return handle_run_workflow(payload)
     if cmd == "evaluate":

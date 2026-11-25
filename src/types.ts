@@ -400,6 +400,44 @@ export interface DatasetItem {
   leakage_detected: number;
   status: string;
   created_at: string;
+  source_name?: string;
+  license?: string;
+  provenance?: string;
+  source_format?: string;
+  content_sha256?: string;
+}
+
+export interface KgIngestionProposalItem {
+  id: string;
+  dataset_id: string;
+  dataset_name: string;
+  provenance: string;
+  source_name: string;
+  license: string;
+  manifest_hash: string;
+  proposal_checksum: string;
+  triples_json?: string;
+  contradictions_json?: string;
+  triple_count: number;
+  status: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | 'BLOCKED' | string;
+  submitted_by: string;
+  approved_by: string | null;
+  decision_reason: string | null;
+  created_at: string;
+  reviewed_at: string | null;
+}
+
+export interface DatasetVerifyResult {
+  ok: boolean;
+  dataset_id?: string;
+  name?: string;
+  verified: boolean;
+  disk_verified?: boolean;
+  content_sha256?: string;
+  manifest_sha256?: string;
+  leakage_detected?: number;
+  errors?: string[];
+  error?: string;
 }
 
 export interface CheckpointItem {
@@ -433,6 +471,7 @@ export interface EvaluationItem {
 export interface DeveloperOverview {
   keys: ApiKeyItem[];
   datasets: DatasetItem[];
+  kg_proposals?: KgIngestionProposalItem[];
   checkpoints: CheckpointItem[];
   evaluations?: EvaluationItem[];
   experiments?: ExperimentItem[];
@@ -518,6 +557,7 @@ export interface TrainingReadinessSummary {
   approved_experiments: number;
   pending_experiments: number;
   pending_training_runs: number;
+  pending_kg_proposals?: number;
   checkpoints_total: number;
   neural_checkpoints: number;
   datasets: DatasetItem[];
@@ -560,6 +600,7 @@ export interface AdminOverview {
   pending_runs: WorkflowRun[];
   pending_tool_invocations?: ToolInvocationItem[];
   pending_experiments?: ExperimentItem[];
+  pending_kg_proposals?: KgIngestionProposalItem[];
   tools?: ExternalToolItem[];
   audit_logs: AuditLogItem[];
   system: SystemMetrics;

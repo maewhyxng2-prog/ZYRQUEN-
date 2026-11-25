@@ -232,4 +232,3 @@ def test_list_evaluation_runs_enforces_ownership(eval_client):
     assert res_b.status_code == 200
     assert res_b.json()["total"] == 1
     assert res_b.json()["items"][0]["user_id"] == str(user_b.id)
-

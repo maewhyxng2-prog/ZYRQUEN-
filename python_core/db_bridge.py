@@ -28,6 +28,7 @@ from tools_engine import (
     list_workspace_files,
     save_workspace_file,
 )
+from dataset_ingestion import init_dataset_pipeline_schema
 
 
 def row_to_dict(row):
@@ -517,6 +518,7 @@ def handle_action(action: str, payload: dict) -> dict:
         )
 
     if action == "dev_overview":
+        init_dataset_pipeline_schema(conn)
         uid = str(payload["user_id"])
         keys = [
             dict(r)
@@ -528,7 +530,23 @@ def handle_action(action: str, payload: dict) -> dict:
         datasets = [
             dict(r)
             for r in conn.execute(
-                "SELECT id, name, manifest_hash, total_records, train_count, val_count, test_count, leakage_detected, status, created_at FROM datasets ORDER BY created_at DESC LIMIT 20"
+                """
+                SELECT id, name, manifest_hash, total_records, train_count, val_count, test_count,
+                       leakage_detected, status, created_at,
+                       source_name, license, provenance, source_format, content_sha256
+                FROM datasets ORDER BY created_at DESC LIMIT 20
+                """
+            ).fetchall()
+        ]
+        kg_proposals = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, dataset_id, dataset_name, provenance, source_name, license,
+                       manifest_hash, proposal_checksum, triple_count, status,
+                       submitted_by, approved_by, decision_reason, created_at, reviewed_at
+                FROM kg_ingestion_proposals ORDER BY created_at DESC LIMIT 20
+                """
             ).fetchall()
         ]
         checkpoints = [
@@ -563,6 +581,7 @@ def handle_action(action: str, payload: dict) -> dict:
             "ok": True,
             "keys": keys,
             "datasets": datasets,
+            "kg_proposals": kg_proposals,
             "checkpoints": checkpoints,
             "evaluations": evaluations,
             "experiments": experiments,
@@ -608,6 +627,7 @@ def handle_action(action: str, payload: dict) -> dict:
         return {"ok": cur.rowcount > 0}
 
     if action == "admin_overview":
+        init_dataset_pipeline_schema(conn)
         users = [
             dict(r)
             for r in conn.execute(
@@ -642,10 +662,29 @@ def handle_action(action: str, payload: dict) -> dict:
                 "SELECT * FROM experiments WHERE approval_status='PENDING_APPROVAL' ORDER BY created_at DESC"
             ).fetchall()
         ]
+        pending_kg_proposals = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, dataset_id, dataset_name, provenance, source_name, license,
+                       manifest_hash, proposal_checksum, triples_json, contradictions_json,
+                       triple_count, status, submitted_by, approved_by, decision_reason,
+                       created_at, reviewed_at
+                FROM kg_ingestion_proposals
+                WHERE status='PENDING_APPROVAL'
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        ]
         datasets = [
             dict(r)
             for r in conn.execute(
-                "SELECT id, name, manifest_hash, total_records, train_count, val_count, test_count, leakage_detected, status, created_at FROM datasets ORDER BY created_at DESC LIMIT 20"
+                """
+                SELECT id, name, manifest_hash, total_records, train_count, val_count, test_count,
+                       leakage_detected, status, created_at,
+                       source_name, license, provenance, source_format, content_sha256
+                FROM datasets ORDER BY created_at DESC LIMIT 20
+                """
             ).fetchall()
         ]
         checkpoints = [
@@ -711,6 +750,7 @@ def handle_action(action: str, payload: dict) -> dict:
             "pending_runs": pending_runs,
             "pending_tool_invocations": pending_tool_invocations,
             "pending_experiments": pending_experiments,
+            "pending_kg_proposals": pending_kg_proposals,
             "tools": tools,
             "audit_logs": audit_logs,
             "system": get_system_metrics(),
@@ -728,6 +768,7 @@ def handle_action(action: str, payload: dict) -> dict:
                 "approved_experiments": approved_experiments,
                 "pending_experiments": len(pending_experiments),
                 "pending_training_runs": pending_training_runs,
+                "pending_kg_proposals": len(pending_kg_proposals),
                 "checkpoints_total": len(checkpoints),
                 "neural_checkpoints": neural_checkpoints,
                 "datasets": datasets,
@@ -1005,6 +1046,24 @@ def handle_action(action: str, payload: dict) -> dict:
         evidence = [dict(r) for r in conn.execute("SELECT * FROM mission_evidence WHERE mission_id=? ORDER BY rowid ASC", (mid,)).fetchall()]
         conn.close()
         return {"ok": True, "mission": m_row, "nodes": nodes, "evidence": evidence}
+
+    if action == "kg_proposals_list":
+        init_dataset_pipeline_schema(conn)
+        rows = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, dataset_id, dataset_name, provenance, source_name, license,
+                       manifest_hash, proposal_checksum, triples_json, contradictions_json,
+                       triple_count, status, submitted_by, approved_by, decision_reason,
+                       created_at, reviewed_at
+                FROM kg_ingestion_proposals
+                ORDER BY created_at DESC LIMIT 30
+                """
+            ).fetchall()
+        ]
+        conn.close()
+        return {"ok": True, "proposals": rows}
 
     conn.close()
     return {"ok": False, "error": f"Unknown bridge action '{action}'"}

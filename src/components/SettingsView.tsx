@@ -30,6 +30,7 @@ const AdminStabilityPanel = lazy(() =>
 import type {
   AdminOverview,
   ClientLatencySample,
+  DatasetVerifyResult,
   DeveloperOverview,
   MemorySnapshot,
   ModelVariantId,
@@ -84,7 +85,14 @@ export function SettingsView({
 
   const [dsName, setDsName] = useState('');
   const [dsContent, setDsContent] = useState('');
+  const [dsProvenance, setDsProvenance] = useState('developer_manual_corpus');
+  const [dsSourceName, setDsSourceName] = useState('');
+  const [dsLicense, setDsLicense] = useState('INTERNAL_VERIFIED');
+  const [dsFormat, setDsFormat] = useState<'auto' | 'text' | 'jsonl' | 'json' | 'csv'>('auto');
+  const [dsExtractKg, setDsExtractKg] = useState(true);
   const [dsMessage, setDsMessage] = useState<string | null>(null);
+  const [dsVerifyMap, setDsVerifyMap] = useState<Record<string, DatasetVerifyResult>>({});
+  const [verifyingDsId, setVerifyingDsId] = useState<string | null>(null);
   const [runningEval, setRunningEval] = useState(false);
   const [requestingTrainId, setRequestingTrainId] = useState<string | null>(null);
   const [benchmarkModel, setBenchmarkModel] = useState<ModelVariantId>('zyrquen-omega-v1');
@@ -166,21 +174,65 @@ export function SettingsView({
     }
   }
 
+  async function handleDatasetFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      setDsContent(text);
+      if (!dsName.trim()) {
+        const baseName = file.name.replace(/\.[^.]+$/, '').slice(0, 80);
+        if (baseName) setDsName(baseName);
+      }
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (ext === 'jsonl' || ext === 'json' || ext === 'csv') {
+        setDsFormat(ext);
+      } else if (ext === 'txt') {
+        setDsFormat('text');
+      }
+      if (!dsSourceName.trim()) {
+        setDsSourceName(file.name.slice(0, 120));
+      }
+    } catch {
+      setError('ไม่สามารถอ่านไฟล์ชุดข้อมูลที่เลือกได้');
+    }
+  }
+
   async function handleIngestDataset(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setDsMessage(null);
     try {
       const res = await apiRequest<{
-        dataset: { name: string; train_count: number; val_count: number; test_count: number; manifest_hash: string };
+        dataset: {
+          id: string;
+          name: string;
+          train_count: number;
+          val_count: number;
+          test_count: number;
+          manifest_hash: string;
+          source_format?: string;
+        };
+        kg_proposal?: { id: string; triple_count: number; status: string } | null;
         deduplicated_removed: number;
       }>('/api/developer/datasets', {
         method: 'POST',
         token,
-        body: { name: dsName, content: dsContent },
+        body: {
+          name: dsName,
+          content: dsContent,
+          provenance: dsProvenance.trim() || 'developer_manual_corpus',
+          sourceName: dsSourceName.trim() || dsProvenance.trim() || 'developer_manual_corpus',
+          license: dsLicense.trim() || 'INTERNAL_VERIFIED',
+          format: dsFormat,
+          extractKg: dsExtractKg,
+        },
       });
+      const kgNote = res.kg_proposal
+        ? ` · เสนอเข้า KG Gate ${res.kg_proposal.triple_count} triples (${res.kg_proposal.status})`
+        : '';
       setDsMessage(
-        `นำเข้า "${res.dataset.name}" แล้ว: Train ${res.dataset.train_count} / Val ${res.dataset.val_count} / Test ${res.dataset.test_count} (คัดกรองซ้ำ ${res.deduplicated_removed} รายการ)`
+        `นำเข้า "${res.dataset.name}" (${res.dataset.source_format || dsFormat}) แล้ว: Train ${res.dataset.train_count} / Val ${res.dataset.val_count} / Test ${res.dataset.test_count} · SHA-256 ${res.dataset.manifest_hash.slice(0, 12)}… (คัดกรองซ้ำ ${res.deduplicated_removed} รายการ)${kgNote}`
       );
       setDsName('');
       setDsContent('');
@@ -191,6 +243,35 @@ export function SettingsView({
       }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'นำเข้าชุดข้อมูลไม่สำเร็จ');
+    }
+  }
+
+  async function handleVerifyDatasetChecksum(datasetId: string) {
+    setVerifyingDsId(datasetId);
+    setError(null);
+    try {
+      const res = await apiRequest<DatasetVerifyResult>(`/api/developer/datasets/${datasetId}/verify`, {
+        token,
+      });
+      setDsVerifyMap((prev) => ({ ...prev, [datasetId]: res }));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'ตรวจสอบ Checksum ชุดข้อมูลไม่สำเร็จ');
+    } finally {
+      setVerifyingDsId(null);
+    }
+  }
+
+  async function handleKgProposalDecision(proposalId: string, decision: 'approve' | 'reject') {
+    setError(null);
+    try {
+      await apiRequest(`/api/admin/kg-proposals/${proposalId}/decide`, {
+        method: 'POST',
+        token,
+        body: { decision },
+      });
+      await loadAdmin();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'ดำเนินการ KG Approval Gate ไม่สำเร็จ');
     }
   }
 
@@ -678,20 +759,74 @@ export function SettingsView({
                     คัดกรองข้อมูลซ้ำ ตรวจ Data Leakage และสร้างแฮช SHA-256 (อย่างน้อย 5 บรรทัด)
                   </p>
                   <form onSubmit={handleIngestDataset} className="mt-4 space-y-3">
-                    <input
-                      type="text"
-                      required
-                      value={dsName}
-                      onChange={(e) => setDsName(e.target.value)}
-                      placeholder="ชื่อชุดข้อมูล (เช่น zyrquen-thai-v1)"
-                      className="h-11 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
-                    />
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <input
+                        type="text"
+                        required
+                        aria-label="ชื่อชุดข้อมูลนักพัฒนา"
+                        value={dsName}
+                        onChange={(e) => setDsName(e.target.value)}
+                        placeholder="ชื่อชุดข้อมูล (เช่น zyrquen-thai-v1)"
+                        className="h-11 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
+                      />
+                      <select
+                        aria-label="รูปแบบไฟล์ชุดข้อมูล"
+                        value={dsFormat}
+                        onChange={(e) => setDsFormat(e.target.value as 'auto' | 'text' | 'jsonl' | 'json' | 'csv')}
+                        className="h-11 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] focus:border-[var(--color-focus)] focus:outline-none"
+                      >
+                        <option value="auto">ตรวจจับรูปแบบอัตโนมัติ (Auto)</option>
+                        <option value="text">ข้อความทีละบรรทัด (TXT)</option>
+                        <option value="jsonl">JSON Lines (.jsonl)</option>
+                        <option value="json">JSON Array / Pre-split (.json)</option>
+                        <option value="csv">CSV พร้อมหัวคอลัมน์ (.csv)</option>
+                      </select>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <input
+                        type="text"
+                        aria-label="ที่มาของข้อมูล (Provenance)"
+                        value={dsProvenance}
+                        onChange={(e) => setDsProvenance(e.target.value)}
+                        placeholder="ที่มาข้อมูล (เช่น internal_docs_2026)"
+                        className="h-10 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
+                      />
+                      <input
+                        type="text"
+                        aria-label="สัญญาอนุญาต (License)"
+                        value={dsLicense}
+                        onChange={(e) => setDsLicense(e.target.value)}
+                        placeholder="License (เช่น INTERNAL_VERIFIED, CC-BY-4.0)"
+                        className="h-10 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--color-text-secondary)]">
+                      <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 hover:border-[var(--color-accent)]">
+                        <span>โหลดไฟล์ (.txt, .jsonl, .json, .csv)</span>
+                        <input
+                          type="file"
+                          accept=".txt,.jsonl,.json,.csv"
+                          onChange={(e) => void handleDatasetFileSelect(e)}
+                          className="hidden"
+                        />
+                      </label>
+                      <label className="inline-flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={dsExtractKg}
+                          onChange={(e) => setDsExtractKg(e.target.checked)}
+                          className="h-4 w-4 accent-[var(--color-primary)]"
+                        />
+                        <span>สกัดข้อเท็จจริงเข้าคิวรออนุมัติ KG Gate</span>
+                      </label>
+                    </div>
                     <textarea
                       rows={4}
                       required
+                      aria-label="เนื้อหาชุดข้อมูลนักพัฒนา"
                       value={dsContent}
                       onChange={(e) => setDsContent(e.target.value)}
-                      placeholder="วางประโยคสำหรับฝึกบรรทัดละ 1 รายการ (อย่างน้อย 5 บรรทัดที่ไม่ซ้ำกัน)..."
+                      placeholder="วางข้อมูลจริง (TXT / JSONL / JSON / CSV) อย่างน้อย 5 รายการที่ไม่ซ้ำกัน..."
                       className="w-full resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                     />
                     {dsMessage && <p className="text-xs text-[var(--color-accent)]">{dsMessage}</p>}
@@ -709,31 +844,61 @@ export function SettingsView({
                         ชุดข้อมูลที่ลงทะเบียน ({devData!.datasets.length} ชุด)
                       </p>
                       <div className="mt-2 divide-y divide-[var(--color-border)]">
-                        {devData!.datasets.map((ds) => (
-                          <div
-                            key={ds.id}
-                            className="flex items-center justify-between gap-3 py-2.5"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-xs font-semibold text-[var(--color-text)]">
-                                {ds.name}
-                              </p>
-                              <p className="font-mono text-[11px] text-[var(--color-text-secondary)] tabular-nums">
-                                T:{ds.train_count}/V:{ds.val_count}/T:{ds.test_count} ·{' '}
-                                {ds.leakage_detected ? 'พบ Leakage' : 'Leakage ผ่าน'} ·{' '}
-                                {ds.manifest_hash.slice(0, 8)}
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              disabled={Boolean(ds.leakage_detected) || requestingTrainId === ds.id}
-                              onClick={() => void handleRequestTrainingGate(ds.id, ds.name)}
-                              className="min-h-[36px] shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-accent)] hover:border-[var(--color-accent)] disabled:opacity-40 whitespace-nowrap"
+                        {devData!.datasets.map((ds) => {
+                          const verifyRes = dsVerifyMap[ds.id];
+                          return (
+                            <div
+                              key={ds.id}
+                              className="flex flex-wrap items-center justify-between gap-2 py-2.5"
                             >
-                              {requestingTrainId === ds.id ? 'กำลังส่ง...' : 'ส่งคำขอฝึก (Gate)'}
-                            </button>
-                          </div>
-                        ))}
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-xs font-semibold text-[var(--color-text)]">
+                                  {ds.name}
+                                </p>
+                                <p className="font-mono text-[11px] text-[var(--color-text-secondary)] tabular-nums">
+                                  T:{ds.train_count}/V:{ds.val_count}/T:{ds.test_count} ·{' '}
+                                  {ds.source_format || 'text'} · {ds.license || 'INTERNAL_VERIFIED'} ·{' '}
+                                  {ds.leakage_detected ? 'พบ Leakage' : 'Leakage ผ่าน'} ·{' '}
+                                  {ds.manifest_hash.slice(0, 10)}
+                                </p>
+                                {ds.provenance && (
+                                  <p className="truncate text-[11px] text-[var(--color-text-muted)]">
+                                    ที่มา: {ds.provenance}
+                                  </p>
+                                )}
+                                {verifyRes && (
+                                  <p
+                                    className={`mt-0.5 font-mono text-[11px] ${
+                                      verifyRes.verified ? 'text-[var(--color-success)]' : 'text-[var(--color-danger)]'
+                                    }`}
+                                  >
+                                    {verifyRes.verified
+                                      ? `Checksum VERIFIED (${verifyRes.disk_verified ? 'Disk+DB' : 'DB'})`
+                                      : `Checksum FAILED: ${(verifyRes.errors || [verifyRes.error || 'Mismatch']).join(', ')}`}
+                                  </p>
+                                )}
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={verifyingDsId === ds.id}
+                                  onClick={() => void handleVerifyDatasetChecksum(ds.id)}
+                                  className="min-h-[34px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-[11px] font-medium text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] disabled:opacity-40 whitespace-nowrap"
+                                >
+                                  {verifyingDsId === ds.id ? 'กำลังตรวจ...' : 'ตรวจ Checksum'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(ds.leakage_detected) || requestingTrainId === ds.id}
+                                  onClick={() => void handleRequestTrainingGate(ds.id, ds.name)}
+                                  className="min-h-[34px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-accent)] hover:border-[var(--color-accent)] disabled:opacity-40 whitespace-nowrap"
+                                >
+                                  {requestingTrainId === ds.id ? 'กำลังส่ง...' : 'ส่งคำขอฝึก (Gate)'}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -1360,6 +1525,28 @@ export function SettingsView({
                           placeholder="ชื่อชุดข้อมูล (เช่น zyrquen-corpus-v1)"
                           className="h-10 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
                         />
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <input
+                            type="text"
+                            aria-label="ที่มาข้อมูล Admin"
+                            value={dsProvenance}
+                            onChange={(e) => setDsProvenance(e.target.value)}
+                            placeholder="ที่มาข้อมูล (Provenance)"
+                            className="h-9 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
+                          />
+                          <select
+                            aria-label="รูปแบบชุดข้อมูล Admin"
+                            value={dsFormat}
+                            onChange={(e) => setDsFormat(e.target.value as 'auto' | 'text' | 'jsonl' | 'json' | 'csv')}
+                            className="h-9 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs text-[var(--color-text)] focus:border-[var(--color-focus)] focus:outline-none"
+                          >
+                            <option value="auto">Auto (TXT/JSONL/JSON/CSV)</option>
+                            <option value="text">Text</option>
+                            <option value="jsonl">JSONL</option>
+                            <option value="json">JSON</option>
+                            <option value="csv">CSV</option>
+                          </select>
+                        </div>
                         <textarea
                           rows={4}
                           required
@@ -1541,6 +1728,92 @@ export function SettingsView({
                   </div>
                 </section>
               </div>
+
+              <section className="rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 sm:p-6">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-semibold text-[var(--color-text)]">
+                      คิวอนุมัติจัดเก็บ Knowledge Graph จากชุดข้อมูล (KG Ingestion Gate)
+                    </h3>
+                    <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                      ชุดข้อมูลที่นำเข้าจะถูกตรวจ Provenance, SHA-256 และความขัดแย้งก่อนจัดเก็บเข้า Knowledge Graph โดยไม่ข้าม Approval Gate
+                    </p>
+                  </div>
+                  <span className="font-mono text-xs text-[var(--color-text-secondary)]">
+                    รออนุมัติ {adminData?.pending_kg_proposals?.length ?? 0} รายการ
+                  </span>
+                </div>
+                <div className="mt-4 divide-y divide-[var(--color-border)]">
+                  {(adminData?.pending_kg_proposals || []).length === 0 ? (
+                    <p className="py-3 text-sm text-[var(--color-text-secondary)]">
+                      ไม่มีข้อเสนอ Knowledge Graph จากชุดข้อมูลที่รอการอนุมัติในขณะนี้
+                    </p>
+                  ) : (
+                    adminData!.pending_kg_proposals!.map((prop) => {
+                      let previewTriples: Array<{ subject: string; relation: string; object: string; has_contradiction?: boolean }> = [];
+                      let contradictionsCount = 0;
+                      try {
+                        previewTriples = JSON.parse(prop.triples_json || '[]') as typeof previewTriples;
+                        const cArr = JSON.parse(prop.contradictions_json || '[]') as unknown[];
+                        contradictionsCount = Array.isArray(cArr) ? cArr.length : 0;
+                      } catch {
+                        // ignore malformed preview JSON
+                      }
+                      return (
+                        <div key={prop.id} className="flex flex-col gap-3 py-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <p className="text-sm font-semibold text-[var(--color-text)]">
+                                {prop.dataset_name} ({prop.triple_count} triples)
+                              </p>
+                              <p className="font-mono text-[11px] text-[var(--color-text-secondary)]">
+                                ที่มา: {prop.provenance} · License: {prop.license} · SHA-256: {prop.manifest_hash.slice(0, 12)}…
+                              </p>
+                            </div>
+                            {contradictionsCount > 0 && (
+                              <span className="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning-bg)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-warning)]">
+                                พบความขัดแย้ง {contradictionsCount} จุด
+                              </span>
+                            )}
+                          </div>
+                          {previewTriples.length > 0 && (
+                            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5 font-mono text-[11px] text-[var(--color-text-secondary)]">
+                              {previewTriples.slice(0, 3).map((t, i) => (
+                                <div key={`${prop.id}-${i}`} className="truncate">
+                                  {t.subject} → {t.relation} → {t.object}
+                                </div>
+                              ))}
+                              {previewTriples.length > 3 && (
+                                <div className="mt-0.5 text-[var(--color-text-muted)]">
+                                  …และอีก {previewTriples.length - 3} triples
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleKgProposalDecision(prop.id, 'approve')}
+                              className="flex h-9 items-center gap-1.5 rounded-xl bg-[var(--color-primary)] px-3.5 text-xs font-medium text-white hover:bg-[var(--color-primary-hover)]"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              <span>อนุมัติจัดเก็บลง Knowledge Graph</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleKgProposalDecision(prop.id, 'reject')}
+                              className="flex h-9 items-center gap-1.5 rounded-xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-3.5 text-xs font-medium text-[var(--color-danger)] hover:opacity-90"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                              <span>ปฏิเสธ</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </section>
 
               <details
                 open={(adminData?.pending_tool_invocations || []).length > 0}

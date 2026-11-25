@@ -588,5 +588,113 @@ describe('Isolated 6-Step Non-Skippable Native Training Pipeline Gate E2E', () =
     });
     expect(expRes.status).toBe(201);
   }, 60_000);
+
+  it('Ingests CSV/JSONL real datasets with SHA-256 checksum verification and enforces Admin Approval Gate for Knowledge Graph commits', async () => {
+    // Login as already-initialized admin
+    const loginRes = await fetch(`${gateBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'gate-admin@zyrquen.local',
+        password: 'StrongPassword123!',
+      }),
+    });
+    expect(loginRes.status).toBe(200);
+    const { token: adminToken } = (await loginRes.json()) as { token: string };
+    const adminHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminToken}`,
+    };
+
+    // Register non-admin developer user to verify RBAC enforcement on KG Approval Gate
+    const devRegRes = await fetch(`${gateBaseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'dev-kg@zyrquen.local',
+        displayName: 'Dev Contributor',
+        password: 'DevPassword123!',
+      }),
+    });
+    expect(devRegRes.status).toBe(201);
+    const { token: devToken } = (await devRegRes.json()) as { token: string };
+    const devHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${devToken}`,
+    };
+
+    const csvPayload = [
+      'subject,relation,object',
+      'ZyrquenPipeline,enforces,ChecksumVerification',
+      'ZyrquenPipeline,detects,TemplateLeakage',
+      'ZyrquenPipeline,stages,KgApprovalGate',
+      'DatasetBundle,writes,ImmutableManifest',
+      'GovernanceGate,protects,KnowledgeGraph',
+    ].join('\n');
+
+    const ingRes = await fetch(`${gateBaseUrl}/api/developer/datasets`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({
+        name: 'e2e-csv-kg-corpus',
+        format: 'csv',
+        provenance: 'e2e_verified_spec',
+        sourceName: 'spec.csv',
+        license: 'CC-BY-4.0',
+        content: csvPayload,
+      }),
+    });
+    expect(ingRes.status).toBe(201);
+    const ingJson = (await ingRes.json()) as {
+      ok: boolean;
+      dataset: { id: string; source_format: string; manifest_hash: string };
+      checksum: { content_sha256: string; manifest_sha256: string };
+      kg_proposal: { id: string; status: string; triple_count: number };
+    };
+    expect(ingJson.ok).toBe(true);
+    expect(ingJson.dataset.source_format).toBe('csv');
+    expect(ingJson.checksum.content_sha256).toHaveLength(64);
+    expect(ingJson.kg_proposal.status).toBe('PENDING_APPROVAL');
+    expect(ingJson.kg_proposal.triple_count).toBe(5);
+
+    // Real SHA-256 verification endpoint passes
+    const verifyRes = await fetch(`${gateBaseUrl}/api/developer/datasets/${ingJson.dataset.id}/verify`, {
+      headers: devHeaders,
+    });
+    expect(verifyRes.status).toBe(200);
+    const verifyJson = (await verifyRes.json()) as { verified: boolean; disk_verified: boolean };
+    expect(verifyJson.verified).toBe(true);
+    expect(verifyJson.disk_verified).toBe(true);
+
+    // Before Admin approval: none of the proposed KG triples exist in /api/knowledge
+    const preKgRes = await fetch(`${gateBaseUrl}/api/knowledge`, { headers: devHeaders });
+    const preKgJson = (await preKgRes.json()) as { triples: Array<{ subject: string }> };
+    expect(preKgJson.triples.some((t) => t.subject === 'ZyrquenPipeline')).toBe(false);
+
+    // Non-admin developer MUST receive 403 when trying to approve KG Gate
+    const forbiddenApprove = await fetch(`${gateBaseUrl}/api/admin/kg-proposals/${ingJson.kg_proposal.id}/decide`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({ decision: 'approve' }),
+    });
+    expect(forbiddenApprove.status).toBe(403);
+
+    // Admin approves KG Gate proposal -> triples committed with full provenance
+    const adminApprove = await fetch(`${gateBaseUrl}/api/admin/kg-proposals/${ingJson.kg_proposal.id}/decide`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ decision: 'approve' }),
+    });
+    expect(adminApprove.status).toBe(200);
+    const approveBody = (await adminApprove.json()) as { ok: boolean; committed_triples: number };
+    expect(approveBody.ok).toBe(true);
+    expect(approveBody.committed_triples).toBe(5);
+
+    const postKgRes = await fetch(`${gateBaseUrl}/api/knowledge`, { headers: devHeaders });
+    const postKgJson = (await postKgRes.json()) as { triples: Array<{ subject: string; source: string }> };
+    const committed = postKgJson.triples.filter((t) => t.subject === 'ZyrquenPipeline');
+    expect(committed.length).toBe(3);
+    expect(committed[0].source).toContain('dataset:e2e-csv-kg-corpus|e2e_verified_spec');
+  }, 60_000);
 });
 

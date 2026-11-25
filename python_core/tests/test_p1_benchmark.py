@@ -991,5 +991,151 @@ class ExpandedNativeCapabilitiesTests(unittest.TestCase):
             self.assertTrue("supports" in dev_json or "provides" in dev_json)
 
 
+class DatasetIngestionPipelineTests(unittest.TestCase):
+    def test_real_formats_manifest_checksum_tamper_and_leakage_layers(self) -> None:
+        import json
+        import dataset_ingestion as di  # noqa: E402
+
+        with isolated_core_env():
+            # 1. JSONL ingestion with PII redaction, provenance, license, and disk manifest bundle
+            jsonl_lines = [
+                json.dumps({"text": "SQLite uses WAL journaling for concurrent analytics contact ops@zyrquen.org"}),
+                json.dumps({"text": "PostgreSQL supports MVCC snapshots across distributed transactions"}),
+                json.dumps({"text": "Rust enforces memory ownership without garbage collection pauses"}),
+                json.dumps({"text": "DuckDB provides columnar execution over parquet partitions"}),
+                json.dumps({"subject": "NativeCore", "relation": "stores", "object": "ProvenanceManifest"}),
+                json.dumps({"input": "verify integrity", "target": "recompute sha256 digest"}),
+            ]
+            ing = zc.handle_ingest_dataset({
+                "name": "real-multi-format-v1",
+                "format": "jsonl",
+                "provenance": "engineering_field_notes_2026",
+                "source_name": "field_notes.jsonl",
+                "license": "CC-BY-4.0",
+                "content": "\n".join(jsonl_lines),
+                "user_id": "dev-1",
+            })
+            self.assertTrue(ing["ok"], ing)
+            ds = ing["dataset"]
+            self.assertEqual(ds["source_format"], "jsonl")
+            self.assertEqual(ds["license"], "CC-BY-4.0")
+            self.assertEqual(ds["leakage_detected"], 0)
+            self.assertEqual(len(ing["checksum"]["content_sha256"]), 64)
+            self.assertEqual(len(ing["checksum"]["manifest_sha256"]), 64)
+            bundle_dir = Path(ds["artifact_dir"])
+            self.assertTrue((bundle_dir / "manifest.json").is_file())
+            self.assertTrue((bundle_dir / "train.jsonl").is_file())
+            self.assertNotIn("ops@zyrquen.org", (bundle_dir / "train.jsonl").read_text(encoding="utf-8") + (bundle_dir / "val.jsonl").read_text(encoding="utf-8") + (bundle_dir / "test.jsonl").read_text(encoding="utf-8"))
+
+            # Verify checksum succeeds cleanly
+            conn = zc.get_db()
+            v_ok = di.verify_dataset_integrity(conn, ds["id"])
+            self.assertTrue(v_ok["verified"], v_ok)
+            self.assertTrue(v_ok["disk_verified"])
+
+            # Workflow data_pipeline check passes while untouched
+            wf_ok = zc.handle_run_workflow({"group_id": "data_pipeline", "user_id": "dev-1"})
+            self.assertEqual(wf_ok["run"]["status"], "COMPLETED")
+
+            # Tampering on-disk split file MUST fail checksum verification & fail data_pipeline workflow!
+            (bundle_dir / "train.jsonl").write_text('{"text":"tampered"}\n', encoding="utf-8")
+            v_bad = di.verify_dataset_integrity(conn, ds["id"])
+            self.assertFalse(v_bad["verified"])
+            self.assertTrue(any("Checksum mismatch" in e for e in v_bad["errors"]))
+            wf_bad = zc.handle_run_workflow({"group_id": "data_pipeline", "user_id": "dev-1"})
+            self.assertEqual(wf_bad["run"]["status"], "FAILED")
+            conn.close()
+
+        # 2. Pre-split JSON template leakage & benchmark contamination detection
+        with isolated_core_env():
+            from tests.benchmark_fixtures import HELD_OUT_NEGATIVE_PROMPTS  # noqa: E402
+
+            heldout_sample = HELD_OUT_NEGATIVE_PROMPTS[0]["prompt"]
+            contaminated = zc.handle_ingest_dataset({
+                "name": "leaked-template-corpus",
+                "provenance": "qa_audit_2026",
+                "splits": {
+                    "train": [
+                        {"text": "Invoice customer record 1001 verified in accounting ledger"},
+                        {"text": "Kernel scheduler allocates thread pool 8 workers cleanly"},
+                        {"text": "Storage engine flushes write ahead log segment cleanly"},
+                    ],
+                    "val": [
+                        {"text": "Invoice customer record 2002 verified in accounting ledger"},
+                    ],
+                    "test": [
+                        {"text": heldout_sample},
+                    ],
+                },
+                "user_id": "dev-1",
+            })
+            self.assertTrue(contaminated["ok"])
+            self.assertEqual(contaminated["dataset"]["leakage_detected"], 1)
+            self.assertEqual(contaminated["dataset"]["status"], "LEAKAGE_BLOCKED")
+            viols = contaminated["leakage_report"]["violations"]
+            self.assertTrue(any(v.startswith("template_leakage:") for v in viols), viols)
+            self.assertTrue(any(v.startswith("eval_contamination:") for v in viols), viols)
+            # KG proposal from leaked dataset MUST be blocked automatically
+            if contaminated.get("kg_proposal"):
+                self.assertEqual(contaminated["kg_proposal"]["status"], "BLOCKED")
+
+    def test_csv_kg_extraction_respects_approval_gate_without_bypassing_training_gate(self) -> None:
+        with isolated_core_env():
+            csv_content = "\n".join([
+                "subject,relation,object",
+                "ZyrquenIngest,verifies,ChecksumSHA256",
+                "ZyrquenIngest,detects,TemplateLeakage",
+                "ZyrquenIngest,stages,KnowledgeGraphGate",
+                "DataBundle,uses,ImmutableManifest",
+                "ApprovalGate,guards,NativeTraining",
+            ])
+            ing = zc.handle_ingest_dataset({
+                "name": "kg-csv-real",
+                "format": "csv",
+                "provenance": "verified_spec_2026",
+                "license": "Apache-2.0",
+                "content": csv_content,
+                "user_id": "dev-1",
+            })
+            self.assertTrue(ing["ok"])
+            prop = ing.get("kg_proposal")
+            self.assertIsNotNone(prop)
+            self.assertEqual(prop["status"], "PENDING_APPROVAL")
+            self.assertEqual(prop["triple_count"], 5)
+
+            # Before Admin Approval: 0 triples committed to knowledge_triples!
+            conn = zc.get_db()
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM knowledge_triples").fetchone()[0], 0)
+            conn.close()
+
+            # Admin approves KG proposal -> committed with provenance tag
+            decided = zc.dispatch_command(
+                "decide_kg_proposal",
+                {
+                    "proposal_id": prop["id"],
+                    "decision": "approve",
+                    "admin_email": "admin@zyrquen.local",
+                    "admin_id": "admin-1",
+                },
+            )
+            self.assertTrue(decided["ok"])
+            self.assertEqual(decided["committed_triples"], 5)
+
+            conn = zc.get_db()
+            triples = [dict(r) for r in conn.execute("SELECT * FROM knowledge_triples").fetchall()]
+            self.assertEqual(len(triples), 5)
+            self.assertTrue(all("dataset:kg-csv-real|verified_spec_2026" in t["source"] for t in triples))
+            conn.close()
+
+            # CRITICAL: Approving KG storage NEVER bypasses the 6-step native_training gate (still BLOCKED_NO_BASELINE)
+            train_attempt = zc.handle_run_workflow({
+                "group_id": "native_training",
+                "user_id": "dev-1",
+                "dataset_id": ing["dataset"]["id"],
+            })
+            self.assertFalse(train_attempt["ok"])
+            self.assertIn("Baseline", train_attempt["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

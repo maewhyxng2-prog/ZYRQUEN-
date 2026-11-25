@@ -370,7 +370,7 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
 
   const app = express();
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({ limit: '2mb' }));
 
   // Platform-independent versioned API routing: /api/v1/* -> /api/*
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -1322,19 +1322,48 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
 
   app.post('/api/developer/datasets', requireAuth, async (req: AuthedRequest, res: Response) => {
     const name = String(req.body?.name || '').trim().slice(0, 80);
-    const content = String(req.body?.content || '').slice(0, 200000);
-    const provenance = String(req.body?.provenance || 'developer_manual_corpus').trim().slice(0, 120);
-    if (!name || !content) {
-      res.status(400).json({ error: 'Dataset name and content are required.' });
+    const content = req.body?.content !== undefined ? String(req.body.content).slice(0, 1500000) : '';
+    const splits =
+      req.body?.splits && typeof req.body.splits === 'object' && !Array.isArray(req.body.splits)
+        ? req.body.splits
+        : undefined;
+    const provenance = String(req.body?.provenance || 'developer_manual_corpus').trim().slice(0, 160);
+    const sourceName = String(
+      req.body?.sourceName || req.body?.source_name || provenance || 'developer_manual_corpus'
+    )
+      .trim()
+      .slice(0, 120);
+    const license = String(req.body?.license || 'INTERNAL_VERIFIED').trim().slice(0, 120);
+    const format = String(req.body?.format || 'auto').trim().toLowerCase().slice(0, 24);
+    const extractKg = req.body?.extractKg ?? req.body?.extract_kg ?? true;
+    const redactPii = req.body?.redactPii ?? req.body?.redact_pii ?? true;
+    const strictEntityIsolation =
+      req.body?.strictEntityIsolation ?? req.body?.strict_entity_isolation ?? false;
+
+    if (!name || (!content && !splits)) {
+      res.status(400).json({ error: 'Dataset name and content (or splits) are required.' });
       return;
     }
     const result = await runPythonScript<{
       ok: boolean;
-      dataset?: { id: string; name: string; total_records: number };
+      dataset?: { id: string; name: string; total_records: number; status?: string };
+      kg_proposal?: { id: string; status: string; triple_count: number } | null;
       error?: string;
     }>('zyrquen_core.py', {
       cmd: 'ingest_dataset',
-      payload: { name, content, provenance, user_id: req.user!.id },
+      payload: {
+        name,
+        content,
+        splits,
+        provenance,
+        source_name: sourceName,
+        license,
+        format,
+        extract_kg: Boolean(extractKg),
+        redact_pii: Boolean(redactPii),
+        strict_entity_isolation: Boolean(strictEntityIsolation),
+        user_id: req.user!.id,
+      },
     });
     if (!result.ok) {
       res.status(400).json({ error: result.error || 'Dataset ingestion failed' });
@@ -1347,10 +1376,38 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
         actor_email: req.user!.email,
         action: 'DATASET_INGEST',
         target: String(result.dataset?.id || name),
-        outcome: `READY (${result.dataset?.total_records ?? 0} records)`,
+        outcome: `${String(result.dataset?.status || 'READY')} (${result.dataset?.total_records ?? 0} records)`,
       },
     });
     res.status(201).json(result);
+  });
+
+  app.get('/api/developer/datasets/:id/verify', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const datasetId = String(req.params.id || '').trim().slice(0, 64);
+    if (!datasetId) {
+      res.status(400).json({ error: 'Dataset ID is required.' });
+      return;
+    }
+    const result = await runPythonScript<{ ok: boolean; verified?: boolean; error?: string }>(
+      'zyrquen_core.py',
+      {
+        cmd: 'verify_dataset',
+        payload: { dataset_id: datasetId },
+      }
+    );
+    if (!result.ok && result.error === 'Dataset not found') {
+      res.status(404).json({ error: result.error });
+      return;
+    }
+    res.json(result);
+  });
+
+  app.get('/api/developer/kg-proposals', requireAuth, async (_req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'kg_proposals_list',
+      payload: {},
+    });
+    res.json(data);
   });
 
   app.post('/api/developer/evaluate', requireAuth, async (req: AuthedRequest, res: Response) => {
@@ -1833,6 +1890,47 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
           action: `EXPERIMENT_GATE_${decision.toUpperCase()}`,
           target: expId,
           outcome: String(result.experiment?.approval_status || decision.toUpperCase()),
+        },
+      });
+      res.json(result);
+    }
+  );
+
+  app.post(
+    '/api/admin/kg-proposals/:id/decide',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const proposalId = String(req.params.id || '').trim().slice(0, 64);
+      const decision = req.body?.decision === 'reject' ? 'reject' : 'approve';
+      const reason = req.body?.reason ? String(req.body.reason).trim().slice(0, 240) : undefined;
+      const result = await runPythonScript<{
+        ok: boolean;
+        error?: string;
+        proposal?: Record<string, unknown>;
+        committed_triples?: number;
+      }>('zyrquen_core.py', {
+        cmd: 'decide_kg_proposal',
+        payload: {
+          proposal_id: proposalId,
+          decision,
+          admin_email: req.user!.email,
+          admin_id: req.user!.id,
+          reason,
+        },
+      });
+      if (!result.ok) {
+        res.status(400).json({ error: result.error || 'Knowledge Graph proposal decision failed' });
+        return;
+      }
+      await runPythonScript('db_bridge.py', {
+        action: 'log_audit',
+        payload: {
+          actor_id: req.user!.id,
+          actor_email: req.user!.email,
+          action: `KG_INGEST_GATE_${decision.toUpperCase()}`,
+          target: proposalId,
+          outcome: String(result.proposal?.status || decision.toUpperCase()),
         },
       });
       res.json(result);

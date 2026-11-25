@@ -178,4 +178,3 @@ async def get_evaluation_run(
             detail="Forbidden",
         )
     return _serialize_run(run)
-
