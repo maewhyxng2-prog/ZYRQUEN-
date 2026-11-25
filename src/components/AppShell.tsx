@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   ArrowLeft,
-  BrainCircuit,
   Home,
   MessageSquareText,
   FolderKanban,
@@ -9,7 +8,6 @@ import {
   ChartNoAxesCombined,
   Files,
   Moon,
-  Settings,
   Sun,
   User as UserIcon,
 } from 'lucide-react';
