@@ -234,7 +234,7 @@ def test_training_start_enforces_tier2_approval_when_artifacts_configured(api_cl
             workflow_key="training.native_controlled_run",
             workflow_version="1.0.0",
             trigger_type="manual",
-            trigger_payload={},
+            trigger_payload={"dataset_version": "0.1.0"},
             steps=[{"step_key": "execute_training", "handler_key": "training.execute"}],
             requested_by_user_id=str(user.id),
         )
@@ -248,7 +248,7 @@ def test_training_start_enforces_tier2_approval_when_artifacts_configured(api_cl
                 action_type="training.execute",
             ),
             requested_by_user_id=str(user.id),
-            scope="dataset:0.1.0",
+            scope="training.native_controlled_run:execute_training",
         )
         approved = isolated_engine.governance.decide_approval(
             pending["id"],
@@ -269,7 +269,7 @@ def test_training_start_enforces_tier2_approval_when_artifacts_configured(api_cl
                 action_type="training.execute",
             ),
             requested_by_user_id=str(user.id),
-            scope="dataset:another-version",
+            scope="training.native_controlled_run:execute_training:other",
         )
         wrong_scope_approved = isolated_engine.governance.decide_approval(
             wrong_scope_pending["id"],
@@ -296,7 +296,7 @@ def test_training_start_enforces_tier2_approval_when_artifacts_configured(api_cl
                 action_type="training.execute",
             ),
             requested_by_user_id=str(user.id),
-            scope="dataset:0.1.0",
+            scope="training.native_controlled_run:unrelated_step",
         )
         wrong_step_approved = isolated_engine.governance.decide_approval(
             wrong_step_pending["id"],
