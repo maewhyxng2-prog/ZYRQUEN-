@@ -78,6 +78,46 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
       Authorization: `Bearer ${setupJson.token}`,
     };
 
+    // Workspace projects use authenticated, owner-scoped persistent API storage.
+    const projectCreateRes = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ name: 'E2E Project', description: 'Persistent workspace project' }),
+    });
+    expect(projectCreateRes.status).toBe(201);
+    const projectCreateJson = (await projectCreateRes.json()) as {
+      project: { id: string; name: string; description: string; status: string };
+    };
+    expect(projectCreateJson.project).toMatchObject({
+      name: 'E2E Project',
+      description: 'Persistent workspace project',
+      status: 'active',
+    });
+    const projectId = projectCreateJson.project.id;
+
+    const projectListRes = await fetch(`${baseUrl}/api/projects`, { headers: authHeaders });
+    expect(projectListRes.status).toBe(200);
+    const projectListJson = (await projectListRes.json()) as { projects: Array<{ id: string }> };
+    expect(projectListJson.projects.some((project) => project.id === projectId)).toBe(true);
+
+    const projectUpdateRes = await fetch(`${baseUrl}/api/projects/${projectId}`, {
+      method: 'PATCH',
+      headers: authHeaders,
+      body: JSON.stringify({ name: 'E2E Project Updated', description: 'Archived project', status: 'archived' }),
+    });
+    expect(projectUpdateRes.status).toBe(200);
+    const projectUpdateJson = (await projectUpdateRes.json()) as { project: { name: string; status: string } };
+    expect(projectUpdateJson.project).toMatchObject({ name: 'E2E Project Updated', status: 'archived' });
+
+    const projectDeleteRes = await fetch(`${baseUrl}/api/projects/${projectId}`, {
+      method: 'DELETE',
+      headers: authHeaders,
+    });
+    expect(projectDeleteRes.status).toBe(200);
+    const projectListAfterDelete = await fetch(`${baseUrl}/api/projects`, { headers: authHeaders });
+    const projectListAfterDeleteJson = (await projectListAfterDelete.json()) as { projects: Array<{ id: string }> };
+    expect(projectListAfterDeleteJson.projects.some((project) => project.id === projectId)).toBe(false);
+
     const adminOverviewInit = await fetch(`${baseUrl}/api/admin/overview`, {
       headers: authHeaders,
     });
