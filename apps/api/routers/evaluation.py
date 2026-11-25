@@ -76,7 +76,7 @@ def _resolve_dataset_dir(dataset_id: str) -> Path | None:
 
 
 @router.post("/runs")
-async def trigger_evaluation(
+def trigger_evaluation(
     payload: EvaluationRunCreate | None = Body(default=None),
     model_version: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
@@ -182,7 +182,7 @@ async def trigger_evaluation(
 
 
 @router.get("/runs")
-async def list_evaluations(
+def list_evaluations(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
@@ -204,7 +204,7 @@ async def list_evaluations(
 
 
 @router.get("/runs/{run_id}")
-async def get_evaluation_run(
+def get_evaluation_run(
     run_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
