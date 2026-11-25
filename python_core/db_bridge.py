@@ -846,14 +846,15 @@ def handle_action(action: str, payload: dict) -> dict:
                 (uid,),
             ).fetchall()
         ]
-        ws_files = list_workspace_files(DATA_DIR)
+        ws_files = list_workspace_files(DATA_DIR / uid)
         conn.close()
         return {"ok": True, "tools": tools, "invocations": invocations, "workspace_files": ws_files}
 
     if action == "tools_upload_file":
         filename = str(payload.get("filename", "")).strip()
         content = str(payload.get("content", ""))
-        res = save_workspace_file(DATA_DIR, filename, content)
+        uid = str(payload.get("user_id", ""))
+        res = save_workspace_file(DATA_DIR / uid, filename, content)
         conn.close()
         return res
 
@@ -865,7 +866,7 @@ def handle_action(action: str, payload: dict) -> dict:
         uid = str(payload.get("user_id", ""))
         res = invoke_tool_governed(
             conn,
-            DATA_DIR,
+            DATA_DIR / uid,
             tool_id,
             tool_input,
             user_id=uid,
