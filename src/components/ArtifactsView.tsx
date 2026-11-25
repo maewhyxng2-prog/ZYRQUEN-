@@ -62,8 +62,7 @@ export function ArtifactsView({ token }: { token: string }) {
         token,
         body: { input: { action: 'read', filename: file.name } },
       });
-      const invocation = result.invocation || {};
-      const output = (invocation.result || invocation.output || {}) as { content?: string };
+      const output = result.raw_output || {};
       if (!result.ok || typeof output.content !== 'string') {
         throw new Error(result.error || 'ไม่สามารถอ่านไฟล์ได้');
       }
