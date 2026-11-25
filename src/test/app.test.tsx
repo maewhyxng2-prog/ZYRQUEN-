@@ -36,6 +36,7 @@ function mockFetch(handlers: Record<string, (init?: RequestInit) => Response | P
 }
 
 describe('ZYRQUEN ประสบการณ์แอปพลิเคชันภาษาไทยเป็นหลัก', () => {  it('คัดลอกข้อความตอบกลับของ ZYRQUEN ได้จริงและแสดงสถานะสำเร็จ', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     render(
