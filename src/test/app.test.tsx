@@ -3070,13 +3070,14 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     }
   });
 
-  it('AppShell: แถบนำทางมือถือแสดง 4 แท็บหลักพร้อมเมนู "เพิ่มเติม" สำหรับวิเคราะห์และคลังผลงาน และปิดด้วย Escape', async () => {
+  it('AppShell: Desktop Sidebar ย่อ/ขยายได้, Mobile Bottom Bar มี 5 ปุ่มหลัก และ Side Drawer มีเมนูระบบครบ 5 รายการ', async () => {
     const { AppShell } = await import('../components/AppShell');
     const onNavigate = vi.fn();
 
-    render(
+    const { rerender } = render(
       <AppShell
         activeScreen="overview"
+        activeSettingsTab="account"
         screenTitle="ภาพรวม"
         user={{
           id: 'u1',
@@ -3088,32 +3089,101 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
         onNavigate={onNavigate}
         onBack={vi.fn()}
         onOpenProfile={vi.fn()}
+        onOpenCommandPalette={vi.fn()}
       >
         <div>เนื้อหาทดสอบ</div>
       </AppShell>
     );
 
+    // Desktop Left Sidebar: collapse & expand toggle + breadcrumb
+    const sidebar = screen.getByRole('complementary', { name: 'แถบนำทางด้านข้าง' });
+    expect(sidebar).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'เส้นทางตำแหน่ง' })).toBeInTheDocument();
+
+    const collapseBtn = screen.getByRole('button', { name: 'ย่อแถบด้านข้าง' });
+    fireEvent.click(collapseBtn);
+    expect(screen.getByRole('button', { name: 'ขยายแถบด้านข้าง' })).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(screen.getByRole('button', { name: 'ขยายแถบด้านข้าง' }));
+    expect(screen.getByRole('button', { name: 'ย่อแถบด้านข้าง' })).toHaveAttribute('aria-expanded', 'true');
+
+    // Mobile Bottom Bar: exact 5 primary items in approved order
     const mobileNav = screen.getByRole('navigation', { name: 'แถบนำทางมือถือ' });
-    expect(mobileNav).toBeInTheDocument();
+    const mobileButtons = Array.from(mobileNav.querySelectorAll('button')).map((b) =>
+      b.textContent?.trim()
+    );
+    expect(mobileButtons).toEqual(['ภาพรวม', 'โปรเจกต์', 'สร้างงาน', 'งานของฉัน', 'คลังผลงาน']);
     expect(screen.queryByRole('dialog', { name: 'เมนูเพิ่มเติม' })).not.toBeInTheDocument();
 
+    // Mobile Side Drawer: open via เพิ่มเติม, verify 5 system items, close with Escape
     const moreBtn = screen.getByRole('button', { name: 'เพิ่มเติม' });
     fireEvent.click(moreBtn);
 
-    const sheet = screen.getByRole('dialog', { name: 'เมนูเพิ่มเติม' });
-    expect(sheet).toBeInTheDocument();
-    expect(sheet).toHaveTextContent('วิเคราะห์');
-    expect(sheet).toHaveTextContent('คลังผลงาน');
+    const drawer = screen.getByRole('dialog', { name: 'เมนูเพิ่มเติม' });
+    expect(drawer).toBeInTheDocument();
+    const drawerNav = screen.getByRole('navigation', { name: 'เมนูเพิ่มเติมในแถบข้าง' });
+    const drawerLabels = Array.from(drawerNav.querySelectorAll('button')).map((b) =>
+      b.textContent?.trim()
+    );
+    expect(drawerLabels).toEqual([
+      'วิเคราะห์',
+      'ความรู้และ Workflow',
+      'โมเดลและการฝึก',
+      'สิทธิ์และความปลอดภัย',
+      'ตั้งค่า',
+    ]);
 
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'เมนูเพิ่มเติม' })).not.toBeInTheDocument();
 
+    // Verify route callbacks from drawer items (admin user)
     fireEvent.click(moreBtn);
-    const sheetButtons = screen.getByRole('dialog', { name: 'เมนูเพิ่มเติม' }).querySelectorAll('button');
-    expect(sheetButtons).toHaveLength(2);
-    fireEvent.click(sheetButtons[0]);
+    const drawerButtons = screen
+      .getByRole('navigation', { name: 'เมนูเพิ่มเติมในแถบข้าง' })
+      .querySelectorAll('button');
+    fireEvent.click(drawerButtons[0]); // วิเคราะห์
     expect(onNavigate).toHaveBeenCalledWith('analysis');
     expect(screen.queryByRole('dialog', { name: 'เมนูเพิ่มเติม' })).not.toBeInTheDocument();
+
+    fireEvent.click(moreBtn);
+    const drawerButtons2 = screen
+      .getByRole('navigation', { name: 'เมนูเพิ่มเติมในแถบข้าง' })
+      .querySelectorAll('button');
+    fireEvent.click(drawerButtons2[2]); // โมเดลและการฝึก
+    expect(onNavigate).toHaveBeenCalledWith('settings', 'developer');
+
+    fireEvent.click(moreBtn);
+    const drawerButtons3 = screen
+      .getByRole('navigation', { name: 'เมนูเพิ่มเติมในแถบข้าง' })
+      .querySelectorAll('button');
+    fireEvent.click(drawerButtons3[3]); // สิทธิ์และความปลอดภัย (admin -> admin tab)
+    expect(onNavigate).toHaveBeenCalledWith('settings', 'admin');
+
+    // Non-admin RBAC: สิทธิ์และความปลอดภัย routes safely to account tab, never admin
+    rerender(
+      <AppShell
+        activeScreen="overview"
+        activeSettingsTab="account"
+        screenTitle="ภาพรวม"
+        user={{
+          id: 'u2',
+          email: 'member@zyrquen.local',
+          display_name: 'Member',
+          role: 'user',
+          created_at: '2026-11-25T00:00:00Z',
+        }}
+        onNavigate={onNavigate}
+        onBack={vi.fn()}
+        onOpenProfile={vi.fn()}
+      >
+        <div>เนื้อหาทดสอบ</div>
+      </AppShell>
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'เพิ่มเติม' }));
+    const memberDrawerButtons = screen
+      .getByRole('navigation', { name: 'เมนูเพิ่มเติมในแถบข้าง' })
+      .querySelectorAll('button');
+    fireEvent.click(memberDrawerButtons[3]);
+    expect(onNavigate).toHaveBeenLastCalledWith('settings', 'account');
   });
 });
 

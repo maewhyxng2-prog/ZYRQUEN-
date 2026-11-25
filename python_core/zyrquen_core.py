@@ -472,6 +472,9 @@ def init_db() -> None:
         )
         init_tools_schema(conn, DATA_DIR)
         init_dataset_pipeline_schema(conn)
+        from tool_center import init_tool_center_schema
+
+        init_tool_center_schema(conn)
         cols = {
             r["name"]
             for r in conn.execute("PRAGMA table_info(tool_invocations)").fetchall()
@@ -4180,6 +4183,10 @@ def run_autonomous_mission(payload: dict) -> dict:
     enable_execution = bool(payload.get("enable_execution", True))
 
     conn = get_db()
+    from tool_center import get_tool_center_registry
+
+    tc_reg = get_tool_center_registry()
+    tc_plan = tc_reg.compose_for_goal(goal, user_role=str(payload.get("user_role") or "user"), conn=conn)
     mission_id = str(uuid.uuid4())
     started_iso = now_iso()
     caps_obj = {
@@ -4187,6 +4194,15 @@ def run_autonomous_mission(payload: dict) -> dict:
         "enable_knowledge_dev": enable_knowledge_dev,
         "enable_planning": enable_planning,
         "enable_execution": enable_execution,
+        "tool_center": {
+            "selected_toolkits": tc_plan.get("selected_toolkits", []),
+            "selected_capabilities": [
+                f"{c['capability_id']}@{c['version']}"
+                for c in tc_plan.get("selected_capabilities", [])
+            ],
+            "task_memory_hints": tc_plan.get("task_memory_hints", {}),
+            "resource_admission_allowed": bool((tc_plan.get("resource_admission") or {}).get("allowed", True)),
+        },
     }
 
     with conn:
@@ -4593,6 +4609,51 @@ def dispatch_command(cmd: str, payload: dict) -> dict:
         return res
     if cmd == "workflow_groups":
         return {"ok": True, "groups": WORKFLOW_GROUPS}
+    if cmd == "tool_center_orchestrate":
+        from tool_center import execute_orchestrated_plan, get_tool_center_registry
+
+        conn = get_db()
+        res = execute_orchestrated_plan(
+            get_tool_center_registry(),
+            str(payload.get("goal", "")),
+            payload.get("steps") or [],
+            conn=conn,
+            data_dir=DATA_DIR,
+            user_id=str(payload.get("user_id", "system")),
+            user_role=str(payload.get("user_role", "user")),
+            shared_context=payload.get("shared_context") if isinstance(payload.get("shared_context"), dict) else None,
+            idempotency_scope=payload.get("idempotency_scope"),
+            enable_parallel=bool(payload.get("enable_parallel", True)),
+        )
+        conn.close()
+        return res
+    if cmd == "tool_center_self_improve":
+        from tool_center import get_tool_center_registry, run_self_improvement_evaluation
+
+        conn = get_db()
+        res = run_self_improvement_evaluation(
+            conn,
+            get_tool_center_registry(),
+            data_dir=DATA_DIR,
+            user_id=str(payload.get("user_id", "system")),
+            sandbox_probe_code=payload.get("sandbox_probe_code"),
+        )
+        conn.close()
+        return res
+    if cmd == "tool_center_decide_improvement":
+        from tool_center import decide_improvement_proposal
+
+        conn = get_db()
+        res = decide_improvement_proposal(
+            conn,
+            proposal_id=str(payload.get("proposal_id", "")),
+            decision=str(payload.get("decision", "reject")),
+            admin_email=str(payload.get("admin_email", "admin")),
+            admin_id=str(payload.get("admin_id", "admin")),
+            reason=payload.get("reason"),
+        )
+        conn.close()
+        return res
     return {"ok": False, "error": f"Unknown command '{cmd}'"}
 
 

@@ -1012,7 +1012,7 @@ export default function App() {
 
   const screenTitle =
     screen === 'overview'
-      ? 'ZYRQUEN'
+      ? 'ภาพรวม'
       : screen === 'projects'
         ? 'โปรเจกต์'
         : screen === 'tasks'
@@ -1026,16 +1026,17 @@ export default function App() {
                 : screen === 'workspace'
                   ? activeTitle
                   : screen === 'memory'
-                    ? 'ความจำและเวิร์กโฟลว์'
+                    ? 'ความรู้และ Workflow'
                     : settingsTab === 'developer'
-                      ? 'เครื่องมือนักพัฒนา'
+                      ? 'โมเดลและการฝึก'
                       : settingsTab === 'admin'
-                        ? 'ผู้ดูแลระบบ'
-                        : 'ตั้งค่าบัญชี';
+                        ? 'สิทธิ์และความปลอดภัย'
+                        : 'ตั้งค่า';
 
   return (
     <AppShell
       activeScreen={screen}
+      activeSettingsTab={user.role !== 'admin' && settingsTab === 'admin' ? 'account' : settingsTab}
       screenTitle={screenTitle}
       user={user}
       showBackOnMobile={
@@ -1045,9 +1046,11 @@ export default function App() {
       }
       hideBottomBarOnMobile={screen === 'workspace'}
       isProcessing={isCoreProcessing}
-      onNavigate={(next) => {
+      onNavigate={(next, nextTab) => {
         if (next === 'settings') {
-          pushRoute('settings', null, 'account');
+          const safeTab: SettingsTab =
+            nextTab === 'admin' && user.role !== 'admin' ? 'account' : nextTab || 'account';
+          pushRoute('settings', null, safeTab);
         } else if (next === 'workspace') {
           pushRoute('workspace', activeConversationId, settingsTab);
         } else {

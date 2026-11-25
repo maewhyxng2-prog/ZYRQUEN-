@@ -1097,6 +1097,7 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
       payload: {
         goal,
         user_id: req.user!.id,
+        user_role: req.user!.role,
         enable_research: enableResearch,
         enable_knowledge_dev: enableKnowledgeDev,
         enable_planning: enablePlanning,
@@ -1739,6 +1740,149 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
     }
   );
 
+  // --- ZYRQUEN Native Tool Center & Background Support Systems API ---
+  app.get('/api/tool-center', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'tool_center_overview',
+      payload: { user_id: req.user!.id, user_role: req.user!.role },
+    });
+    res.json(data);
+  });
+
+  app.post('/api/tool-center/resolve', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const goal = String(req.body?.goal || '').trim().slice(0, 600);
+    if (!goal) {
+      res.status(400).json({ error: 'goal is required.' });
+      return;
+    }
+    const data = await runPythonScript('db_bridge.py', {
+      action: 'tool_center_resolve',
+      payload: { goal, user_role: req.user!.role },
+    });
+    res.json(data);
+  });
+
+  app.post('/api/tool-center/execute', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const capabilityId = String(req.body?.capabilityId || req.body?.capability_id || '').trim().slice(0, 120);
+    if (!capabilityId) {
+      res.status(400).json({ error: 'capabilityId is required.' });
+      return;
+    }
+    const input = req.body?.input && typeof req.body.input === 'object' ? req.body.input : {};
+    const result = await runPythonScript<{
+      ok: boolean;
+      status?: string;
+      error?: string;
+    }>('db_bridge.py', {
+      action: 'tool_center_execute',
+      payload: {
+        capability_id: capabilityId,
+        input,
+        user_id: req.user!.id,
+        user_role: req.user!.role,
+        project_id: req.body?.projectId ? String(req.body.projectId).slice(0, 64) : null,
+        conversation_id: req.body?.conversationId ? String(req.body.conversationId).slice(0, 64) : null,
+      },
+    });
+    if (result.status === 'BLOCKED') {
+      res.status(403).json(result);
+      return;
+    }
+    if (!result.ok) {
+      res.status(400).json(result);
+      return;
+    }
+    res.status(result.status === 'PENDING_APPROVAL' ? 202 : 201).json(result);
+  });
+
+  app.post('/api/tool-center/orchestrate', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const goal = String(req.body?.goal || '').trim().slice(0, 600);
+    const steps = Array.isArray(req.body?.steps) ? req.body.steps : null;
+    if (!goal || !steps || steps.length === 0) {
+      res.status(400).json({ error: 'goal and non-empty steps array are required.' });
+      return;
+    }
+    const result = await runPythonScript<{
+      ok: boolean;
+      status?: string;
+      error_code?: string;
+      error?: string;
+    }>('db_bridge.py', {
+      action: 'tool_center_orchestrate',
+      payload: {
+        goal,
+        steps,
+        user_id: req.user!.id,
+        user_role: req.user!.role,
+        shared_context: req.body?.sharedContext && typeof req.body.sharedContext === 'object' ? req.body.sharedContext : null,
+        idempotency_scope: req.body?.idempotencyScope ? String(req.body.idempotencyScope).slice(0, 80) : null,
+        enable_parallel: req.body?.enableParallel !== false,
+      },
+    });
+    if (result.error_code === 'PERMISSION_BLOCKED') {
+      res.status(403).json(result);
+      return;
+    }
+    if (!result.ok && result.status !== 'PARTIAL_SUCCESS') {
+      res.status(400).json(result);
+      return;
+    }
+    res.status(200).json(result);
+  });
+
+  app.post('/api/tool-center/verify', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const toolkitId = req.body?.toolkitId ? String(req.body.toolkitId).trim().slice(0, 64) : '';
+    const result = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
+      action: 'tool_center_verify',
+      payload: { toolkit_id: toolkitId || null },
+    });
+    if (!result.ok) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  });
+
+  app.post(
+    '/api/tool-center/self-improve',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const sandboxProbeCode =
+        typeof req.body?.sandboxProbeCode === 'string'
+          ? req.body.sandboxProbeCode.slice(0, 12000)
+          : undefined;
+      const result = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
+        action: 'tool_center_self_improve',
+        payload: {
+          user_id: req.user!.id,
+          sandbox_probe_code: sandboxProbeCode,
+        },
+      });
+      if (!result.ok) {
+        res.status(400).json(result);
+        return;
+      }
+      res.status(201).json(result);
+    }
+  );
+
+  app.post(
+    '/api/tool-center/engineering/benchmark',
+    requireAuth,
+    async (_req: AuthedRequest, res: Response) => {
+      const result = await runPythonScript<{ ok: boolean; error?: string }>('db_bridge.py', {
+        action: 'tool_center_engineering_benchmark',
+        payload: {},
+      });
+      if (!result.ok) {
+        res.status(400).json(result);
+        return;
+      }
+      res.json(result);
+    }
+  );
+
   app.get('/api/admin/overview', requireAuth, requireAdmin, async (_req: AuthedRequest, res: Response) => {
     const data = await runPythonScript('db_bridge.py', {
       action: 'admin_overview',
@@ -1933,6 +2077,60 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
           outcome: String(result.proposal?.status || decision.toUpperCase()),
         },
       });
+      res.json(result);
+    }
+  );
+
+  app.post(
+    '/api/admin/tool-center-invocations/:invocationId/decide',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const decision = req.body?.decision === 'reject' ? 'reject' : 'approve';
+      const result = await runPythonScript<{ ok: boolean; error?: string; status?: string }>(
+        'db_bridge.py',
+        {
+          action: 'tool_center_decide',
+          payload: {
+            invocation_id: String(req.params.invocationId || '').trim().slice(0, 64),
+            decision,
+            admin_email: req.user!.email,
+          },
+        }
+      );
+      if (!result.ok) {
+        res.status(400).json({ error: result.error || 'Tool Center invocation decision failed' });
+        return;
+      }
+      res.json(result);
+    }
+  );
+
+  app.post(
+    '/api/admin/improvement-proposals/:id/decide',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthedRequest, res: Response) => {
+      const proposalId = String(req.params.id || '').trim().slice(0, 64);
+      const decision = req.body?.decision === 'approve' ? 'approve' : 'reject';
+      const reason = req.body?.reason ? String(req.body.reason).trim().slice(0, 240) : undefined;
+      const result = await runPythonScript<{ ok: boolean; error?: string; status?: string }>(
+        'db_bridge.py',
+        {
+          action: 'tool_center_decide_improvement',
+          payload: {
+            proposal_id: proposalId,
+            decision,
+            admin_email: req.user!.email,
+            admin_id: req.user!.id,
+            reason,
+          },
+        }
+      );
+      if (!result.ok) {
+        res.status(400).json({ error: result.error || 'Improvement proposal decision failed' });
+        return;
+      }
       res.json(result);
     }
   );

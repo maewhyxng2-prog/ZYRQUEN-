@@ -827,6 +827,340 @@ describe('Isolated 6-Step Non-Skippable Native Training Pipeline Gate E2E', () =
     };
     expect(csvTrace.dataset_analysis?.duplicate_rows).toBe(1);
   }, 45_000);
+
+  it('Executes Native Tool Center (8 Toolkits), 10 Background Support Systems, P5 Gates, Self-Improvement & Software Engineering Benchmark over HTTP', async () => {
+    // Login as gate-admin & dev-kg (already created in this isolated test suite)
+    const adminLoginRes = await fetch(`${gateBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'gate-admin@zyrquen.local',
+        password: 'StrongPassword123!',
+      }),
+    });
+    expect(adminLoginRes.status).toBe(200);
+    const { token: adminToken } = (await adminLoginRes.json()) as { token: string };
+    const adminHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminToken}`,
+    };
+
+    const devLoginRes = await fetch(`${gateBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'dev-kg@zyrquen.local',
+        password: 'DevPassword123!',
+      }),
+    });
+    expect(devLoginRes.status).toBe(200);
+    const { token: devToken } = (await devLoginRes.json()) as { token: string };
+    const devHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${devToken}`,
+    };
+
+    // 1. GET /api/tool-center returns all 8 toolkits, dependency env, resource snapshot, external_models_used=false
+    const overviewRes = await fetch(`${gateBaseUrl}/api/tool-center`, { headers: adminHeaders });
+    expect(overviewRes.status).toBe(200);
+    const overviewJson = (await overviewRes.json()) as {
+      ok: boolean;
+      toolkits: Array<{ id: string }>;
+      dependency_environment: { ok: boolean; capabilities_checked: number };
+      resource_snapshot: { effective_max_workers: number; system: { mem_available_mb: number } };
+      external_models_used: boolean;
+    };
+    expect(overviewJson.ok).toBe(true);
+    expect(overviewJson.external_models_used).toBe(false);
+    expect(overviewJson.toolkits.map((t) => t.id).sort()).toEqual([
+      'api_integration',
+      'automation',
+      'data',
+      'development',
+      'document',
+      'research',
+      'security',
+      'testing',
+    ]);
+    expect(overviewJson.dependency_environment.capabilities_checked).toBeGreaterThan(15);
+    expect(overviewJson.resource_snapshot.system.mem_available_mb).toBeGreaterThan(0);
+
+    // 2. POST /api/tool-center/resolve reuses READY capabilities and blocks duplicate creation
+    const resolveRes = await fetch(`${gateBaseUrl}/api/tool-center/resolve`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({ goal: 'วิเคราะห์ข้อมูล CSV และตรวจสอบ Python AST พร้อมยืนยันความปลอดภัย' }),
+    });
+    expect(resolveRes.status).toBe(200);
+    const resolveJson = (await resolveRes.json()) as {
+      ok: boolean;
+      duplicate_creation_blocked: boolean;
+      reuse_existing_count: number;
+      selected_capabilities: Array<{ capability_id: string }>;
+      task_memory_hints: { success_examples_count: number };
+    };
+    expect(resolveJson.ok).toBe(true);
+    expect(resolveJson.duplicate_creation_blocked).toBe(true);
+    expect(resolveJson.reuse_existing_count).toBeGreaterThanOrEqual(2);
+    expect(resolveJson.task_memory_hints).toBeDefined();
+
+    // 3. POST /api/tool-center/execute runs real capabilities & enforces RBAC + P5 Gate
+    const xmlProfileRes = await fetch(`${gateBaseUrl}/api/tool-center/execute`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({
+        capabilityId: 'data.profile_structured',
+        input: {
+          format: 'xml',
+          content: '<records><row><item>alpha</item><score>10</score></row><row><item>beta</item><score>20</score></row></records>',
+        },
+      }),
+    });
+    expect(xmlProfileRes.status).toBe(201);
+    const xmlJson = (await xmlProfileRes.json()) as {
+      ok: boolean;
+      status: string;
+      output: { format: string; row_count: number };
+      qa: { verdict: string };
+      external_models_used: boolean;
+    };
+    expect(xmlJson.ok).toBe(true);
+    expect(xmlJson.status).toBe('COMPLETED');
+    expect(xmlJson.output.format).toBe('xml');
+    expect(xmlJson.output.row_count).toBe(2);
+    expect(xmlJson.qa.verdict).toBe('SUCCESS');
+    expect(xmlJson.external_models_used).toBe(false);
+
+    const sandboxRes = await fetch(`${gateBaseUrl}/api/tool-center/execute`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({
+        capabilityId: 'testing.sandbox_run',
+        input: { source: 'nums = [3, 6, 9]\nprint(sum(nums))' },
+      }),
+    });
+    expect(sandboxRes.status).toBe(201);
+    const sandboxJson = (await sandboxRes.json()) as {
+      ok: boolean;
+      output: { stdout: string; sandbox_isolated: boolean };
+    };
+    expect(sandboxJson.output.sandbox_isolated).toBe(true);
+    expect(sandboxJson.output.stdout).toBe('18');
+
+    // Non-admin rejected with 403 on admin-only capability
+    const blockedRes = await fetch(`${gateBaseUrl}/api/tool-center/execute`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({ capabilityId: 'security.governance_audit', input: { limit: 5 } }),
+    });
+    expect(blockedRes.status).toBe(403);
+
+    // Non-admin external webhook enters P5 Approval Gate (202 PENDING_APPROVAL) -> Admin approves
+    const webhookPendRes = await fetch(`${gateBaseUrl}/api/tool-center/execute`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({
+        capabilityId: 'api_integration.webhook_dispatch',
+        input: { url: 'https://en.wikipedia.org/wiki/Webhook', body: { event: 'e2e' }, dry_run: true },
+      }),
+    });
+    expect(webhookPendRes.status).toBe(202);
+    const webhookPendJson = (await webhookPendRes.json()) as { status: string; invocation_id: string };
+    expect(webhookPendJson.status).toBe('PENDING_APPROVAL');
+
+    // Non-admin cannot decide tool-center invocation
+    const forbiddenInvDecide = await fetch(
+      `${gateBaseUrl}/api/admin/tool-center-invocations/${webhookPendJson.invocation_id}/decide`,
+      {
+        method: 'POST',
+        headers: devHeaders,
+        body: JSON.stringify({ decision: 'approve' }),
+      }
+    );
+    expect(forbiddenInvDecide.status).toBe(403);
+
+    const adminInvDecide = await fetch(
+      `${gateBaseUrl}/api/admin/tool-center-invocations/${webhookPendJson.invocation_id}/decide`,
+      {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ decision: 'approve' }),
+      }
+    );
+    expect(adminInvDecide.status).toBe(200);
+    const adminInvJson = (await adminInvDecide.json()) as {
+      ok: boolean;
+      status: string;
+      output: { dry_run: boolean };
+    };
+    expect(adminInvJson.ok).toBe(true);
+    expect(adminInvJson.status).toBe('COMPLETED');
+    expect(adminInvJson.output.dry_run).toBe(true);
+
+    // 4. POST /api/tool-center/orchestrate executes parallel DAG + idempotent replay
+    const orchPayload = {
+      goal: 'E2E parallel AST calc & code inspection',
+      idempotencyScope: 'e2e-orch-scope-001',
+      enableParallel: true,
+      steps: [
+        {
+          step_id: 's1',
+          capability_id: 'data.calc_ast',
+          input: { expression: '(9 + 6) * 4' },
+          depends_on: [],
+        },
+        {
+          step_id: 's2',
+          capability_id: 'development.code_analysis',
+          input: { language: 'python', source: 'def square(n):\n    return n * n\n' },
+          depends_on: [],
+        },
+        {
+          step_id: 's3',
+          capability_id: 'testing.contract_assertion',
+          input: { cases: [{ name: 'positive', op: 'gt', actual: 60, expected: 0 }] },
+          depends_on: ['s1', 's2'],
+        },
+      ],
+    };
+    const orchRes = await fetch(`${gateBaseUrl}/api/tool-center/orchestrate`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify(orchPayload),
+    });
+    expect(orchRes.status).toBe(200);
+    const orchJson = (await orchRes.json()) as {
+      ok: boolean;
+      run_id: string;
+      delivery_verdict: string;
+      qa_summary: { steps_verified: number };
+      external_models_used: boolean;
+    };
+    expect(orchJson.ok).toBe(true);
+    expect(orchJson.delivery_verdict).toBe('SUCCESS');
+    expect(orchJson.qa_summary.steps_verified).toBe(3);
+    expect(orchJson.external_models_used).toBe(false);
+
+    const orchReplayRes = await fetch(`${gateBaseUrl}/api/tool-center/orchestrate`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify(orchPayload),
+    });
+    expect(orchReplayRes.status).toBe(200);
+    const orchReplayJson = (await orchReplayRes.json()) as { idempotent_replay?: boolean; run_id: string };
+    expect(orchReplayJson.idempotent_replay).toBe(true);
+    expect(orchReplayJson.run_id).toBe(orchJson.run_id);
+
+    // 5. POST /api/tool-center/self-improve (admin-only) + approval gate
+    const forbiddenSelfImp = await fetch(`${gateBaseUrl}/api/tool-center/self-improve`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({}),
+    });
+    expect(forbiddenSelfImp.status).toBe(403);
+
+    const selfImpRes = await fetch(`${gateBaseUrl}/api/tool-center/self-improve`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({}),
+    });
+    expect(selfImpRes.status).toBe(201);
+    const selfImpJson = (await selfImpRes.json()) as {
+      ok: boolean;
+      approval_required: boolean;
+      model_weights_mutated: boolean;
+      regression_detected: boolean;
+      improved: boolean;
+      proposal: { id: string; approval_status: string };
+    };
+    expect(selfImpJson.ok).toBe(true);
+    expect(selfImpJson.approval_required).toBe(true);
+    expect(selfImpJson.model_weights_mutated).toBe(false);
+    expect(selfImpJson.regression_detected).toBe(false);
+    expect(selfImpJson.improved).toBe(true);
+    expect(selfImpJson.proposal.approval_status).toBe('PENDING_APPROVAL');
+
+    const impApproveRes = await fetch(
+      `${gateBaseUrl}/api/admin/improvement-proposals/${selfImpJson.proposal.id}/decide`,
+      {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ decision: 'approve', reason: 'E2E zero regression check passed' }),
+      }
+    );
+    expect(impApproveRes.status).toBe(200);
+    const impApproveJson = (await impApproveRes.json()) as {
+      ok: boolean;
+      status: string;
+      model_weights_mutated: boolean;
+    };
+    expect(impApproveJson.ok).toBe(true);
+    expect(impApproveJson.status).toBe('APPROVED');
+    expect(impApproveJson.model_weights_mutated).toBe(false);
+
+    // 6. POST /api/tool-center/engineering/benchmark & POST /api/tool-center/verify
+    const engBenchRes = await fetch(`${gateBaseUrl}/api/tool-center/engineering/benchmark`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({}),
+    });
+    expect(engBenchRes.status).toBe(200);
+    const engBenchJson = (await engBenchRes.json()) as {
+      ok: boolean;
+      status: string;
+      passed: number;
+      total: number;
+      metrics: { success_rate: number; regression_rate: number };
+      external_models_used: boolean;
+    };
+    expect(engBenchJson.ok).toBe(true);
+    expect(engBenchJson.status).toBe('VERIFIED');
+    expect(engBenchJson.passed).toBe(engBenchJson.total);
+    expect(engBenchJson.metrics.success_rate).toBe(1);
+    expect(engBenchJson.metrics.regression_rate).toBe(0);
+    expect(engBenchJson.external_models_used).toBe(false);
+
+    const tcVerifyRes = await fetch(`${gateBaseUrl}/api/tool-center/verify`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({}),
+    });
+    expect(tcVerifyRes.status).toBe(200);
+    const tcVerifyJson = (await tcVerifyRes.json()) as {
+      ok: boolean;
+      status: string;
+      passed: number;
+      total: number;
+    };
+    expect(tcVerifyJson.ok).toBe(true);
+    expect(tcVerifyJson.status).toBe('VERIFIED');
+    expect(tcVerifyJson.passed).toBe(tcVerifyJson.total);
+
+    // 7. POST /api/autonomous/missions attaches real tool_center capabilities_json
+    const missionRes = await fetch(`${gateBaseUrl}/api/autonomous/missions`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({
+        goal: 'คำนวณ 12 * 12 และวิเคราะห์ความปลอดภัย',
+        enableResearch: false,
+        enableKnowledgeDev: false,
+        enableExecution: true,
+      }),
+    });
+    expect(missionRes.status).toBe(201);
+    const missionJson = (await missionRes.json()) as {
+      ok: boolean;
+      mission: { status: string; capabilities_json: string; external_models_used: number };
+    };
+    expect(missionJson.ok).toBe(true);
+    expect(missionJson.mission.external_models_used).toBe(0);
+    const capsParsed = JSON.parse(missionJson.mission.capabilities_json) as {
+      tool_center?: { principle: string; selected_capabilities: unknown[] };
+    };
+    expect(capsParsed.tool_center).toBeDefined();
+    expect(capsParsed.tool_center?.selected_capabilities.length).toBeGreaterThanOrEqual(1);
+  }, 90_000);
 });
+
 
 

@@ -29,6 +29,18 @@ from tools_engine import (
     save_workspace_file,
 )
 from dataset_ingestion import init_dataset_pipeline_schema
+from tool_center import (
+    ToolDependencyManager,
+    analyze_failure_patterns,
+    decide_improvement_proposal,
+    execute_orchestrated_plan,
+    get_resource_manager,
+    get_tool_center_registry,
+    init_tool_center_schema,
+    record_task_memory,
+    run_engineering_benchmark,
+    run_self_improvement_evaluation,
+)
 
 
 def row_to_dict(row):
@@ -768,6 +780,7 @@ def handle_action(action: str, payload: dict) -> dict:
 
     if action == "admin_overview":
         init_dataset_pipeline_schema(conn)
+        init_tool_center_schema(conn)
         users = [
             dict(r)
             for r in conn.execute(
@@ -883,12 +896,27 @@ def handle_action(action: str, payload: dict) -> dict:
             ).fetchall()
         ]
 
+        pending_tool_center_invocations = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM tool_center_invocations WHERE status='PENDING_APPROVAL' ORDER BY created_at DESC"
+            ).fetchall()
+        ]
+        pending_improvement_proposals = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM improvement_proposals WHERE approval_status='PENDING_APPROVAL' ORDER BY created_at DESC"
+            ).fetchall()
+        ]
+
         conn.close()
         return {
             "ok": True,
             "users": users,
             "pending_runs": pending_runs,
             "pending_tool_invocations": pending_tool_invocations,
+            "pending_tool_center_invocations": pending_tool_center_invocations,
+            "pending_improvement_proposals": pending_improvement_proposals,
             "pending_experiments": pending_experiments,
             "pending_kg_proposals": pending_kg_proposals,
             "tools": tools,
@@ -1204,6 +1232,197 @@ def handle_action(action: str, payload: dict) -> dict:
         ]
         conn.close()
         return {"ok": True, "proposals": rows}
+
+    if action == "tool_center_overview":
+        init_tool_center_schema(conn)
+        uid = str(payload.get("user_id", ""))
+        user_role = str(payload.get("user_role", "user"))
+        is_admin = user_role.lower() == "admin"
+        reg = get_tool_center_registry()
+        toolkits = reg.list_toolkits(user_role=user_role)
+        inventory = reg.audit_repository_inventory()
+        dep_env = ToolDependencyManager().check_environment(reg)
+        res_snapshot = get_resource_manager().snapshot()
+        failure_patterns = analyze_failure_patterns(conn, limit=8)
+        if is_admin:
+            invs = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM tool_center_invocations ORDER BY created_at DESC LIMIT 25"
+                ).fetchall()
+            ]
+        else:
+            invs = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM tool_center_invocations WHERE user_id=? ORDER BY created_at DESC LIMIT 25",
+                    (uid,),
+                ).fetchall()
+            ]
+        if is_admin:
+            proposals = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM improvement_proposals ORDER BY created_at DESC LIMIT 15"
+                ).fetchall()
+            ]
+            recent_orch = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT id, goal, status, total_latency_ms, created_at, updated_at FROM orchestration_runs ORDER BY created_at DESC LIMIT 15"
+                ).fetchall()
+            ]
+        else:
+            proposals = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM improvement_proposals WHERE created_by=? ORDER BY created_at DESC LIMIT 15",
+                    (uid,),
+                ).fetchall()
+            ]
+            recent_orch = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT id, goal, status, total_latency_ms, created_at, updated_at FROM orchestration_runs WHERE user_id=? ORDER BY created_at DESC LIMIT 15",
+                    (uid,),
+                ).fetchall()
+            ]
+        conn.close()
+        return {
+            "ok": True,
+            "toolkits": toolkits,
+            "inventory": inventory,
+            "dependency_environment": dep_env,
+            "resource_snapshot": res_snapshot,
+            "failure_patterns": failure_patterns,
+            "invocations": invs,
+            "improvement_proposals": proposals,
+            "recent_orchestrations": recent_orch,
+            "external_models_used": False,
+        }
+
+    if action == "tool_center_resolve":
+        init_tool_center_schema(conn)
+        reg = get_tool_center_registry()
+        plan = reg.compose_for_goal(
+            str(payload.get("goal", "")),
+            user_role=str(payload.get("user_role", "user")),
+            conn=conn,
+        )
+        conn.close()
+        return plan
+
+    if action == "tool_center_execute":
+        init_tool_center_schema(conn)
+        reg = get_tool_center_registry()
+        cap_id = str(payload.get("capability_id", "")).strip()
+        cap_input = payload.get("input", {})
+        if not isinstance(cap_input, dict):
+            cap_input = {}
+        res = reg.execute(
+            cap_id,
+            cap_input,
+            user_id=str(payload.get("user_id", "system")),
+            user_role=str(payload.get("user_role", "user")),
+            conn=conn,
+            data_dir=DATA_DIR,
+            project_id=payload.get("project_id"),
+            conversation_id=payload.get("conversation_id"),
+        )
+        if res.get("status") in {"COMPLETED", "FAILED", "BLOCKED"}:
+            qa = res.get("qa") or {}
+            verdict = str(qa.get("verdict") or ("SUCCESS" if res.get("ok") else "FAILED"))
+            if verdict in {"SUCCESS", "PARTIAL_SUCCESS", "FAILED", "UNVERIFIED"}:
+                record_task_memory(
+                    conn,
+                    trace_id=res.get("invocation_id"),
+                    goal=f"Execute capability {cap_id}",
+                    toolkit_ids=[str(res.get("toolkit_id") or "unknown")],
+                    capability_sequence=[cap_id],
+                    outcome_status=verdict,
+                    error_code=None if res.get("ok") else ("PERMISSION_BLOCKED" if res.get("status") == "BLOCKED" else "EXECUTION_ERROR"),
+                    error_message=res.get("error"),
+                    context_keys=sorted(cap_input.keys()),
+                    latency_ms=float(res.get("latency_ms") or 0.0),
+                    verified=(verdict == "SUCCESS"),
+                )
+        conn.close()
+        return res
+
+    if action == "tool_center_orchestrate":
+        init_tool_center_schema(conn)
+        reg = get_tool_center_registry()
+        steps = payload.get("steps")
+        if not isinstance(steps, list):
+            steps = []
+        res = execute_orchestrated_plan(
+            reg,
+            str(payload.get("goal", "")),
+            steps,
+            conn=conn,
+            data_dir=DATA_DIR,
+            user_id=str(payload.get("user_id", "system")),
+            user_role=str(payload.get("user_role", "user")),
+            shared_context=payload.get("shared_context") if isinstance(payload.get("shared_context"), dict) else None,
+            idempotency_scope=payload.get("idempotency_scope"),
+            enable_parallel=bool(payload.get("enable_parallel", True)),
+        )
+        conn.close()
+        return res
+
+    if action == "tool_center_verify":
+        init_tool_center_schema(conn)
+        reg = get_tool_center_registry()
+        tk_id = str(payload.get("toolkit_id") or "").strip() or None
+        res = reg.verify_toolkit(tk_id, conn=conn, data_dir=DATA_DIR)
+        conn.close()
+        return res
+
+    if action == "tool_center_decide":
+        init_tool_center_schema(conn)
+        reg = get_tool_center_registry()
+        res = reg.decide_invocation(
+            conn,
+            invocation_id=str(payload.get("invocation_id", "")).strip(),
+            decision=str(payload.get("decision", "reject")),
+            admin_email=str(payload.get("admin_email", "admin")),
+            data_dir=DATA_DIR,
+        )
+        conn.close()
+        return res
+
+    if action == "tool_center_self_improve":
+        init_tool_center_schema(conn)
+        reg = get_tool_center_registry()
+        res = run_self_improvement_evaluation(
+            conn,
+            reg,
+            data_dir=DATA_DIR,
+            user_id=str(payload.get("user_id", "system")),
+            sandbox_probe_code=payload.get("sandbox_probe_code"),
+        )
+        conn.close()
+        return res
+
+    if action == "tool_center_decide_improvement":
+        init_tool_center_schema(conn)
+        res = decide_improvement_proposal(
+            conn,
+            proposal_id=str(payload.get("proposal_id", "")).strip(),
+            decision=str(payload.get("decision", "reject")),
+            admin_email=str(payload.get("admin_email", "admin")),
+            admin_id=str(payload.get("admin_id", "admin")),
+            reason=payload.get("reason"),
+        )
+        conn.close()
+        return res
+
+    if action == "tool_center_engineering_benchmark":
+        init_tool_center_schema(conn)
+        reg = get_tool_center_registry()
+        res = run_engineering_benchmark(reg, conn=conn, data_dir=DATA_DIR)
+        conn.close()
+        return res
 
     conn.close()
     return {"ok": False, "error": f"Unknown bridge action '{action}'"}
