@@ -511,7 +511,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     const variantSelect = screen.getByLabelText('เลือกรุ่นโมเดล (Model Variant)');
     fireEvent.change(variantSelect, { target: { value: 'zyrquen-ast-pro' } });
 
-    const composer = screen.getByLabelText('ช่องพิมพ์ข้อความ');
+    const composer = screen.getByLabelText('รายละเอียดงาน');
     fireEvent.change(composer, { target: { value: 'คำนวณ 10 + 15' } });
     fireEvent.keyDown(composer, { key: 'Enter', shiftKey: false });
     await waitFor(() => {
@@ -702,7 +702,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(screen.getByRole('button', { name: 'หน้าหลัก ZYRQUEN' }));
 
     fireEvent.click(screen.getByText('เซสชันคณิตศาสตร์ก่อนหน้า'));
-    expect(await screen.findByLabelText('ช่องพิมพ์ข้อความ')).toBeInTheDocument();
+    expect(await screen.findByLabelText('รายละเอียดงาน')).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'แถบนำทางมือถือ' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'เปิดประวัติบทสนทนา' }));
@@ -808,14 +808,14 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     const micBtn = await screen.findByRole('button', { name: /พิมพ์ด้วยเสียง/i });
     fireEvent.click(micBtn);
 
-    const textarea = screen.getByLabelText('ช่องพิมพ์ข้อความ') as HTMLTextAreaElement;
+    const textarea = screen.getByLabelText('รายละเอียดงาน') as HTMLTextAreaElement;
     expect(textarea.value).toContain('คำนวณ 25 * 4');
 
     // Enforce online-only connectivity
     fireEvent(window, new Event('offline'));
     expect(await screen.findByText('ต้องเชื่อมต่ออินเทอร์เน็ตเท่านั้น')).toBeInTheDocument();
     fireEvent(window, new Event('online'));
-    expect(await screen.findByLabelText('ช่องพิมพ์ข้อความ')).toBeInTheDocument();
+    expect(await screen.findByLabelText('รายละเอียดงาน')).toBeInTheDocument();
 
     delete (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition;
   });
@@ -951,7 +951,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
       />
     );
 
-    const box = screen.getByLabelText('ช่องพิมพ์ข้อความ');
+    const box = screen.getByLabelText('รายละเอียดงาน');
     fireEvent.change(box, { target: { value: 'ค้นคว้า: SQLite' } });
     fireEvent.keyDown(box, { key: 'Enter', shiftKey: false });
 
