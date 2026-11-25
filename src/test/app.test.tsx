@@ -2880,5 +2880,242 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(await screen.findByText('architecture-plan.md'));
     expect(await screen.findByText(/# แผนสถาปัตยกรรมระบบ/)).toBeInTheDocument();
   });
+
+  it('ProjectDashboard: แสดงการ์ดสถานะ เปอร์เซ็นต์ความคืบหน้า และรายการค้างดำเนินการทั้งใน HomeView และ ProjectsView พร้อมตัวกรองและคัดลอกสรุป TSV', async () => {
+    const { HomeView } = await import('../components/HomeView');
+    const { ProjectsView } = await import('../components/IntelligenceWorkspaceViews');
+    const origClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const copiedTexts: string[] = [];
+
+    const projectsFixture = [
+      {
+        id: 'proj-active',
+        title: 'โปรเจกต์อัปเกรดสถาปัตยกรรม',
+        mode: 'plan' as const,
+        updated_at: '2026-11-25T01:30:00Z',
+        message_count: 4,
+        project_status: 'ACTIVE' as const,
+        completion_pct: 67,
+        completed_units: 2,
+        total_units: 3,
+        pending_actions: [
+          {
+            id: 'step-3',
+            title: 'รันชุดทดสอบรวมระบบหลังปรับปรุง',
+            status: 'IN_PROGRESS',
+            category: 'task' as const,
+          },
+        ],
+        last_activity_summary: 'ดำเนินการแล้ว 2 จาก 3 ขั้นตอน',
+      },
+      {
+        id: 'proj-approval',
+        title: 'โปรเจกต์สืบค้นเอกสารภายนอก',
+        mode: 'auto' as const,
+        updated_at: '2026-11-25T01:45:00Z',
+        message_count: 2,
+        project_status: 'AWAITING_APPROVAL' as const,
+        completion_pct: 50,
+        completed_units: 1,
+        total_units: 2,
+        pending_actions: [
+          {
+            id: 'inv-1',
+            title: 'รออนุมัติการใช้เครื่องมือ doc_fetch',
+            status: 'PENDING_APPROVAL',
+            category: 'approval' as const,
+          },
+        ],
+        last_activity_summary: 'รออนุมัติ Gate จากผู้ดูแล',
+      },
+      {
+        id: 'proj-done',
+        title: 'โปรเจกต์ตรวจความถูกต้อง AST',
+        mode: 'math' as const,
+        updated_at: '2026-11-25T02:00:00Z',
+        message_count: 2,
+        project_status: 'COMPLETED' as const,
+        completion_pct: 100,
+        completed_units: 2,
+        total_units: 2,
+        pending_actions: [],
+        last_activity_summary: 'ผ่านการตรวจสอบครบทุกขั้นตอน',
+      },
+    ];
+
+    try {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: vi.fn(async (txt: string) => {
+            copiedTexts.push(txt);
+          }),
+        },
+      });
+
+      const onOpenFromHome = vi.fn();
+      const onNavigate = vi.fn();
+
+      // 1. HomeView (overview variant)
+      const homeRender = render(
+        <HomeView
+          user={{
+            id: 'u1',
+            email: 'admin@zyrquen.local',
+            display_name: 'Admin',
+            role: 'admin',
+            created_at: '2026-11-25T00:00:00Z',
+          }}
+          homeSummary={{
+            recent_conversations: projectsFixture,
+            counts: { triples: 3, checkpoints: 1, datasets: 1, pending_approvals: 1, missions: 0 },
+            system: {
+              python_version: '3.11.2',
+              platform: 'Linux',
+              cpu_count: 4,
+              load_1m: 0.1,
+              mem_total_mb: 4096,
+              mem_available_mb: 2048,
+              disk_free_gb: 20,
+              disk_total_gb: 50,
+              sqlite_db_kb: 16,
+            },
+          }}
+          nativeReady={true}
+          loading={false}
+          error={null}
+          onStartPrompt={vi.fn()}
+          onOpenConversation={onOpenFromHome}
+          onNavigate={onNavigate}
+          onRetry={vi.fn()}
+        />
+      );
+
+      expect(screen.getByText('· เฉลี่ย 72% · ค้างดำเนินการ 2 รายการ')).toBeInTheDocument();
+      expect(screen.getByText('67% (2/3)')).toBeInTheDocument();
+      expect(screen.getByText('100% (2/2)')).toBeInTheDocument();
+      expect(screen.getByRole('progressbar', { name: 'ความคืบหน้า โปรเจกต์อัปเกรดสถาปัตยกรรม' })).toHaveAttribute(
+        'aria-valuenow',
+        '67'
+      );
+      expect(screen.getByRole('progressbar', { name: 'ความคืบหน้า โปรเจกต์ตรวจความถูกต้อง AST' })).toHaveAttribute(
+        'aria-valuenow',
+        '100'
+      );
+      expect(screen.getByText('รันชุดทดสอบรวมระบบหลังปรับปรุง')).toBeInTheDocument();
+      expect(screen.getByText('รออนุมัติการใช้เครื่องมือ doc_fetch')).toBeInTheDocument();
+      expect(screen.getByText('ไม่มีรายการค้างดำเนินการ')).toBeInTheDocument();
+
+      // Copy TSV summary from ProjectDashboard
+      fireEvent.click(screen.getByRole('button', { name: 'คัดลอกสรุปแดชบอร์ดโปรเจกต์' }));
+      await waitFor(() => expect(copiedTexts).toHaveLength(1));
+      expect(copiedTexts[0]).toContain('ZYRQUEN Project Dashboard Summary');
+      expect(copiedTexts[0]).toContain('โปรเจกต์อัปเกรดสถาปัตยกรรม\tกำลังดำเนินการ\t67% (2/3)');
+      expect(copiedTexts[0]).toContain('โปรเจกต์สืบค้นเอกสารภายนอก\tรออนุมัติ\t50% (1/2)');
+
+      // Filter by 'เสร็จสมบูรณ์'
+      fireEvent.click(screen.getByRole('tab', { name: 'เสร็จสมบูรณ์ (1)' }));
+      expect(screen.getByText('โปรเจกต์ตรวจความถูกต้อง AST')).toBeInTheDocument();
+      expect(screen.queryByText('โปรเจกต์อัปเกรดสถาปัตยกรรม')).not.toBeInTheDocument();
+
+      // Filter by 'มีงานค้าง'
+      fireEvent.click(screen.getByRole('tab', { name: 'มีงานค้าง (2)' }));
+      expect(screen.getByText('โปรเจกต์อัปเกรดสถาปัตยกรรม')).toBeInTheDocument();
+      expect(screen.getByText('โปรเจกต์สืบค้นเอกสารภายนอก')).toBeInTheDocument();
+      expect(screen.queryByText('โปรเจกต์ตรวจความถูกต้อง AST')).not.toBeInTheDocument();
+
+      // Open project from overview card
+      fireEvent.click(screen.getAllByRole('button', { name: 'เปิดโปรเจกต์เพื่อทำงานต่อ' })[0]);
+      expect(onOpenFromHome).toHaveBeenCalledWith('proj-active');
+      homeRender.unmount();
+
+      // 2. ProjectsView (full variant with search & delete)
+      mockFetch({
+        'GET /api/developer/tools': () =>
+          new Response(JSON.stringify({ tools: [], invocations: [], workspace_files: [] }), { status: 200 }),
+        'GET /api/autonomous/missions': () =>
+          new Response(JSON.stringify({ missions: [] }), { status: 200 }),
+      });
+      const onOpenFromProjects = vi.fn();
+      const onDeleteProject = vi.fn(async () => {});
+      render(
+        <ProjectsView
+          token="tok-proj"
+          conversations={projectsFixture}
+          onCreateProject={vi.fn(async () => {})}
+          onOpenConversation={onOpenFromProjects}
+          onDeleteProject={onDeleteProject}
+          onNavigate={vi.fn()}
+        />
+      );
+
+      expect(screen.getByText('แดชบอร์ดโปรเจกต์ (3)')).toBeInTheDocument();
+      const searchInput = screen.getByLabelText('ค้นหาโปรเจกต์');
+      fireEvent.change(searchInput, { target: { value: 'doc_fetch' } });
+      expect(screen.getByText('แดชบอร์ดโปรเจกต์ (1)')).toBeInTheDocument();
+      expect(screen.getByText('โปรเจกต์สืบค้นเอกสารภายนอก')).toBeInTheDocument();
+      expect(screen.queryByText('โปรเจกต์ตรวจความถูกต้อง AST')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'เปิดโปรเจกต์' }));
+      expect(onOpenFromProjects).toHaveBeenCalledWith('proj-approval');
+
+      fireEvent.click(screen.getByRole('button', { name: 'ลบโปรเจกต์ โปรเจกต์สืบค้นเอกสารภายนอก' }));
+      expect(onDeleteProject).toHaveBeenCalledWith('proj-approval');
+    } finally {
+      if (origClipboard) {
+        Object.defineProperty(navigator, 'clipboard', origClipboard);
+      } else {
+        delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+      }
+    }
+  });
+
+  it('AppShell: แถบนำทางมือถือแสดง 4 แท็บหลักพร้อมเมนู "เพิ่มเติม" สำหรับวิเคราะห์และคลังผลงาน และปิดด้วย Escape', async () => {
+    const { AppShell } = await import('../components/AppShell');
+    const onNavigate = vi.fn();
+
+    render(
+      <AppShell
+        activeScreen="overview"
+        screenTitle="ภาพรวม"
+        user={{
+          id: 'u1',
+          email: 'admin@zyrquen.local',
+          display_name: 'Admin',
+          role: 'admin',
+          created_at: '2026-11-25T00:00:00Z',
+        }}
+        onNavigate={onNavigate}
+        onBack={vi.fn()}
+        onOpenProfile={vi.fn()}
+      >
+        <div>เนื้อหาทดสอบ</div>
+      </AppShell>
+    );
+
+    const mobileNav = screen.getByRole('navigation', { name: 'แถบนำทางมือถือ' });
+    expect(mobileNav).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'เมนูเพิ่มเติม' })).not.toBeInTheDocument();
+
+    const moreBtn = screen.getByRole('button', { name: 'เพิ่มเติม' });
+    fireEvent.click(moreBtn);
+
+    const sheet = screen.getByRole('dialog', { name: 'เมนูเพิ่มเติม' });
+    expect(sheet).toBeInTheDocument();
+    expect(sheet).toHaveTextContent('วิเคราะห์');
+    expect(sheet).toHaveTextContent('คลังผลงาน');
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'เมนูเพิ่มเติม' })).not.toBeInTheDocument();
+
+    fireEvent.click(moreBtn);
+    const sheetButtons = screen.getByRole('dialog', { name: 'เมนูเพิ่มเติม' }).querySelectorAll('button');
+    expect(sheetButtons).toHaveLength(2);
+    fireEvent.click(sheetButtons[0]);
+    expect(onNavigate).toHaveBeenCalledWith('analysis');
+    expect(screen.queryByRole('dialog', { name: 'เมนูเพิ่มเติม' })).not.toBeInTheDocument();
+  });
 });
+
+
 

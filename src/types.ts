@@ -69,6 +69,20 @@ export interface AuthStatus {
   envPasscodeConfigured: boolean;
 }
 
+export type ProjectStatusCode =
+  | 'ACTIVE'
+  | 'COMPLETED'
+  | 'AWAITING_APPROVAL'
+  | 'BLOCKED'
+  | 'NEEDS_INPUT';
+
+export interface ProjectPendingAction {
+  id: string;
+  title: string;
+  status: string;
+  category: 'approval' | 'blocked' | 'task' | 'clarification' | 'setup' | string;
+}
+
 export interface ConversationSummary {
   id: string;
   title: string;
@@ -76,6 +90,12 @@ export interface ConversationSummary {
   created_at?: string;
   updated_at: string;
   message_count: number;
+  project_status?: ProjectStatusCode;
+  completion_pct?: number;
+  completed_units?: number;
+  total_units?: number;
+  pending_actions?: ProjectPendingAction[];
+  last_activity_summary?: string | null;
 }
 
 export interface ConversationSmartSummary {

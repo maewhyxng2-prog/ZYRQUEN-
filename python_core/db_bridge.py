@@ -146,6 +146,146 @@ def _query_reasoning_traces(
     return [dict(r) for r in rows]
 
 
+def _enrich_conversation_project(conn, conv: dict) -> dict:
+    cid = str(conv.get("id") or "")
+    msgs = [
+        dict(m)
+        for m in conn.execute(
+            "SELECT id, role, content, mode, trace_json, status, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
+            (cid,),
+        ).fetchall()
+    ]
+    tool_invs = [
+        dict(t)
+        for t in conn.execute(
+            "SELECT id, tool_id, status, created_at FROM tool_invocations WHERE conversation_id = ? ORDER BY created_at DESC",
+            (cid,),
+        ).fetchall()
+    ]
+
+    user_msgs = [m for m in msgs if m.get("role") == "user"]
+    assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+
+    latest_plan_steps: list[dict] = []
+    for m in reversed(assistant_msgs):
+        raw_trace = m.get("trace_json")
+        if not raw_trace:
+            continue
+        try:
+            parsed = json.loads(raw_trace)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            plan_obj = parsed.get("plan")
+            if isinstance(plan_obj, dict) and isinstance(plan_obj.get("steps"), list) and plan_obj["steps"]:
+                latest_plan_steps = [s for s in plan_obj["steps"] if isinstance(s, dict)]
+                break
+
+    pending_actions: list[dict] = []
+    seen_titles: set[str] = set()
+
+    def _add_pending(item_id: str, title: str, status: str, category: str) -> None:
+        clean_title = str(title or "").strip()
+        if not clean_title or clean_title in seen_titles:
+            return
+        seen_titles.add(clean_title)
+        pending_actions.append(
+            {
+                "id": item_id,
+                "title": clean_title[:140],
+                "status": str(status or "PENDING"),
+                "category": category,
+            }
+        )
+
+    pending_tool_count = 0
+    for inv in tool_invs:
+        inv_status = str(inv.get("status") or "").upper()
+        tool_name = str(inv.get("tool_id") or "tool")
+        if inv_status == "PENDING_APPROVAL":
+            pending_tool_count += 1
+            _add_pending(str(inv.get("id")), f"รออนุมัติการใช้เครื่องมือ {tool_name}", "PENDING_APPROVAL", "approval")
+        elif inv_status in ("FAILED", "BLOCKED"):
+            _add_pending(str(inv.get("id")), f"ตรวจสอบเครื่องมือที่ไม่ผ่าน ({tool_name})", inv_status, "blocked")
+
+    for idx, step in enumerate(latest_plan_steps):
+        st_status = str(step.get("status") or "PENDING").upper()
+        if st_status not in ("VERIFIED", "COMPLETED", "DONE"):
+            cat = "approval" if step.get("requires_approval") or st_status in ("PENDING_APPROVAL", "AWAITING_APPROVAL") else "task"
+            _add_pending(
+                str(step.get("step_id") or f"step-{idx}"),
+                str(step.get("title") or f"ขั้นตอนที่ {idx + 1}"),
+                st_status,
+                cat,
+            )
+
+    if len(user_msgs) > len(assistant_msgs):
+        _add_pending("pending-reply", "รอการประมวลผลคำสั่งล่าสุด", "IN_PROGRESS", "task")
+
+    if assistant_msgs:
+        latest_asst_status = str(assistant_msgs[-1].get("status") or "").upper()
+        if latest_asst_status in ("NOT_LEARNED", "UNCERTAIN", "UNKNOWN", "AWAITING_EVIDENCE"):
+            _add_pending(
+                "needs-clarification",
+                "ระบุข้อมูลเพิ่มเติมหรือบันทึกความรู้เข้ากราฟ",
+                latest_asst_status,
+                "clarification",
+            )
+        elif latest_asst_status in ("BLOCKED", "FAILED", "ERROR", "REJECTED"):
+            _add_pending(
+                "resolve-blocked",
+                "ตรวจสอบและแก้ไขข้อผิดพลาดของงานล่าสุด",
+                latest_asst_status,
+                "blocked",
+            )
+    elif len(msgs) == 0:
+        _add_pending("initial-goal", "ส่งเป้าหมายหรือคำสั่งงานแรกของโปรเจกต์", "PENDING", "setup")
+
+    if latest_plan_steps:
+        completed_units = sum(
+            1
+            for s in latest_plan_steps
+            if str(s.get("status") or "").upper() in ("VERIFIED", "COMPLETED", "DONE")
+        )
+        total_units = len(latest_plan_steps) + pending_tool_count
+    elif user_msgs:
+        verified_turns = sum(
+            1 for m in assistant_msgs if str(m.get("status") or "").upper() in ("VERIFIED", "COMPLETED")
+        )
+        completed_units = min(len(user_msgs), verified_turns)
+        total_units = len(user_msgs) + pending_tool_count
+    else:
+        completed_units = 0
+        total_units = 0
+
+    completion_pct = round((completed_units / total_units) * 100) if total_units > 0 else 0
+
+    if any(a["category"] == "approval" for a in pending_actions):
+        project_status = "AWAITING_APPROVAL"
+    elif any(a["category"] == "blocked" for a in pending_actions):
+        project_status = "BLOCKED"
+    elif len(msgs) == 0 or any(a["category"] == "clarification" for a in pending_actions):
+        project_status = "NEEDS_INPUT"
+    elif total_units > 0 and completion_pct >= 100 and len(pending_actions) == 0:
+        project_status = "COMPLETED"
+    else:
+        project_status = "ACTIVE"
+
+    last_summary = None
+    if msgs:
+        raw_last = str(msgs[-1].get("content") or "").strip().splitlines()
+        if raw_last:
+            last_summary = raw_last[0][:110]
+
+    conv["project_status"] = project_status
+    conv["completion_pct"] = completion_pct
+    conv["completed_units"] = completed_units
+    conv["total_units"] = total_units
+    conv["pending_actions"] = pending_actions[:8]
+    conv["last_activity_summary"] = last_summary
+    return conv
+
+
 def handle_action(action: str, payload: dict) -> dict:
     conn = get_db()
 
@@ -202,7 +342,7 @@ def handle_action(action: str, payload: dict) -> dict:
     if action == "home_summary":
         uid = str(payload["user_id"])
         recent = [
-            dict(r)
+            _enrich_conversation_project(conn, dict(r))
             for r in conn.execute(
                 """
                 SELECT c.id, c.title, c.mode, c.updated_at,
@@ -246,7 +386,7 @@ def handle_action(action: str, payload: dict) -> dict:
     if action == "conv_list":
         uid = str(payload["user_id"])
         rows = [
-            dict(r)
+            _enrich_conversation_project(conn, dict(r))
             for r in conn.execute(
                 """
                 SELECT c.id, c.title, c.mode, c.created_at, c.updated_at,

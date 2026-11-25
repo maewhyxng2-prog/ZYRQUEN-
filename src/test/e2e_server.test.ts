@@ -141,6 +141,52 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
     expect(oodTrace.task_timings?.some((t) => t.task === 'unlearned_boundary')).toBe(true);
     expect(oodTrace.bottleneck_task).toBeTruthy();
 
+    // 3b. Verify Project Dashboard enrichment on /api/conversations and /api/home
+    const conv2Res = await fetch(`${baseUrl}/api/conversations`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ title: 'Completed Math Project', mode: 'math' }),
+    });
+    expect(conv2Res.status).toBe(201);
+    const { conversation: conv2 } = (await conv2Res.json()) as { conversation: { id: string } };
+    const conv2MsgRes = await fetch(`${baseUrl}/api/conversations/${conv2.id}/messages`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ content: 'คำนวณ 8 * 8', mode: 'math' }),
+    });
+    expect(conv2MsgRes.status).toBe(201);
+
+    const listProjRes = await fetch(`${baseUrl}/api/conversations`, { headers: authHeaders });
+    expect(listProjRes.status).toBe(200);
+    const listProjJson = (await listProjRes.json()) as {
+      conversations: Array<{
+        id: string;
+        project_status?: string;
+        completion_pct?: number;
+        completed_units?: number;
+        total_units?: number;
+        pending_actions?: Array<{ category: string }>;
+      }>;
+    };
+    const cidSummary = listProjJson.conversations.find((c) => c.id === cid);
+    expect(cidSummary?.project_status).toBe('NEEDS_INPUT');
+    expect(cidSummary?.completion_pct).toBe(50);
+    expect(cidSummary?.completed_units).toBe(1);
+    expect(cidSummary?.total_units).toBe(2);
+    expect(cidSummary?.pending_actions?.some((a) => a.category === 'clarification')).toBe(true);
+
+    const cid2Summary = listProjJson.conversations.find((c) => c.id === conv2.id);
+    expect(cid2Summary?.project_status).toBe('COMPLETED');
+    expect(cid2Summary?.completion_pct).toBe(100);
+    expect(cid2Summary?.pending_actions).toEqual([]);
+
+    const homeProjRes = await fetch(`${baseUrl}/api/home`, { headers: authHeaders });
+    expect(homeProjRes.status).toBe(200);
+    const homeProjJson = (await homeProjRes.json()) as {
+      recent_conversations: Array<{ id: string; project_status?: string; completion_pct?: number }>;
+    };
+    expect(homeProjJson.recent_conversations.find((c) => c.id === conv2.id)?.project_status).toBe('COMPLETED');
+
     // Verify persistent Reasoning Trace stored in SQLite & exposed via workflows endpoints
     const wfRes = await fetch(`${baseUrl}/api/workflows`, { headers: authHeaders });
     expect(wfRes.status).toBe(200);

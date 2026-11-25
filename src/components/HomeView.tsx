@@ -3,7 +3,6 @@ import {
   Archive,
   ArrowRight,
   BarChart3,
-  CheckSquare,
   ChevronRight,
   Code2,
   FileText,
@@ -23,6 +22,7 @@ import type {
   User,
 } from '../types';
 import { CopyButton } from './CopyButton';
+import { ProjectDashboard } from './ProjectDashboard';
 import { SpacetimeFabric } from './SpacetimeFabric';
 import { TemporalIntelligenceCore } from './TemporalIntelligenceCore';
 
@@ -331,73 +331,14 @@ export function HomeView({
       {/* Two-Column Workspace Overview: Recent Projects & Execution Status */}
       <div className="grid gap-6 lg:grid-cols-12">
         <div className="space-y-6 lg:col-span-7">
-          <section>
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-base font-semibold text-[var(--color-text)]">
-                โปรเจกต์ล่าสุด
-              </h3>
-              <button
-                type="button"
-                onClick={() => onNavigate('projects')}
-                className="min-h-[36px] px-2 text-xs font-medium text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] whitespace-nowrap"
-              >
-                จัดการโปรเจกต์
-              </button>
-            </div>
-
-            <div className="divide-y divide-[var(--color-border)] overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
-              {loading && !homeSummary ? (
-                <div className="p-6 text-sm text-[var(--color-text-secondary)]">กำลังโหลดโปรเจกต์ล่าสุด...</div>
-              ) : recentProjects.length === 0 ? (
-                <div className="flex flex-col items-start gap-3 p-6">
-                  <p className="text-sm text-[var(--color-text-secondary)]">
-                    ยังไม่มีโปรเจกต์ที่เปิดใช้งาน เริ่มสร้างงานใหม่หรือกำหนดเป้าหมายด้านบนเพื่อเริ่มทำงานทันที
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => onNavigate('create')}
-                    className="min-h-[38px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 text-xs font-medium text-[var(--color-text)] hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
-                  >
-                    เริ่มงานใหม่
-                  </button>
-                </div>
-              ) : (
-                recentProjects.map((proj) => (
-                  <div
-                    key={proj.id}
-                    className="flex min-h-[62px] items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-[var(--color-surface-hover)]"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => onOpenConversation(proj.id)}
-                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                    >
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-primary)]">
-                        <FolderKanban className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium text-[var(--color-text)]">{proj.title}</p>
-                        <p className="mt-0.5 text-xs text-[var(--color-text-secondary)] tabular-nums">
-                          <span>กำลังพัฒนา</span>
-                          <span aria-hidden="true"> · </span>
-                          <span>{proj.message_count} รายการ</span>
-                          <span aria-hidden="true"> · </span>
-                          <span>{formatRelativeTime(proj.updated_at)}</span>
-                        </p>
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onOpenConversation(proj.id)}
-                      className="min-h-[36px] shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-raised)] whitespace-nowrap"
-                    >
-                      เปิดโปรเจกต์เพื่อทำงานต่อ
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
+          <ProjectDashboard
+            projects={recentProjects}
+            variant="overview"
+            loading={loading && !homeSummary}
+            onOpenProject={onOpenConversation}
+            onCreateNew={() => onNavigate('create')}
+            onManageAll={() => onNavigate('projects')}
+          />
 
           {recentMissions.length > 0 && (
             <section>
@@ -497,25 +438,6 @@ export function HomeView({
 
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-2.5 text-xs text-[var(--color-text-secondary)]">
               สถานะทั้งหมดอ่านจากฐานข้อมูลและพื้นที่ทำงานจริง พร้อมระบบอนุมัติก่อนดำเนินการที่ส่งผลกระทบสูง
-            </div>
-
-            <div className="grid grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                onClick={() => onNavigate('tasks')}
-                className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
-              >
-                <CheckSquare className="h-4 w-4 text-[var(--color-accent)]" />
-                <span>งานของฉัน</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => onNavigate('artifacts')}
-                className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
-              >
-                <Archive className="h-4 w-4 text-[var(--color-primary)]" />
-                <span>คลังผลงาน</span>
-              </button>
             </div>
           </div>
         </section>

@@ -13,7 +13,6 @@ import {
   FileCode2,
   FileSpreadsheet,
   FileText,
-  FolderKanban,
   Globe,
   Layers,
   Paperclip,
@@ -26,7 +25,6 @@ import {
   Search,
   Settings,
   ShieldCheck,
-  Trash2,
   Workflow,
   Wrench,
   X,
@@ -51,6 +49,7 @@ import type {
   WorkspaceFileItem,
 } from '../types';
 import { CopyButton } from './CopyButton';
+import { ProjectDashboard } from './ProjectDashboard';
 import { SafeMessageText, toPlainAssistantCopyText } from './SafeMessageText';
 
 function formatDateThai(iso: string): string {
@@ -136,7 +135,6 @@ export function ProjectsView({
   onDeleteProject,
   onNavigate,
 }: ProjectsViewProps) {
-  const [search, setSearch] = useState('');
   const [projectTitle, setProjectTitle] = useState('');
   const [projectGoal, setProjectGoal] = useState('');
   const [saveSpecFile, setSaveSpecFile] = useState(true);
@@ -171,12 +169,6 @@ export function ProjectsView({
       active = false;
     };
   }, [loadWorkspaceMeta]);
-
-  const filteredProjects = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return conversations;
-    return conversations.filter((c) => c.title.toLowerCase().includes(q));
-  }, [conversations, search]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -335,83 +327,16 @@ export function ProjectsView({
           </div>
         </section>
 
-        {/* Project List */}
-        <section className="lg:col-span-7">
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h3 className="text-base font-semibold text-[var(--color-text)]">
-              โปรเจกต์ทั้งหมด ({filteredProjects.length})
-            </h3>
-            <div className="relative w-full sm:w-64">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-text-muted)]" />
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="ค้นหาโปรเจกต์..."
-                aria-label="ค้นหาโปรเจกต์"
-                className="h-10 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] pl-9 pr-3 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
-              />
-            </div>
-          </div>
-
-          <div className="divide-y divide-[var(--color-border)] overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
-            {filteredProjects.length === 0 ? (
-              <div className="p-8 text-center">
-                <p className="text-sm text-[var(--color-text-secondary)]">
-                  {conversations.length === 0
-                    ? 'ยังไม่มีโปรเจกต์ เริ่มสร้างโปรเจกต์แรกจากแบบฟอร์มด้านซ้ายได้เลย'
-                    : 'ไม่พบโปรเจกต์ที่ตรงกับคำค้นหา'}
-                </p>
-              </div>
-            ) : (
-              filteredProjects.map((proj) => (
-                <div
-                  key={proj.id}
-                  className="flex flex-col gap-3 p-4 transition-colors hover:bg-[var(--color-surface-hover)] sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <button
-                    type="button"
-                    onClick={() => onOpenConversation(proj.id)}
-                    className="flex min-w-0 flex-1 items-center gap-3.5 text-left"
-                  >
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-primary)]">
-                      <FolderKanban className="h-4 w-4" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-semibold text-[var(--color-text)]">{proj.title}</p>
-                      <p className="mt-0.5 text-xs text-[var(--color-text-secondary)] tabular-nums">
-                        <span>กำลังพัฒนา</span>
-                        <span aria-hidden="true"> · </span>
-                        <span>{proj.message_count} รายการดำเนินการ</span>
-                        <span aria-hidden="true"> · </span>
-                        <span>{formatDateThai(proj.updated_at)}</span>
-                      </p>
-                    </div>
-                  </button>
-
-                  <div className="flex items-center gap-2 self-end sm:self-center">
-                    <button
-                      type="button"
-                      onClick={() => onOpenConversation(proj.id)}
-                      className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)] whitespace-nowrap"
-                    >
-                      <span>เปิดโปรเจกต์</span>
-                      <ArrowRight className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void onDeleteProject(proj.id)}
-                      aria-label={`ลบโปรเจกต์ ${proj.title}`}
-                      className="flex min-h-[38px] min-w-[38px] items-center justify-center rounded-xl text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </section>
+        {/* Project Dashboard */}
+        <div className="lg:col-span-7">
+          <ProjectDashboard
+            projects={conversations}
+            variant="full"
+            loading={loadingMeta}
+            onOpenProject={onOpenConversation}
+            onDeleteProject={onDeleteProject}
+          />
+        </div>
       </div>
     </div>
   );

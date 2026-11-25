@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -6,6 +6,7 @@ import {
   CheckSquare,
   FolderKanban,
   LayoutDashboard,
+  MoreHorizontal,
   Moon,
   PenTool,
   Settings,
@@ -43,6 +44,16 @@ const NAV_ITEMS: Array<{
   { id: 'artifacts', label: 'คลังผลงาน', icon: Archive },
 ];
 
+// Mobile: 4 daily tabs in the bar, the rest under "เพิ่มเติม". Desktop keeps all of NAV_ITEMS.
+const MOBILE_PRIMARY_IDS: AppScreen[] = ['overview', 'projects', 'create', 'tasks'];
+const MOBILE_MORE_IDS: AppScreen[] = ['analysis', 'artifacts'];
+const MOBILE_PRIMARY_ITEMS = MOBILE_PRIMARY_IDS.map(
+  (id) => NAV_ITEMS.find((item) => item.id === id)!,
+);
+const MOBILE_MORE_ITEMS = MOBILE_MORE_IDS.map(
+  (id) => NAV_ITEMS.find((item) => item.id === id)!,
+);
+
 export function AppShell({
   activeScreen,
   screenTitle,
@@ -57,6 +68,18 @@ export function AppShell({
   children,
 }: AppShellProps) {
   const { theme, toggleTheme } = useZyrquenTheme();
+  // The sheet belongs to the screen it was opened on, so it closes by itself when the screen changes.
+  const [moreOpenAt, setMoreOpenAt] = useState<AppScreen | null>(null);
+  const moreOpen = moreOpenAt === activeScreen;
+
+  useEffect(() => {
+    if (!moreOpen) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMoreOpenAt(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [moreOpen]);
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
@@ -219,40 +242,97 @@ export function AppShell({
         {children}
       </main>
 
-      {/* Mobile Bottom Navigation Bar */}
+      {/* Mobile Bottom Navigation Bar: 4 daily tabs + "เพิ่มเติม" */}
       {!hideBottomBarOnMobile && (
-        <nav
-          aria-label="แถบนำทางมือถือ"
-          className="fixed bottom-0 left-0 right-0 z-40 border-t border-[var(--color-border)] bg-[var(--color-surface)]/95 backdrop-blur-md pb-safe md:hidden"
-        >
-          <div className="grid h-[56px] grid-cols-6 items-center">
-            {NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
-              const active =
-                activeScreen === item.id ||
-                (activeScreen === 'workspace' && item.id === 'projects') ||
-                (activeScreen === 'memory' && item.id === 'tasks');
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => onNavigate(item.id)}
-                  aria-current={active ? 'page' : undefined}
-                  className={`flex min-h-[44px] flex-col items-center justify-center gap-1 px-0.5 transition-colors ${
-                    active
-                      ? 'text-[var(--color-accent)]'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
-                  }`}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <span className="max-w-full truncate text-[10px] font-medium leading-none tracking-tight">
-                    {item.label}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </nav>
+        <>
+          {moreOpen && (
+            <>
+              <button
+                type="button"
+                aria-label="ปิดเมนูเพิ่มเติม"
+                onClick={() => setMoreOpenAt(null)}
+                className="fixed inset-0 z-40 bg-black/40 md:hidden"
+              />
+              <div
+                role="dialog"
+                aria-label="เมนูเพิ่มเติม"
+                className="fixed inset-x-0 bottom-[calc(56px_+_env(safe-area-inset-bottom,0px))] z-40 rounded-t-2xl border border-b-0 border-[var(--color-border)] bg-[var(--color-surface)] p-2 md:hidden"
+              >
+                {MOBILE_MORE_ITEMS.map((item) => {
+                  const Icon = item.icon;
+                  const active = activeScreen === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        setMoreOpenAt(null);
+                        onNavigate(item.id);
+                      }}
+                      aria-current={active ? 'page' : undefined}
+                      className={`flex min-h-[48px] w-full items-center gap-3 rounded-xl px-3 text-sm font-medium transition-colors ${
+                        active
+                          ? 'text-[var(--color-accent)]'
+                          : 'text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]'
+                      }`}
+                    >
+                      <Icon className="h-4 w-4 shrink-0" />
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+          <nav
+            aria-label="แถบนำทางมือถือ"
+            className="fixed bottom-0 left-0 right-0 z-40 border-t border-[var(--color-border)] bg-[var(--color-surface)]/95 backdrop-blur-md pb-safe md:hidden"
+          >
+            <div className="grid h-[56px] grid-cols-5 items-center">
+              {MOBILE_PRIMARY_ITEMS.map((item) => {
+                const Icon = item.icon;
+                const active =
+                  activeScreen === item.id ||
+                  (activeScreen === 'workspace' && item.id === 'projects') ||
+                  (activeScreen === 'memory' && item.id === 'tasks');
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => onNavigate(item.id)}
+                    aria-current={active ? 'page' : undefined}
+                    className={`flex min-h-[44px] flex-col items-center justify-center gap-1 px-0.5 transition-colors ${
+                      active
+                        ? 'text-[var(--color-accent)]'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
+                    }`}
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    <span className="max-w-full truncate text-[10px] font-medium leading-none tracking-tight">
+                      {item.label}
+                    </span>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => setMoreOpenAt(moreOpen ? null : activeScreen)}
+                aria-expanded={moreOpen}
+                aria-haspopup="dialog"
+                className={`flex min-h-[44px] flex-col items-center justify-center gap-1 px-0.5 transition-colors ${
+                  moreOpen || MOBILE_MORE_IDS.includes(activeScreen)
+                    ? 'text-[var(--color-accent)]'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
+                }`}
+              >
+                <MoreHorizontal className="h-4 w-4 shrink-0" />
+                <span className="max-w-full truncate text-[10px] font-medium leading-none tracking-tight">
+                  เพิ่มเติม
+                </span>
+              </button>
+            </div>
+          </nav>
+        </>
       )}
     </div>
   );
