@@ -489,6 +489,13 @@ def test_training_readiness_counts_only_valid_signed_approvals(api_client, monke
     assert valid.json()["approved_training_approvals"] == 1
     assert valid.json()["approval_ready"] is True
 
+    approval["scope"] = "unrelated:scope"
+    wrong_scope = client.get("/training/readiness")
+    assert wrong_scope.status_code == 200
+    assert wrong_scope.json()["approved_training_approvals"] == 0
+    assert wrong_scope.json()["approval_ready"] is False
+
+    approval["scope"] = "training.native_controlled_run:execute_training"
     approval["signature_hmac"] = "tampered-signature"
     invalid = client.get("/training/readiness")
     assert invalid.status_code == 200
