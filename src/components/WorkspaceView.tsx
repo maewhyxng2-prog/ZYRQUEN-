@@ -5,7 +5,6 @@ import {
   Copy,
   ChevronDown,
   ChevronUp,
-  Cpu,
   FileText,
   FolderSearch,
   Globe,
@@ -22,7 +21,6 @@ import {
 import { apiRequest } from '../lib/api';
 import { detectPendingToolActivity, type ToolId } from '../lib/tools';
 import {
-  MODEL_VARIANTS,
   type ConversationSmartSummary,
   type ConversationSummary,
   type MessageItem,
@@ -56,7 +54,6 @@ interface WorkspaceViewProps {
     attachment?: string,
     modelVariant?: ModelVariantId
   ) => Promise<void>;
-  onModelVariantChange?: (variant: ModelVariantId) => void;
   onRetryLast?: () => void;
 }
 
@@ -118,26 +115,13 @@ export function WorkspaceView({
   onNewConversation,
   onDeleteConversation,
   onSendMessage,
-  onModelVariantChange,
   onRetryLast,
 }: WorkspaceViewProps) {
   const [input, setInput] = useState('');
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
-  const [mode, setMode] = useState<ReasoningMode>(defaultMode);
-  const [prevDefaultMode, setPrevDefaultMode] = useState<ReasoningMode>(defaultMode);
-  if (prevDefaultMode !== defaultMode) {
-    setPrevDefaultMode(defaultMode);
-    setMode(defaultMode);
-  }
-  const [selectedModelVariant, setSelectedModelVariant] =
-    useState<ModelVariantId>(defaultModelVariant);
-  const [prevDefaultVariant, setPrevDefaultVariant] =
-    useState<ModelVariantId>(defaultModelVariant);
-  if (prevDefaultVariant !== defaultModelVariant) {
-    setPrevDefaultVariant(defaultModelVariant);
-    setSelectedModelVariant(defaultModelVariant);
-  }
+  const mode = defaultMode;
+  const selectedModelVariant = defaultModelVariant;
   const [attachment, setAttachment] = useState<{ name: string; content: string } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
@@ -634,40 +618,11 @@ export function WorkspaceView({
       {/* Bottom-Docked Message Composer */}
       <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 pb-safe sm:px-6 sm:py-3">
         <form onSubmit={handleSubmit} className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-1">
-              {(
-                [
-                  { id: 'auto', label: 'อัตโนมัติ' },
-                  { id: 'math', label: 'คณิต' },
-                  { id: 'knowledge', label: 'ความจำ' },
-                  { id: 'model', label: 'โมเดล' },
-                ] as const
-              ).map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => setMode(m.id)}
-                  className={`min-h-[32px] rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
-                    mode === m.id
-                      ? 'bg-[var(--color-primary)] text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
-                  }`}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-
+          <div className="flex items-center justify-end gap-2">
             {attachment && (
               <div className="flex min-w-0 items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-xs text-[var(--color-accent)]">
                 <span className="max-w-[140px] truncate">{attachment.name}</span>
-                <button
-                  type="button"
-                  onClick={() => setAttachment(null)}
-                  aria-label="ลบไฟล์แนบ"
-                  className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                >
+                <button type="button" onClick={() => setAttachment(null)} aria-label="ลบไฟล์แนบ" className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]">
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -759,49 +714,7 @@ export function WorkspaceView({
             </button>
           </div>
 
-          {/* Composer Footer: Consistent Model Variant Selector across Mobile & Desktop */}
-          <footer
-            aria-label="ส่วนท้ายช่องข้อความ"
-            className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2"
-          >
-            <div className="relative flex min-w-0 items-center">
-              <Cpu
-                className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--color-primary)]"
-                aria-hidden="true"
-              />
-              <select
-                aria-label="เลือกรุ่นโมเดล (Model Variant)"
-                value={selectedModelVariant}
-                onChange={(e) => {
-                  const nextVariant = e.target.value as ModelVariantId;
-                  setSelectedModelVariant(nextVariant);
-                  onModelVariantChange?.(nextVariant);
-                }}
-                className="h-9 max-w-[230px] cursor-pointer appearance-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] pl-8 pr-8 font-mono text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-primary)] focus:border-[var(--color-focus)] focus:outline-none sm:max-w-none"
-              >
-                {MODEL_VARIANTS.map((variant) => (
-                  <option
-                    key={variant.id}
-                    value={variant.id}
-                    className="bg-[var(--color-surface-raised)] text-[var(--color-text)]"
-                  >
-                    {variant.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown
-                className="pointer-events-none absolute right-2.5 h-3.5 w-3.5 text-[var(--color-primary)]"
-                aria-hidden="true"
-              />
-            </div>
 
-            <span className="truncate font-mono text-[11px] text-[var(--color-accent)]">
-              <span className="sm:hidden">{selectedModelVariant}</span>
-              <span className="hidden sm:inline">
-                {selectedModelVariant} · Enter ส่ง
-              </span>
-            </span>
-          </footer>
         </form>
       </div>
 
