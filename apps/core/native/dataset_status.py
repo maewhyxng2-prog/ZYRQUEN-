@@ -55,6 +55,8 @@ def inspect_dataset_directory(
 
     try:
         manifest = verify_dataset_manifest(resolved_dir)
+        raw_version = manifest.get("version")
+        dataset_version = str(raw_version).strip() if raw_version is not None else None
         splits = resolve_dataset_splits(manifest)
         fmt = detect_dataset_format(resolved_dir)
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -259,6 +261,7 @@ def inspect_v11_training_dataset_readiness(dataset_dir: str | Path | None) -> di
         return {
             "configured": False,
             "verified": False,
+            "version": None,
             "format": None,
             "four_split_enforced": True,
             "required_splits": list(V11_SPLITS),
@@ -275,6 +278,7 @@ def inspect_v11_training_dataset_readiness(dataset_dir: str | Path | None) -> di
         return {
             "configured": False,
             "verified": False,
+            "version": None,
             "format": None,
             "four_split_enforced": True,
             "required_splits": list(V11_SPLITS),
@@ -290,6 +294,7 @@ def inspect_v11_training_dataset_readiness(dataset_dir: str | Path | None) -> di
     four_split_present = False
     dataset_splits: list[str] = []
     dataset_format: str | None = None
+    dataset_version: str | None = None
     split_counts: dict[str, int] = {}
     leakage_report_dict: dict[str, Any] = {
         "status": "NOT RUN",
@@ -324,6 +329,7 @@ def inspect_v11_training_dataset_readiness(dataset_dir: str | Path | None) -> di
     return {
         "configured": True,
         "verified": verified,
+        "version": dataset_version,
         "format": dataset_format,
         "four_split_enforced": True,
         "required_splits": list(V11_SPLITS),
