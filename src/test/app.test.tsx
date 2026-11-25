@@ -11,6 +11,7 @@ import App, {
 import { AuthGate } from '../components/AuthGate';
 import { MemoryWorkflowsView } from '../components/MemoryWorkflowsView';
 import { ProjectsView } from '../components/ProjectsView';
+import { TasksView } from '../components/TasksView';
 import { SettingsView } from '../components/SettingsView';
 import { SpacetimeFabric } from '../components/SpacetimeFabric';
 import { TemporalIntelligenceCore } from '../components/TemporalIntelligenceCore';
@@ -34,6 +35,24 @@ function mockFetch(handlers: Record<string, (init?: RequestInit) => Response | P
 }
 
 describe('ZYRQUEN ประสบการณ์แอปพลิเคชันภาษาไทยเป็นหลัก', () => {
+  it('แสดงงานจาก Native Mission API และเริ่มดำเนินงานผ่าน API', async () => {
+    const mission = { id: 'm1', goal: 'ตรวจสอบโค้ด', status: 'COMPLETED', created_at: '2026-11-25T00:00:00Z', updated_at: '2026-11-25T00:00:00Z', report_markdown: 'ผลตรวจสอบผ่าน' };
+    mockFetch({
+      'GET /api/autonomous/missions': () => new Response(JSON.stringify({ missions: [mission] }), { status: 200 }),
+      'POST /api/autonomous/missions': (init) => {
+        const body = JSON.parse(String(init?.body || '{}')) as { goal: string; enableExecution: boolean };
+        expect(body.goal).toBe('สร้างรายงานทดสอบ');
+        expect(body.enableExecution).toBe(true);
+        return new Response(JSON.stringify({ mission: { ...mission, id: 'm2', goal: body.goal, status: 'COMPLETED' } }), { status: 201 });
+      },
+    });
+    render(<TasksView token="test-token" />);
+    expect(await screen.findByText('ตรวจสอบโค้ด')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('เป้าหมายงาน'), { target: { value: 'สร้างรายงานทดสอบ' } });
+    fireEvent.click(screen.getByRole('button', { name: /เริ่มดำเนินงาน/i }));
+    expect(await screen.findByText('สร้างรายงานทดสอบ')).toBeInTheDocument();
+  });
+
   it('จัดการโปรเจกต์ผ่าน API จริงของ workspace และอัปเดตสถานะในหน้าจอ', async () => {
     let stored = [{ id: 'p1', name: 'ZYRQUEN Core', description: 'Native intelligence project', status: 'active', created_at: '2026-11-25T00:00:00Z', updated_at: '2026-11-25T00:00:00Z' }];
     mockFetch({
@@ -657,6 +676,11 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(screen.getByRole('button', { name: 'ปิดประวัติ' }));
 
     fireEvent.click(screen.getAllByRole('button', { name: 'งานของฉัน' })[0]);
+    expect(await screen.findByRole('heading', { name: 'งานของฉัน' })).toBeInTheDocument();
+
+    // Knowledge graph and workflow administration now live under Settings.
+    fireEvent.click(screen.getAllByRole('button', { name: 'ตั้งค่า' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'ความรู้และโฟลว์' }));
     expect(await screen.findByText('ความจำและระบบเวิร์กโฟลว์ภายใน')).toBeInTheDocument();
 
     // Global fuzzy search with Fuse.js queries across Knowledge Fragments & Workflow Definitions simultaneously
