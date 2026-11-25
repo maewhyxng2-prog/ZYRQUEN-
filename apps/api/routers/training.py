@@ -286,11 +286,23 @@ def get_training_readiness(
 
         # Count only approvals that pass the same status, expiry, action binding,
         # and HMAC verification used immediately before training dispatch.
+        active_dataset_version = str(ds_report.get("version") or "").strip()
+        expected_dataset_scope = (
+            f"dataset:{active_dataset_version}" if active_dataset_version else None
+        )
         for item in approved_list:
-            if item.get("action_type") != "training.execute":
+            if (
+                item.get("action_type") != "training.execute"
+                or expected_dataset_scope is None
+            ):
                 continue
             try:
-                _verify_training_approval_readonly(engine, str(item["id"]))
+                _verify_training_approval_readonly(
+                    engine,
+                    str(item["id"]),
+                    expected_scope=expected_dataset_scope,
+                    expected_step_key="execute_training",
+                )
             except (ApprovalViolationError, OSError, ValueError, KeyError, TypeError):
                 continue
             approved_training_approvals += 1
@@ -300,12 +312,19 @@ def get_training_readiness(
             1
             for item in pending_list
             if item.get("action_type") == "training.execute"
+            and expected_dataset_scope is not None
+            and item.get("scope") == expected_dataset_scope
+            and item.get("step_key") == "execute_training"
             and datetime.fromisoformat(item["expires_at"]) > now
         )
     except (OSError, ValueError, KeyError, TypeError):
         pass
 
     approval_ready = approved_training_approvals > 0
+    if not approval_secret_configured:
+        reasons.append(
+            "ZYRQUEN_APPROVAL_SECRET is not configured; approval signatures are not durable across restarts."
+        )
     if not approval_ready:
         reasons.append(
             "No active, validly signed Tier-2 approval token for training.execute (required before dispatch)."
@@ -323,6 +342,7 @@ def get_training_readiness(
         and admin_configured
         and is_training_admin
         and approval_ready
+        and approval_secret_configured
     )
     status_value = (
         "ready"
