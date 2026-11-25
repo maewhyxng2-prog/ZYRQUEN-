@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { WifiOff } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { AppShell } from './components/AppShell';
+import { ProjectsView } from './components/ProjectsView';
+import { ArtifactsView } from './components/ArtifactsView';
 import { AuthGate } from './components/AuthGate';
 import { CommandPalette } from './components/CommandPalette';
 import { HomeView } from './components/HomeView';
@@ -37,7 +39,7 @@ function readRouteFromUrl(): {
   const tab = params.get('tab');
 
   const screen: AppScreen =
-    view === 'workspace' || view === 'memory' || view === 'settings' ? view : 'home';
+    view === 'workspace' || view === 'memory' || view === 'settings' || view === 'projects' || view === 'analysis' || view === 'artifacts' ? view : 'home';
   const settingsTab: SettingsTab =
     tab === 'developer' || tab === 'admin' ? tab : 'account';
 
@@ -889,16 +891,22 @@ export default function App() {
 
   const screenTitle =
     screen === 'home'
-      ? 'ZYRQUEN Ω∞'
-      : screen === 'workspace'
-        ? activeTitle
-        : screen === 'memory'
-          ? 'ความจำและเวิร์กโฟลว์'
-          : settingsTab === 'developer'
-            ? 'เครื่องมือนักพัฒนา'
-            : settingsTab === 'admin'
-              ? 'ผู้ดูแลระบบ'
-              : 'ตั้งค่าบัญชี';
+      ? 'ภาพรวม'
+      : screen === 'projects'
+        ? 'โปรเจกต์'
+        : screen === 'workspace'
+          ? activeTitle
+          : screen === 'memory'
+            ? 'งานของฉัน'
+            : screen === 'analysis'
+              ? 'วิเคราะห์'
+              : screen === 'artifacts'
+                ? 'คลังผลงาน'
+                : settingsTab === 'developer'
+                  ? 'เครื่องมือนักพัฒนา'
+                  : settingsTab === 'admin'
+                    ? 'ผู้ดูแลระบบ'
+                    : 'ตั้งค่าบัญชี';
 
   return (
     <AppShell
@@ -1010,13 +1018,17 @@ export default function App() {
             />
           )}
 
+          {screen === 'projects' && <ProjectsView token={token} />}
+
           {screen === 'memory' && <MemoryWorkflowsView token={token} user={user} />}
 
-          {screen === 'settings' && (
+          {screen === 'artifacts' && <ArtifactsView token={token} />}
+
+          {(screen === 'settings' || screen === 'analysis') && (
             <SettingsView
               token={token}
               user={user}
-              activeTab={user.role !== 'admin' && settingsTab === 'admin' ? 'account' : settingsTab}
+              activeTab={screen === 'analysis' ? 'developer' : user.role !== 'admin' && settingsTab === 'admin' ? 'account' : settingsTab}
               autoExpandTrace={autoExpandTrace}
               defaultMode={defaultMode}
               perfSamples={perfSamples}
