@@ -101,7 +101,7 @@ export function AppShell({
             <button
               type="button"
               onClick={onOpenProfile}
-              aria-label="โปรไฟล์บัญชี"
+              aria-label="ตั้งค่า"
               className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
             >
               <div className="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-xs font-semibold text-[var(--color-accent)]">
@@ -178,6 +178,7 @@ export function AppShell({
             <button
               type="button"
               onClick={onOpenProfile}
+              aria-label="ตั้งค่า"
               className="flex h-10 shrink-0 items-center gap-2.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
             >
               <UserIcon className="h-3.5 w-3.5 text-[var(--color-accent)]" />
