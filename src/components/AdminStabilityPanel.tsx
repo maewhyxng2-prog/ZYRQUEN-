@@ -23,6 +23,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { serializeTableToTsv } from '../lib/clipboard';
 import type {
   AdminOverview,
   ClientLatencySample,
@@ -31,6 +32,7 @@ import type {
   ReasoningTaskTiming,
   ThreadCleanupVerification,
 } from '../types';
+import { CopyButton } from './CopyButton';
 
 interface AdminStabilityPanelProps {
   adminData: AdminOverview | null;
@@ -191,6 +193,35 @@ export function AdminStabilityPanel({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <CopyButton
+            getText={() =>
+              [
+                `ZYRQUEN Stability & Bottleneck Telemetry`,
+                `Memory Status: ${
+                  latestSample?.leakWarning
+                    ? 'LEAK_WARNING'
+                    : cleanupVerification?.clean === false
+                      ? 'THREAD_LEAK'
+                      : 'STABLE'
+                }`,
+                `Latency Avg/Max: ${latencySummary.avgMs} ms / ${latencySummary.maxMs} ms (${latencySummary.count} samples)`,
+                slowestTask
+                  ? `Slowest Task: ${slowestTask.task} (Max ${slowestTask.maxMs} ms, Avg ${slowestTask.avgMs} ms)`
+                  : 'Slowest Task: none',
+                taskBottleneckStats.length > 0
+                  ? serializeTableToTsv(
+                      ['Task', 'Runs', 'Avg (ms)', 'Max (ms)'],
+                      taskBottleneckStats.map((r) => [r.task, r.count, r.avgMs, r.maxMs])
+                    )
+                  : '',
+              ]
+                .filter(Boolean)
+                .join('\n\n')
+            }
+            ariaLabel="คัดลอกรายงานเสถียรภาพระบบ"
+            title="คัดลอกรายงานเสถียรภาพและตารางคอขวด"
+            size="xs"
+          />
           {onCapturePerfSample && (
             <button
               type="button"
@@ -452,9 +483,25 @@ export function AdminStabilityPanel({
               สรุปค่าเฉลี่ย (Avg ms) และจุดสูงสุด (Max ms) ของแต่ละโมดูลในสถาปัตยกรรมเนทีฟเพื่อชี้เป้าคอขวด
             </p>
           </div>
-          <span className="font-mono text-[11px] text-[var(--color-warning)] tabular-nums">
-            {taskBottleneckStats.length} tasks
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[11px] text-[var(--color-warning)] tabular-nums">
+              {taskBottleneckStats.length} tasks
+            </span>
+            {taskBottleneckStats.length > 0 && (
+              <CopyButton
+                getText={() =>
+                  serializeTableToTsv(
+                    ['Task', 'Runs', 'Avg (ms)', 'Max (ms)'],
+                    taskBottleneckStats.map((r) => [r.task, r.count, r.avgMs, r.maxMs])
+                  )
+                }
+                label="คัดลอกตาราง"
+                ariaLabel="คัดลอกตาราง Bottleneck"
+                title="คัดลอกตาราง Bottleneck Breakdown เป็นรูปแบบคั่นด้วยแท็บ (TSV)"
+                size="xs"
+              />
+            )}
+          </div>
         </div>
 
         {taskBottleneckStats.length === 0 ? (

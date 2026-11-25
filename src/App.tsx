@@ -540,7 +540,24 @@ export default function App() {
           return;
         }
         if (canCommit()) {
-          setWorkspaceError(err instanceof ApiError ? err.message : 'Failed to load conversation');
+          if (err instanceof ApiError && err.status === 404) {
+            // Stale or deleted conversation ID: cleanly reset to a fresh session without surfacing "Conversation not found"
+            setActiveConversationId(null);
+            setActiveTitle('เซสชันใหม่');
+            setMessages([]);
+            setWorkspaceError(null);
+            const cleanUrl = buildUrl('workspace', null, settingsTab);
+            if (window.location.pathname + window.location.search !== cleanUrl) {
+              window.history.replaceState(
+                { screen: 'workspace', conversationId: null, settingsTab },
+                '',
+                cleanUrl
+              );
+            }
+            void loadHomeAndConversations();
+          } else {
+            setWorkspaceError(err instanceof ApiError ? err.message : 'Failed to load conversation');
+          }
         }
       } finally {
         entry.settled = true;
@@ -551,7 +568,7 @@ export default function App() {
         }
       }
     },
-    [token]
+    [loadHomeAndConversations, settingsTab, token]
   );
 
   useEffect(() => {
@@ -644,38 +661,78 @@ export default function App() {
     setLastFailedPrompt(null);
 
     try {
-      let targetCid = cid;
-      if (!targetCid) {
+      const createFreshConversation = async () => {
         const created = await apiRequest<{ conversation: ConversationSummary }>('/api/conversations', {
           method: 'POST',
           token,
           signal: streamController.signal,
           body: { title: content ? content.slice(0, 48) : 'Attached Context', mode },
         });
-        targetCid = created.conversation.id;
-        skipNextLoadCidRef.current = targetCid;
+        const newCid = created.conversation.id;
+        skipNextLoadCidRef.current = newCid;
+        setConversations((prev) => [
+          { ...created.conversation, message_count: 0 },
+          ...prev.filter((c) => c.id !== newCid),
+        ]);
         setActiveTitle(created.conversation.title);
-        pushRoute('workspace', targetCid, settingsTab);
+        pushRoute('workspace', newCid, settingsTab);
+        return newCid;
+      };
+
+      let targetCid = cid;
+      if (!targetCid) {
+        targetCid = await createFreshConversation();
       }
 
       const requestStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
-      const res = await streamConversationMessage<{
+      let res: {
         title: string;
         user_message: MessageItem;
         assistant_message: MessageItem;
-      }>(targetCid, {
-        token,
-        content,
-        mode,
-        attachment,
-        modelVariant,
-        signal: streamController.signal,
-        onDelta: (partial) => {
-          if (!streamController.signal.aborted) {
-            setStreamingContent(partial);
-          }
-        },
-      });
+      };
+      try {
+        res = await streamConversationMessage<{
+          title: string;
+          user_message: MessageItem;
+          assistant_message: MessageItem;
+        }>(targetCid, {
+          token,
+          content,
+          mode,
+          attachment,
+          modelVariant,
+          signal: streamController.signal,
+          onDelta: (partial) => {
+            if (!streamController.signal.aborted) {
+              setStreamingContent(partial);
+            }
+          },
+        });
+      } catch (streamErr) {
+        if (streamErr instanceof ApiError && streamErr.status === 404 && !streamController.signal.aborted) {
+          // Recover automatically if targetCid no longer exists in database
+          targetCid = await createFreshConversation();
+          res = await streamConversationMessage<{
+            title: string;
+            user_message: MessageItem;
+            assistant_message: MessageItem;
+          }>(targetCid, {
+            token,
+            content,
+            mode,
+            attachment,
+            modelVariant,
+            signal: streamController.signal,
+            onDelta: (partial) => {
+              if (!streamController.signal.aborted) {
+                setStreamingContent(partial);
+              }
+            },
+          });
+        } else {
+          throw streamErr;
+        }
+      }
 
       if (streamController.signal.aborted) return;
       const elapsedMs =
@@ -939,6 +996,7 @@ export default function App() {
       <AnimatePresence mode="wait" initial={false}>
         <motion.div
           key={`${screen}-${screen === 'settings' ? settingsTab : ''}`}
+          className="flex min-h-0 flex-1 flex-col"
           initial={{ opacity: 0, y: 4 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -4 }}

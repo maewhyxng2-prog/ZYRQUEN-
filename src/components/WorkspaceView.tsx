@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Cpu,
+  Download,
   FileText,
   FolderSearch,
   Globe,
@@ -18,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
+import { redactSensitiveData } from '../lib/clipboard';
 import { detectPendingToolActivity, type ToolId } from '../lib/tools';
 import {
   MODEL_VARIANTS,
@@ -28,7 +30,8 @@ import {
   type NativeTrace,
   type ReasoningMode,
 } from '../types';
-import { SafeMessageText } from './SafeMessageText';
+import { CopyButton } from './CopyButton';
+import { SafeMessageText, toPlainAssistantCopyText } from './SafeMessageText';
 import { SpacetimeFabric } from './SpacetimeFabric';
 import { TemporalIntelligenceCore } from './TemporalIntelligenceCore';
 
@@ -197,6 +200,20 @@ export function WorkspaceView({
     }));
   }
 
+  function handleExportMessage(msg: MessageItem) {
+    const plainText = toPlainAssistantCopyText(msg.content);
+    if (!plainText || typeof document === 'undefined' || typeof URL === 'undefined') return;
+    const blob = new Blob([plainText], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `zyrquen-output-${msg.id.slice(0, 8)}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   async function handleSubmit(e?: React.FormEvent) {
     if (e) e.preventDefault();
     const trimmed = input.trim();
@@ -321,15 +338,15 @@ export function WorkspaceView({
   }
 
   return (
-    <div className="relative flex h-[calc(100dvh-52px)] flex-col bg-[var(--color-bg)] text-[var(--color-text)] md:h-[calc(100dvh-60px)]">
+    <div className="relative flex h-[calc(100dvh-52px)] min-h-0 flex-1 flex-col overflow-hidden bg-[var(--color-bg)] text-[var(--color-text)] md:h-[calc(100dvh-60px)]">
       {/* Compact Workspace Toolbar */}
-      <div className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 sm:px-6">
+      <div className="flex min-h-[48px] shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 sm:px-6">
         <div className="flex min-w-0 items-center gap-2">
           <button
             type="button"
             onClick={() => setHistoryOpen(true)}
             aria-label="เปิดประวัติบทสนทนา"
-            className="flex min-h-[44px] items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
+            className="flex min-h-[40px] items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
           >
             <History className="h-4 w-4 text-[var(--color-accent)]" />
             <span>ประวัติ</span>
@@ -349,7 +366,7 @@ export function WorkspaceView({
               type="button"
               onClick={() => setSummaryOpen((prev) => !prev)}
               aria-expanded={summaryOpen}
-              className="flex min-h-[44px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
+              className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
             >
               <ListChecks className="h-4 w-4 text-[var(--color-accent)]" />
               <span className="hidden sm:inline">สรุปสำคัญ</span>
@@ -363,7 +380,7 @@ export function WorkspaceView({
           <button
             type="button"
             onClick={onNewConversation}
-            className="flex min-h-[44px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
+            className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
           >
             <Plus className="h-4 w-4" />
             <span>เซสชันใหม่</span>
@@ -375,19 +392,34 @@ export function WorkspaceView({
       {summaryOpen && activeConversationId && messages.length > 0 && (
         <section
           aria-label="สรุปประเด็นสำคัญอัตโนมัติ"
-          className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 sm:px-6"
+          className="max-h-[38dvh] shrink-0 overflow-y-auto border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 sm:px-6"
         >
           <div className="mx-auto max-w-3xl">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs font-semibold text-[var(--color-accent)]">
                 Smart Summary · ประเด็นและผลลัพธ์ยืนยันแล้ว
               </p>
-              {smartSummary && (
-                <span className="text-[11px] text-[var(--color-text-secondary)] tabular-nums">
-                  {smartSummary.metrics.verified_count} ยืนยัน ·{' '}
-                  {smartSummary.metrics.not_learned_count} Not Learned
-                </span>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {smartSummary && (
+                  <span className="text-[11px] text-[var(--color-text-secondary)] tabular-nums">
+                    {smartSummary.metrics.verified_count} ยืนยัน ·{' '}
+                    {smartSummary.metrics.not_learned_count} รอข้อมูลเพิ่ม
+                  </span>
+                )}
+                {smartSummary && smartSummary.bullets.length > 0 && (
+                  <CopyButton
+                    getText={() =>
+                      [
+                        `Smart Summary (${smartSummary.metrics.verified_count} ยืนยัน / ${smartSummary.metrics.not_learned_count} รอข้อมูลเพิ่ม)`,
+                        ...smartSummary.bullets.map((b) => `- ${toPlainAssistantCopyText(b)}`),
+                      ].join('\n')
+                    }
+                    ariaLabel="คัดลอกสรุปสำคัญ"
+                    title="คัดลอกสรุปสำคัญทั้งหมด"
+                    size="xs"
+                  />
+                )}
+              </div>
             </div>
             {summaryLoading ? (
               <p className="mt-2 text-xs text-[var(--color-text-secondary)]">กำลังสรุปจากแกนสมองภายใน...</p>
@@ -419,13 +451,13 @@ export function WorkspaceView({
               กำลังโหลดประวัติข้อความ...
             </div>
           ) : messages.length === 0 ? (
-            <div className="zyrq-glow relative my-6 overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-6 sm:p-8">
-              <SpacetimeFabric density="minimal" className="absolute inset-0" />
+            <div className="zyrq-glow relative my-4 overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 sm:my-6 sm:p-8">
+              <SpacetimeFabric density="minimal" className="pointer-events-none absolute inset-0" />
               <div className="relative z-10 flex flex-col items-start gap-5">
                 <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
                   <TemporalIntelligenceCore
                     variant="compact"
-                    size={108}
+                    size={96}
                     active={sending || streamingContent !== null}
                   />
                   <div>
@@ -433,19 +465,22 @@ export function WorkspaceView({
                       แกนประมวลผลและเหตุผล ZYRQUEN Ω∞
                     </h2>
                     <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                      การรับรู้ · การเรียนรู้ · วิวัฒนาการของความรู้ · การให้เหตุผล · การพัฒนาตนเอง
+                      การรับรู้ · การวิเคราะห์ข้อมูล/โค้ด · การให้เหตุผล · การวางแผนงานภายใน
+                    </p>
+                    <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+                      Web Workspace Client เชื่อมต่อ Python Native Core (แยกจากแอป Native Android/Desktop)
                     </p>
                   </div>
                 </div>
                 <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
-                  ระบบประมวลผลเชิงสัญลักษณ์ การให้เหตุผล การสร้างและเชื่อมโยงกราฟความรู้ และการวางแผนงานภายในของ ZYRQUEN
+                  ทำงานร่วมกับ ZYRQUEN ได้ทั้งการสนทนา วิเคราะห์ไฟล์ข้อมูล/โครงสร้างโค้ดที่แนบ คำนวณเชิงสัญลักษณ์ เชื่อมโยงกราฟความรู้ และวางแผนงานแบบมีขั้นตอนตรวจสอบ
                 </p>
                 <div className="grid w-full gap-2.5 sm:grid-cols-2">
                   {[
+                    { text: 'สวัสดี', m: 'auto' as ReasoningMode },
                     { text: 'คำนวณ (144 / 12) + sqrt(81)', m: 'math' as ReasoningMode },
                     { text: 'สอน: ZYRQUEN -> บังคับใช้ -> Approval Gate', m: 'knowledge' as ReasoningMode },
-                    { text: 'ZYRQUEN บังคับใช้อะไร', m: 'knowledge' as ReasoningMode },
-                    { text: 'ทดสอบคำถามที่ยังไม่ได้เรียนรู้', m: 'auto' as ReasoningMode },
+                    { text: 'วางแผน: ตรวจสอบและวิเคราะห์ชุดข้อมูลในเวิร์กสเปซ', m: 'plan' as ReasoningMode },
                   ].map((q) => (
                     <button
                       key={q.text}
@@ -478,14 +513,21 @@ export function WorkspaceView({
                   className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
                 >
                   <div
-                    className={`max-w-[92%] sm:max-w-[85%] rounded-2xl px-4 py-3.5 ${
+                    className={`select-text max-w-[94%] sm:max-w-[85%] rounded-2xl px-4 py-3.5 ${
                       isUser
                         ? 'bg-[var(--color-primary)] text-white'
                         : 'border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text)]'
                     }`}
                   >
+                    {!isUser && (
+                      <div className="mb-1.5 flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold tracking-wide text-[var(--color-accent)]">
+                          ZYRQUEN
+                        </span>
+                      </div>
+                    )}
                     {isUser ? (
-                      <p className="whitespace-pre-wrap text-[15px] leading-relaxed">
+                      <p className="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
                         {msg.content}
                       </p>
                     ) : (
@@ -493,64 +535,102 @@ export function WorkspaceView({
                     )}
                   </div>
 
-                  {!isUser && trace && (
-                    <div className="mt-2 w-full max-w-[92%] sm:max-w-[85%]">
+                  {!isUser && (
+                    <div className="mt-1.5 flex w-full max-w-[94%] flex-wrap items-center gap-2 px-1 sm:max-w-[85%]">
+                      <CopyButton
+                        getText={() => toPlainAssistantCopyText(msg.content)}
+                        ariaLabel="คัดลอกข้อความตอบกลับ"
+                        title="คัดลอกข้อความตอบกลับทั้งหมดเป็นข้อความธรรมดา"
+                        size="sm"
+                      />
+
                       <button
                         type="button"
-                        onClick={() => toggleTrace(msg.id)}
-                        className="flex min-h-[36px] items-center gap-2 px-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]"
+                        onClick={() => handleExportMessage(msg)}
+                        aria-label="ส่งออกข้อความเป็นไฟล์ Markdown"
+                        title="ดาวน์โหลดเป็นไฟล์ .md"
+                        className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
                       >
-                        <span>
-                          {msg.status} · {(trace.engine_path || []).join(' → ')} ·{' '}
-                          <span className="tabular-nums">{trace.latency_ms ?? 0}ms</span>
-                        </span>
-                        {isTraceOpen ? (
-                          <ChevronUp className="h-3.5 w-3.5" />
-                        ) : (
-                          <ChevronDown className="h-3.5 w-3.5" />
-                        )}
+                        <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span className="hidden sm:inline">ส่งออก .md</span>
                       </button>
 
-                      {isTraceOpen && (
-                        <div className="mt-1.5 space-y-2">
-                          {trace.task_timings && trace.task_timings.length > 0 && (
-                            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs">
-                              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                <span className="font-semibold text-[var(--color-warning)]">
-                                  เวลาทำงานราย Task ({trace.task_timings.length})
-                                </span>
-                                {trace.bottleneck_task && (
-                                  <span className="font-mono text-[11px] text-[var(--color-warning)] tabular-nums">
-                                    Bottleneck: {trace.bottleneck_task.task} ({trace.bottleneck_task.duration_ms} ms · {trace.bottleneck_task.share_pct}%)
-                                  </span>
-                                )}
-                              </div>
-                              <div className="grid gap-1.5 sm:grid-cols-2">
-                                {trace.task_timings.map((t, idx) => (
-                                  <div
-                                    key={`${t.task}-${idx}`}
-                                    className="flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1.5 font-mono text-[11px]"
-                                  >
-                                    <span className="truncate text-[var(--color-text)]">{t.task}</span>
-                                    <span
-                                      className={`shrink-0 tabular-nums ${
-                                        trace.bottleneck_task?.task === t.task
-                                          ? 'font-semibold text-[var(--color-warning)]'
-                                          : 'text-[var(--color-accent)]'
-                                      }`}
-                                    >
-                                      {t.duration_ms} ms
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
+                      {trace && (
+                        <button
+                          type="button"
+                          onClick={() => toggleTrace(msg.id)}
+                          aria-expanded={isTraceOpen}
+                          className="ml-auto inline-flex min-h-[36px] items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-accent)]"
+                        >
+                          <span>Developer Trace</span>
+                          {isTraceOpen ? (
+                            <ChevronUp className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5" />
                           )}
-                          <pre className="overflow-x-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-[11px] leading-relaxed text-[var(--color-accent)]">
-                            {JSON.stringify(trace, null, 2)}
-                          </pre>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {!isUser && trace && isTraceOpen && (
+                    <div className="mt-1.5 w-full max-w-[94%] space-y-2 sm:max-w-[85%]">
+                      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">
+                        <span>Status: {msg.status}</span>
+                        <span>·</span>
+                        <span>{(trace.engine_path || []).join(' → ')}</span>
+                        <span>·</span>
+                        <span className="tabular-nums">{trace.latency_ms ?? 0}ms</span>
+                      </div>
+                      {trace.task_timings && trace.task_timings.length > 0 && (
+                        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs">
+                          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-semibold text-[var(--color-warning)]">
+                              เวลาทำงานราย Task ({trace.task_timings.length})
+                            </span>
+                            {trace.bottleneck_task && (
+                              <span className="font-mono text-[11px] text-[var(--color-warning)] tabular-nums">
+                                Bottleneck: {trace.bottleneck_task.task} ({trace.bottleneck_task.duration_ms} ms · {trace.bottleneck_task.share_pct}%)
+                              </span>
+                            )}
+                          </div>
+                          <div className="grid gap-1.5 sm:grid-cols-2">
+                            {trace.task_timings.map((t, idx) => (
+                              <div
+                                key={`${t.task}-${idx}`}
+                                className="flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1.5 font-mono text-[11px]"
+                              >
+                                <span className="truncate text-[var(--color-text)]">{t.task}</span>
+                                <span
+                                  className={`shrink-0 tabular-nums ${
+                                    trace.bottleneck_task?.task === t.task
+                                      ? 'font-semibold text-[var(--color-warning)]'
+                                      : 'text-[var(--color-accent)]'
+                                  }`}
+                                >
+                                  {t.duration_ms} ms
+                                </span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
+                      <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+                        <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] px-3 py-1.5">
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                            trace.json
+                          </span>
+                          <CopyButton
+                            getText={() => JSON.stringify(redactSensitiveData(trace), null, 2)}
+                            ariaLabel="คัดลอก Developer Trace"
+                            title="คัดลอก Developer Trace JSON (คัดกรองข้อมูลสำคัญแล้ว)"
+                            size="xs"
+                          />
+                        </div>
+                        <pre className="overflow-x-auto p-3 font-mono text-[11px] leading-relaxed text-[var(--color-accent)]">
+                          {JSON.stringify(redactSensitiveData(trace), null, 2)}
+                        </pre>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -577,7 +657,10 @@ export function WorkspaceView({
                 </span>
               </div>
               {streamingContent && (
-                <div className="max-w-[92%] sm:max-w-[85%] rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-surface-raised)] px-4 py-3.5 text-[var(--color-text)]">
+                <div className="max-w-[94%] sm:max-w-[85%] rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-surface-raised)] px-4 py-3.5 text-[var(--color-text)]">
+                  <div className="mb-1.5 text-xs font-semibold tracking-wide text-[var(--color-accent)]">
+                    ZYRQUEN
+                  </div>
                   <SafeMessageText content={streamingContent} />
                 </div>
               )}
@@ -587,18 +670,26 @@ export function WorkspaceView({
           {error && (
             <div
               role="alert"
-              className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
             >
-              <span>{error}</span>
-              {onRetryLast && (
-                <button
-                  type="button"
-                  onClick={onRetryLast}
-                  className="min-h-[36px] rounded-lg border border-[var(--color-danger)]/35 bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-surface-hover)]"
-                >
-                  ลองใหม่
-                </button>
-              )}
+              <span className="min-w-0 flex-1 break-words">{error}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <CopyButton
+                  getText={() => error}
+                  ariaLabel="คัดลอกข้อความข้อผิดพลาด"
+                  title="คัดลอกรายละเอียดข้อผิดพลาด"
+                  size="xs"
+                />
+                {onRetryLast && (
+                  <button
+                    type="button"
+                    onClick={onRetryLast}
+                    className="min-h-[36px] shrink-0 rounded-lg border border-[var(--color-danger)]/35 bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-surface-hover)]"
+                  >
+                    ลองใหม่
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -609,13 +700,14 @@ export function WorkspaceView({
       {/* Bottom-Docked Message Composer */}
       <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 pb-safe sm:px-6 sm:py-3">
         <form onSubmit={handleSubmit} className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-1">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-1">
               {(
                 [
                   { id: 'auto', label: 'อัตโนมัติ' },
                   { id: 'math', label: 'คณิต' },
                   { id: 'knowledge', label: 'ความจำ' },
+                  { id: 'plan', label: 'วางแผน' },
                   { id: 'model', label: 'โมเดล' },
                 ] as const
               ).map((m) => (
@@ -678,7 +770,7 @@ export function WorkspaceView({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt,.md,.json,.csv"
+              accept=".txt,.md,.json,.csv,.py"
               onChange={handleFileChange}
               className="hidden"
             />
@@ -737,7 +829,7 @@ export function WorkspaceView({
           {/* Composer Footer: Consistent Model Variant Selector across Mobile & Desktop */}
           <footer
             aria-label="ส่วนท้ายช่องข้อความ"
-            className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2"
+            className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2"
           >
             <div className="relative flex min-w-0 items-center">
               <Cpu

@@ -12,12 +12,16 @@ P5: Permission Enforcement, Approval Gate, & Unified Audit Trail
 
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+import ast
 import collections
+import csv
+import io
 import ipaddress
 import json
 import re
 import socket
 import sqlite3
+import statistics
 import time
 import urllib.error
 import urllib.parse
@@ -571,6 +575,255 @@ def _sanitize_rel_filename(name: str) -> str | None:
     return cleaned
 
 
+def analyze_structured_dataset_content(raw_text: str, filename_hint: str = "") -> dict:
+    """Deterministic local structured dataset inspection for CSV/JSON content (zero external models)."""
+    text = (raw_text or "").strip()
+    if not text:
+        return {"ok": False, "error": "ไม่มีข้อมูลสำหรับวิเคราะห์"}
+
+    hint_l = (filename_hint or "").strip().lower()
+    # Try JSON first if extension hints .json or starts with [ or {
+    if hint_l.endswith(".json") or text.startswith("[") or text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                dict_rows = [r for r in parsed if isinstance(r, dict)]
+                if dict_rows:
+                    columns: list[str] = []
+                    seen_cols: set[str] = set()
+                    for row in dict_rows:
+                        for k in row.keys():
+                            ks = str(k)
+                            if ks not in seen_cols:
+                                seen_cols.add(ks)
+                                columns.append(ks)
+                    null_counts: dict[str, int] = {c: 0 for c in columns}
+                    numeric_vals: dict[str, list[float]] = {c: [] for c in columns}
+                    row_sigs: list[str] = []
+                    for row in dict_rows:
+                        row_sigs.append(json.dumps(row, sort_keys=True, ensure_ascii=False))
+                        for c in columns:
+                            val = row.get(c)
+                            if val is None or (isinstance(val, str) and not val.strip()):
+                                null_counts[c] += 1
+                            elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                                numeric_vals[c].append(float(val))
+                    duplicates = len(row_sigs) - len(set(row_sigs))
+                    numeric_stats = {}
+                    for c, vals in numeric_vals.items():
+                        if vals:
+                            numeric_stats[c] = {
+                                "count": len(vals),
+                                "min": round(min(vals), 4),
+                                "max": round(max(vals), 4),
+                                "mean": round(statistics.fmean(vals), 4),
+                            }
+                    return {
+                        "ok": True,
+                        "format": "json_records",
+                        "rows": len(parsed),
+                        "dict_rows": len(dict_rows),
+                        "columns": columns,
+                        "duplicate_rows": duplicates,
+                        "missing_counts": {k: v for k, v in null_counts.items() if v > 0},
+                        "numeric_summary": numeric_stats,
+                        "issues": ([] if len(dict_rows) == len(parsed) else ["พบรายการที่ไม่ใช่ object ปะปนอยู่ใน JSON array"]),
+                    }
+                return {
+                    "ok": True,
+                    "format": "json_array",
+                    "rows": len(parsed),
+                    "columns": [],
+                    "duplicate_rows": len(parsed) - len({json.dumps(x, sort_keys=True, ensure_ascii=False) for x in parsed}),
+                    "missing_counts": {},
+                    "numeric_summary": {},
+                    "issues": [],
+                }
+            if isinstance(parsed, dict):
+                return {
+                    "ok": True,
+                    "format": "json_object",
+                    "rows": len(parsed),
+                    "columns": [str(k) for k in list(parsed.keys())[:24]],
+                    "duplicate_rows": 0,
+                    "missing_counts": {str(k): 1 for k, v in parsed.items() if v is None or v == ""},
+                    "numeric_summary": {},
+                    "issues": [],
+                }
+        except json.JSONDecodeError as exc:
+            return {
+                "ok": False,
+                "format": "json_invalid",
+                "error": f"JSON ไม่ถูกต้องที่บรรทัด {exc.lineno} คอลัมน์ {exc.colno}: {exc.msg}",
+            }
+
+    # Try CSV / TSV deterministic parse
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) >= 1 and ("," in lines[0] or "\t" in lines[0] or hint_l.endswith(".csv")):
+        delimiter = "\t" if ("\t" in lines[0] and "," not in lines[0]) else ","
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        rows = [r for r in reader if any(cell.strip() for cell in r)]
+        if not rows:
+            return {"ok": False, "error": "ไฟล์ CSV ว่างเปล่า"}
+        headers = [h.strip() or f"col_{idx}" for idx, h in enumerate(rows[0])]
+        data_rows = rows[1:]
+        issues: list[str] = []
+        ragged_lines: list[int] = []
+        null_counts = {h: 0 for h in headers}
+        numeric_cols: dict[str, list[float]] = {h: [] for h in headers}
+        row_sigs: list[tuple[str, ...]] = []
+        for idx, r in enumerate(data_rows, start=2):
+            if len(r) != len(headers):
+                ragged_lines.append(idx)
+            row_sigs.append(tuple(c.strip() for c in r))
+            for col_i, h in enumerate(headers):
+                cell = r[col_i].strip() if col_i < len(r) else ""
+                if cell == "" or cell.lower() in {"null", "none", "nan", "na"}:
+                    null_counts[h] += 1
+                else:
+                    try:
+                        numeric_cols[h].append(float(cell))
+                    except ValueError:
+                        pass
+        if ragged_lines:
+            issues.append(f"จำนวนคอลัมน์ไม่ตรงกับ Header ที่บรรทัด {', '.join(str(x) for x in ragged_lines[:8])}")
+        duplicates = len(row_sigs) - len(set(row_sigs))
+        if duplicates > 0:
+            issues.append(f"พบแถวข้อมูลซ้ำกัน {duplicates} แถว")
+        numeric_stats = {}
+        for h, vals in numeric_cols.items():
+            if vals:
+                numeric_stats[h] = {
+                    "count": len(vals),
+                    "min": round(min(vals), 4),
+                    "max": round(max(vals), 4),
+                    "mean": round(statistics.fmean(vals), 4),
+                }
+        return {
+            "ok": True,
+            "format": "csv",
+            "rows": len(data_rows),
+            "columns": headers,
+            "duplicate_rows": duplicates,
+            "missing_counts": {k: v for k, v in null_counts.items() if v > 0},
+            "numeric_summary": numeric_stats,
+            "issues": issues,
+        }
+
+    return {"ok": False, "error": "รูปแบบข้อมูลไม่ใช่ JSON หรือ CSV ที่ตรวจโครงสร้างได้โดยตรง"}
+
+
+def inspect_workspace_code_content(raw_text: str, filename_hint: str = "") -> dict:
+    """Deterministic static & syntax inspection for workspace code/text artifacts."""
+    text = raw_text or ""
+    if not text.strip():
+        return {"ok": False, "error": "ไฟล์หรือข้อความว่างเปล่า"}
+
+    hint_l = (filename_hint or "").strip().lower()
+    lines = text.splitlines()
+    defects: list[dict] = []
+    symbols: list[str] = []
+
+    is_json = hint_l.endswith(".json") or (text.lstrip().startswith(("{", "[")) and not hint_l.endswith(".py"))
+    is_python = hint_l.endswith(".py") or bool(
+        re.search(r"^\s*(?:def\s+\w+\s*\(|class\s+\w+|import\s+\w+|from\s+\w+\s+import)", text, re.MULTILINE)
+    )
+
+    if is_json:
+        try:
+            parsed = json.loads(text)
+            kind = type(parsed).__name__
+            return {
+                "ok": True,
+                "language": "json",
+                "line_count": len(lines),
+                "symbols": list(parsed.keys())[:16] if isinstance(parsed, dict) else [],
+                "defects": [],
+                "passed": True,
+                "summary": f"ตรวจสอบโครงสร้าง JSON ({kind}, {len(lines)} บรรทัด) ผ่านเกณฑ์ ไม่พบ Syntax Error",
+            }
+        except json.JSONDecodeError as exc:
+            defects.append({
+                "line": exc.lineno,
+                "column": exc.colno,
+                "severity": "error",
+                "message": f"JSON syntax error: {exc.msg}",
+            })
+            return {
+                "ok": True,
+                "language": "json",
+                "line_count": len(lines),
+                "symbols": [],
+                "defects": defects,
+                "passed": False,
+                "summary": f"พบข้อผิดพลาด JSON ที่บรรทัด {exc.lineno} คอลัมน์ {exc.colno}: {exc.msg}",
+            }
+
+    if is_python:
+        try:
+            tree = ast.parse(text)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    symbols.append(f"{type(node).__name__.replace('Def', '').lower()}:{node.name}@{node.lineno}")
+            # Also scan for basic static hygiene markers
+            for idx, ln in enumerate(lines, start=1):
+                if re.search(r"\bexcept\s*:", ln):
+                    defects.append({
+                        "line": idx,
+                        "severity": "warning",
+                        "message": "Bare except: อาจซ่อนข้อผิดพลาดที่ควรระบุชนิดข้อยกเว้น",
+                    })
+                if re.search(r"(?:TODO|FIXME|BUG)\b", ln):
+                    defects.append({
+                        "line": idx,
+                        "severity": "info",
+                        "message": f"พบเครื่องหมายงานค้างในโค้ด: {ln.strip()[:80]}",
+                    })
+            return {
+                "ok": True,
+                "language": "python",
+                "line_count": len(lines),
+                "symbols": symbols[:20],
+                "defects": defects[:20],
+                "passed": not any(d["severity"] == "error" for d in defects),
+                "summary": (
+                    f"AST Python ผ่าน ({len(lines)} บรรทัด, {len(symbols)} สัญลักษณ์)"
+                    if not defects
+                    else f"AST Python ผ่าน แต่พบข้อสังเกต {len(defects)} จุด"
+                ),
+            }
+        except SyntaxError as exc:
+            defects.append({
+                "line": exc.lineno or 1,
+                "column": exc.offset or 0,
+                "severity": "error",
+                "message": f"Python SyntaxError: {exc.msg}",
+            })
+            return {
+                "ok": True,
+                "language": "python",
+                "line_count": len(lines),
+                "symbols": [],
+                "defects": defects,
+                "passed": False,
+                "summary": f"พบ Python SyntaxError ที่บรรทัด {exc.lineno or 1}: {exc.msg}",
+            }
+
+    # General text / markdown / structured artifact inspection
+    for idx, ln in enumerate(lines, start=1):
+        if re.search(r"(?:TODO|FIXME|BUG|ERROR)\b", ln):
+            defects.append({"line": idx, "severity": "info", "message": ln.strip()[:90]})
+    return {
+        "ok": True,
+        "language": "text",
+        "line_count": len(lines),
+        "symbols": [ln.strip()[:60] for ln in lines if ln.lstrip().startswith("#")][:10],
+        "defects": defects[:20],
+        "passed": True,
+        "summary": f"ตรวจสอบไฟล์ข้อความ {len(lines)} บรรทัดเรียบร้อย",
+    }
+
+
 def _run_workspace_file_tool(
     data_dir: Path,
     tool_input: dict,
@@ -580,6 +833,7 @@ def _run_workspace_file_tool(
     ws_dir.mkdir(parents=True, exist_ok=True)
     action = str(tool_input.get("action", "read")).strip().lower()
     filename = str(tool_input.get("filename", "")).strip()
+    inline_content = str(tool_input.get("content", ""))
 
     if action == "list" or (action == "read" and (not filename or filename.lower() in {"list", "all", "ls", "รายการ"})):
         files = []
@@ -593,6 +847,13 @@ def _run_workspace_file_tool(
                     }
                 )
         return {"ok": True, "action": "list", "files": files[:40]}
+
+    if action in {"inspect", "analyze_dataset"} and not filename and inline_content.strip():
+        if action == "analyze_dataset":
+            report = analyze_structured_dataset_content(inline_content)
+            return {"ok": bool(report.get("ok")), "action": action, "filename": "(inline)", **report}
+        report = inspect_workspace_code_content(inline_content)
+        return {"ok": bool(report.get("ok")), "action": action, "filename": "(inline)", **report}
 
     safe_name = _sanitize_rel_filename(filename)
     if not safe_name:
@@ -610,7 +871,7 @@ def _run_workspace_file_tool(
         allowed_ext = (".txt", ".md", ".json", ".csv")
         if not safe_name.lower().endswith(allowed_ext):
             return {"ok": False, "error": "รองรับเฉพาะไฟล์ .txt, .md, .json, .csv"}
-        content = str(tool_input.get("content", ""))[:20000]
+        content = inline_content[:20000]
         target.write_text(content, encoding="utf-8")
         return {
             "ok": True,
@@ -622,13 +883,20 @@ def _run_workspace_file_tool(
     if not target.exists() or not target.is_file():
         return {"ok": False, "error": f"ไม่พบไฟล์ '{safe_name}' ในพื้นที่ไฟล์เวิร์กสเปซ"}
 
-    content = target.read_text(encoding="utf-8", errors="replace")[:6000]
+    content = target.read_text(encoding="utf-8", errors="replace")[:20000]
+    if action == "analyze_dataset":
+        report = analyze_structured_dataset_content(content, safe_name)
+        return {"ok": bool(report.get("ok")), "action": action, "filename": safe_name, **report}
+    if action == "inspect":
+        report = inspect_workspace_code_content(content, safe_name)
+        return {"ok": bool(report.get("ok")), "action": action, "filename": safe_name, **report}
+
     return {
         "ok": True,
         "action": "read",
         "filename": safe_name,
         "size_bytes": target.stat().st_size,
-        "content": content,
+        "content": content[:6000],
     }
 
 
@@ -671,10 +939,12 @@ def validate_tool_input(tool_id: str, tool_input: dict) -> tuple[bool, str | Non
             return False, f"เครื่องมือ '{tool_id}' ต้องระบุข้อมูลนำเข้า '{field}'"
     if tool_id == "workspace_file_read":
         act = str(tool_input.get("action", "read")).strip().lower()
-        if act not in {"read", "list", "write"}:
-            return False, "รองรับเฉพาะ action: read, list หรือ write"
+        if act not in {"read", "list", "write", "inspect", "analyze_dataset"}:
+            return False, "รองรับเฉพาะ action: read, list, inspect, analyze_dataset หรือ write"
         if act == "write" and not str(tool_input.get("filename", "")).strip():
             return False, "การเขียนไฟล์ต้องระบุชื่อไฟล์"
+        if act in {"inspect", "analyze_dataset"} and not str(tool_input.get("filename", "")).strip() and not str(tool_input.get("content", "")).strip():
+            return False, "ต้องระบุชื่อไฟล์หรือเนื้อหาที่ต้องการตรวจสอบ"
     return True, None
 
 
@@ -891,6 +1161,39 @@ def analyze_tool_result(
                 "rejected_sources": [],
                 "limitations": [],
                 "summary": f"บันทึกไฟล์ `{raw_output.get('filename')}` สำเร็จหลังผ่าน Approval Gate",
+            }
+        if raw_output.get("action") == "analyze_dataset":
+            return {
+                "trust_grade": "SANDBOX_LOCAL_FILE",
+                "verification_status": "VERIFIED",
+                "freshness_status": "FRESH",
+                "retrieved_at": _now_iso(),
+                "token_count": int(raw_output.get("rows", 0)),
+                "top_terms": list(raw_output.get("columns", []))[:6],
+                "kg_matches": [],
+                "distinct_providers": ["workspace_files"],
+                "cross_source_shared_terms": [],
+                "numeric_values": [],
+                "rejected_sources": [],
+                "limitations": list(raw_output.get("issues", [])),
+                "summary": f"วิเคราะห์โครงสร้างข้อมูล `{raw_output.get('filename', '')}` ({raw_output.get('format')}, {raw_output.get('rows', 0)} แถว)",
+            }
+        if raw_output.get("action") == "inspect":
+            passed = bool(raw_output.get("passed", True))
+            return {
+                "trust_grade": "SANDBOX_LOCAL_FILE",
+                "verification_status": "VERIFIED" if passed else "DEFECTS_FOUND",
+                "freshness_status": "FRESH",
+                "retrieved_at": _now_iso(),
+                "token_count": int(raw_output.get("line_count", 0)),
+                "top_terms": list(raw_output.get("symbols", []))[:6],
+                "kg_matches": [],
+                "distinct_providers": ["workspace_files"],
+                "cross_source_shared_terms": [],
+                "numeric_values": [],
+                "rejected_sources": [],
+                "limitations": [d.get("message", "") for d in (raw_output.get("defects") or [])[:4]],
+                "summary": str(raw_output.get("summary") or f"ตรวจสอบไฟล์ `{raw_output.get('filename', '')}`"),
             }
 
     text_chunks: list[str] = []
@@ -1111,6 +1414,17 @@ def detect_tool_intent(prompt: str) -> tuple[str, dict] | None:
             "filename": m_write.group(1).strip(),
             "content": m_write.group(2).strip(),
         }
+
+    m_inspect = re.match(
+        r"^(?:ตรวจสอบโค้ด|ตรวจไฟล์|วิเคราะห์ไฟล์ข้อมูล|วิเคราะห์ข้อมูลไฟล์|inspect_file|analyze_dataset)\s*:?\s*(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if m_inspect:
+        target_arg = m_inspect.group(1).strip()
+        if any(k in cleaned.lower() for k in ("วิเคราะห์ไฟล์ข้อมูล", "วิเคราะห์ข้อมูลไฟล์", "analyze_dataset", ".csv")):
+            return "workspace_file_read", {"action": "analyze_dataset", "filename": target_arg}
+        return "workspace_file_read", {"action": "inspect", "filename": target_arg}
 
     m_file = re.match(
         r"^(?:อ่านไฟล์|จัดการไฟล์|ไฟล์เวิร์กสเปซ|ไฟล์|file_read|read_file)\s*:?\s*(.*)$",
@@ -1457,6 +1771,26 @@ def format_tool_markdown(tool_id: str, inv_result: dict) -> str:
             lines.append(
                 f"- บันทึกไฟล์ `{raw.get('filename')}` เรียบร้อยแล้ว ({raw.get('size_bytes')} bytes)"
             )
+        elif raw.get("action") == "analyze_dataset":
+            lines.append(f"- ไฟล์ข้อมูล: `{raw.get('filename')}` · รูปแบบ `{raw.get('format')}` · จำนวน `{raw.get('rows')}` แถว")
+            if raw.get("columns"):
+                lines.append(f"- คอลัมน์: `{', '.join(raw['columns'][:12])}`")
+            if raw.get("missing_counts"):
+                lines.append(f"- ค่าว่าง/หายไป: `{json.dumps(raw['missing_counts'], ensure_ascii=False)}`")
+            if raw.get("numeric_summary"):
+                for col, st_obj in list(raw["numeric_summary"].items())[:5]:
+                    lines.append(f"- สถิติคอลัมน์ `{col}`: min `{st_obj['min']}`, max `{st_obj['max']}`, mean `{st_obj['mean']}`")
+            for iss in (raw.get("issues") or []):
+                lines.append(f"- ประเด็นที่ตรวจพบ: {iss}")
+        elif raw.get("action") == "inspect":
+            lines.append(f"- ไฟล์: `{raw.get('filename')}` ({raw.get('language')}, {raw.get('line_count')} บรรทัด)")
+            if raw.get("symbols"):
+                lines.append(f"- สัญลักษณ์/หัวข้อที่พบ: `{', '.join(raw['symbols'][:8])}`")
+            if raw.get("defects"):
+                for d in raw["defects"][:8]:
+                    lines.append(f"- บรรทัด {d.get('line', '?')} [{d.get('severity', 'info')}]: {d.get('message')}")
+            else:
+                lines.append("- ไม่พบข้อผิดพลาดเชิงไวยากรณ์หรือโครงสร้าง")
         else:
             lines.append(f"- ไฟล์: `{raw.get('filename')}` ({raw.get('size_bytes')} bytes)")
             lines.append(f"\n```\n{str(raw.get('content', ''))[:1200]}\n```")

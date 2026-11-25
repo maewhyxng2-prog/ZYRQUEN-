@@ -29,9 +29,11 @@ import time
 import uuid
 from pathlib import Path
 from tools_engine import (
+    analyze_structured_dataset_content,
     detect_tool_intent,
     format_tool_markdown,
     init_tools_schema,
+    inspect_workspace_code_content,
     invoke_tool_governed,
 )
 from dag_executor import (
@@ -60,6 +62,7 @@ from dataset_ingestion import (
     verify_dataset_integrity,
 )
 from cognitive_pipeline import (
+    understand_input as _understand_cognitive_input,
     run_cognitive_fallback_pipeline,
     learn_from_experience as _learn_cognitive_experience,
 )
@@ -2650,6 +2653,68 @@ def handle_infer(payload: dict) -> dict:
         "external_models_used": False,
     }
 
+    # Stage 1 & 2: Native Understand -> Interpret BEFORE retrieval/checkpoints
+    t_und = time.perf_counter()
+    understanding = _understand_cognitive_input(
+        conn,
+        prompt,
+        attachment=attachment,
+        mode=mode,
+        conversation_id=str(conversation_id) if conversation_id else None,
+        tokenize_fn=tokenize,
+        extract_terms_fn=extract_query_terms,
+        query_kg_fn=query_knowledge_graph,
+    )
+    interpretation = understanding.get("interpretation") or {}
+    effective_prompt = str(interpretation.get("effective_prompt") or prompt).strip() or prompt
+    _record_task_timing(
+        "understand_interpret",
+        t_und,
+        matched=True,
+        status_label=str(understanding.get("speech_act") or "general_utterance"),
+        detail=f"lang={understanding.get('language')}",
+    )
+
+    if interpretation.get("early_communicative_route"):
+        t_cog = time.perf_counter()
+        cog = run_cognitive_fallback_pipeline(
+            conn,
+            prompt=prompt,
+            attachment=attachment,
+            mode=mode,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            attempted_engines=[t["task"] for t in task_timings],
+            understanding=understanding,
+            tokenize_fn=tokenize,
+            extract_terms_fn=extract_query_terms,
+            query_kg_fn=query_knowledge_graph,
+        )
+        epistemic_state = cog["epistemic_state"]
+        cognitive_state = cog.get("cognitive_state") or "UNDERSTOOD"
+        trace["engine_path"].append("cognitive_pipeline")
+        trace["epistemic_state"] = epistemic_state
+        trace["cognitive_state"] = cognitive_state
+        trace["cognitive_pipeline"] = cog["pipeline_trace"]
+        conn.close()
+        _record_task_timing(
+            "cognitive_pipeline",
+            t_cog,
+            matched=True,
+            status_label=epistemic_state,
+            detail=f"{cog['pipeline_trace']['understand']['speech_act']}:{cognitive_state}",
+        )
+        _finalize_trace()
+        return {
+            "content": cog["response"],
+            "status": epistemic_state,
+            "epistemic_state": epistemic_state,
+            "cognitive_state": cognitive_state,
+            "trace": trace,
+        }
+
+    # Use effective_prompt (salutation stripped when compound greeting + task) for downstream solvers
+    prompt = effective_prompt
+
     # 0. Autonomous Continuous Operation Trigger from Conversation Channel
     if mode == "auto":
         t0 = time.perf_counter()
@@ -3144,6 +3209,10 @@ def handle_infer(payload: dict) -> dict:
                 "contradiction_groups": sum(1 for objs in pair_objs.values() if len(objs) > 1),
             }
         matches = query_knowledge_graph(conn, prompt)
+        if not matches and interpretation.get("resolved_referent"):
+            matches = query_knowledge_graph(
+                conn, f"{interpretation['resolved_referent']} {prompt}"
+            )
         if matches:
             _record_task_timing(
                 "knowledge_graph_query",
@@ -3241,13 +3310,47 @@ def handle_infer(payload: dict) -> dict:
             trace["checkpoint"] = ngram_res
         _record_task_timing("ngram_checkpoint", t0, matched=False, status_label="MISS")
 
-    # 7. Attachment analysis (factual local statistics only)
+    # 7. Attachment analysis (factual local statistics + structured dataset/code inspection)
     if attachment:
         t0 = time.perf_counter()
         words = tokenize(attachment)
         freq = collections.Counter(words).most_common(5)
         trace["engine_path"].append("attachment_stats")
         trace["attachment_tokens"] = len(words)
+
+        ds_report = analyze_structured_dataset_content(attachment)
+        code_report = None if ds_report.get("ok") else inspect_workspace_code_content(attachment)
+        sections: list[str] = []
+
+        if ds_report.get("ok"):
+            trace["engine_path"].append("dataset_structure_analyzer")
+            trace["dataset_analysis"] = ds_report
+            sections.append(
+                f"วิเคราะห์ข้อมูลโครงสร้าง ({ds_report.get('format')}, {ds_report.get('rows', 0)} แถว)"
+            )
+            if ds_report.get("columns"):
+                sections.append(f"- คอลัมน์: {', '.join(ds_report['columns'][:12])}")
+            if ds_report.get("missing_counts"):
+                sections.append(f"- ค่าว่าง/หายไป: {json.dumps(ds_report['missing_counts'], ensure_ascii=False)}")
+            if ds_report.get("numeric_summary"):
+                for col, st_obj in list(ds_report["numeric_summary"].items())[:4]:
+                    sections.append(
+                        f"- คอลัมน์ตัวเลข {col}: min={st_obj['min']}, max={st_obj['max']}, mean={st_obj['mean']}"
+                    )
+            for iss in ds_report.get("issues") or []:
+                sections.append(f"- จุดผิดปกติ: {iss}")
+        elif code_report and code_report.get("ok") and code_report.get("language") in {"python", "json"}:
+            trace["engine_path"].append("code_static_inspector")
+            trace["code_inspection"] = code_report
+            sections.append(code_report.get("summary", "ตรวจสอบโครงสร้างโค้ดแล้ว"))
+            if code_report.get("symbols"):
+                sections.append(f"- สัญลักษณ์ที่พบ: {', '.join(code_report['symbols'][:10])}")
+            if code_report.get("defects"):
+                for d in code_report["defects"][:8]:
+                    sections.append(f"- บรรทัด {d.get('line', '?')} [{d.get('severity', 'info')}]: {d.get('message')}")
+            else:
+                sections.append("- ไม่พบข้อผิดพลาดทางไวยากรณ์ (Syntax Pass)")
+
         _record_task_timing(
             "attachment_stats",
             t0,
@@ -3256,17 +3359,20 @@ def handle_infer(payload: dict) -> dict:
             detail=f"{len(words)} tokens",
         )
         top_terms = ", ".join(f"{w} ({c})" for w, c in freq)
+        structured_block = ("\n" + "\n".join(sections) + "\n") if sections else ""
         content = (
-            f"วิเคราะห์ไฟล์ข้อความที่แนบในเครื่องแล้ว ({len(words)} โทเคน/พยางค์, {len(set(words))} หน่วยไม่ซ้ำ)\n\n"
-            f"หน่วยคำที่พบบ่อย: {top_terms or 'ไม่มี'}\n\n"
+            f"วิเคราะห์เนื้อหาที่แนบในเครื่องแล้ว ({len(words)} หน่วยคำ, {len(set(words))} หน่วยไม่ซ้ำ)\n"
+            f"{structured_block}\n"
+            f"คำที่พบบ่อย: {top_terms or 'ไม่มี'}\n\n"
             f"หากต้องการนำไปฝึกโมเดลหรือบันทึกเป็นความรู้ถาวร สามารถนำเข้าได้ที่หน้า **ความจำและเวิร์กโฟลว์** หรือ **ตั้งค่า → นักพัฒนา**"
         )
         _finalize_trace()
         conn.close()
         return {"content": content, "status": "VERIFIED", "trace": trace}
 
-    # 8. Native Cognitive Pipeline: Understand -> Reason -> Evaluate -> Respond -> Learn
-    # Separates UNKNOWN, UNCERTAIN, NOT_LEARNED, and UNABLE_TO_INFER cleanly without external LLMs or canned rules.
+    # 8. Native Cognitive Pipeline Fallback: Reason -> Evaluate -> Respond -> Learn
+    # Reuses Stage 1+2 understanding to handle compositional reasoning, contextual follow-ups,
+    # clarification requests, UNKNOWN, UNCERTAIN, NOT_LEARNED, and UNABLE_TO_INFER cleanly.
     t0 = time.perf_counter()
     cog = run_cognitive_fallback_pipeline(
         conn,
@@ -3275,15 +3381,18 @@ def handle_infer(payload: dict) -> dict:
         mode=mode,
         conversation_id=str(conversation_id) if conversation_id else None,
         attempted_engines=[t["task"] for t in task_timings],
+        understanding=understanding,
         tokenize_fn=tokenize,
         extract_terms_fn=extract_query_terms,
         query_kg_fn=query_knowledge_graph,
     )
     epistemic_state = cog["epistemic_state"]
+    cognitive_state = cog.get("cognitive_state") or "UNDERSTOOD"
     trace["engine_path"].append("cognitive_pipeline")
     if epistemic_state == "NOT_LEARNED":
         trace["engine_path"].append("unlearned_boundary")
     trace["epistemic_state"] = epistemic_state
+    trace["cognitive_state"] = cognitive_state
     trace["cognitive_pipeline"] = cog["pipeline_trace"]
     conn.close()
     _record_task_timing(
@@ -3298,6 +3407,7 @@ def handle_infer(payload: dict) -> dict:
         "content": cog["response"],
         "status": epistemic_state,
         "epistemic_state": epistemic_state,
+        "cognitive_state": cognitive_state,
         "trace": trace,
     }
 
@@ -4262,7 +4372,7 @@ def summarize_conversation(messages: list[dict]) -> dict:
 
         if status == "VERIFIED":
             verified_count += 1
-        elif status in {"NOT_LEARNED", "UNCERTAIN", "UNKNOWN", "UNABLE_TO_INFER"}:
+        elif status in {"NOT_LEARNED", "UNABLE_TO_INFER"}:
             not_learned_count += 1
 
         trace_raw = m.get("trace_json")

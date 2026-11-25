@@ -1240,5 +1240,169 @@ class CognitiveGeneralizationAndEpistemicTests(unittest.TestCase):
             self.assertTrue({"UNCERTAIN", "UNKNOWN", "NOT_LEARNED", "UNABLE_TO_INFER"}.issubset(recorded_statuses))
 
 
+class ConversationalAndWorkspaceIntelligenceTests(unittest.TestCase):
+    def test_thai_and_english_greetings_work_with_empty_kg_and_zero_checkpoints(self) -> None:
+        with isolated_core_env():
+            # Verify KG is genuinely empty and checkpoints == 0
+            conn = zc.get_db()
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM knowledge_triples").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0], 0)
+            conn.close()
+
+            # 1. Exact mandatory Thai greeting example
+            thai_hi = zc.handle_infer({"prompt": "สวัสดี", "mode": "auto", "user_id": "u-conv"})
+            self.assertEqual(thai_hi["content"], "สวัสดีครับ ยินดีต้อนรับ มีอะไรให้ช่วยวันนี้ครับ")
+            self.assertEqual(thai_hi["status"], "VERIFIED")
+            self.assertEqual(thai_hi["cognitive_state"], "UNDERSTOOD")
+            self.assertFalse(thai_hi["trace"]["external_models_used"])
+            for internal_msg in (
+                "ไม่ได้เรียนรู้",
+                "Not Learned",
+                "0 รายการ",
+                "0 รุ่น",
+                "Knowledge Graph contains",
+                "No trained checkpoint",
+                "AST",
+            ):
+                self.assertNotIn(internal_msg, thai_hi["content"])
+
+            # 2. Thai greeting variants (time-of-day + vocative)
+            thai_morning = zc.handle_infer({"prompt": "สวัสดีตอนเช้าครับ ZYRQUEN", "mode": "auto", "user_id": "u-conv"})
+            self.assertEqual(thai_morning["status"], "VERIFIED")
+            self.assertEqual(thai_morning["cognitive_state"], "UNDERSTOOD")
+            self.assertIn("สวัสดีตอนเช้า", thai_morning["content"])
+
+            # 3. English greeting variants
+            en_hi = zc.handle_infer({"prompt": "good morning Zyrquen", "mode": "auto", "user_id": "u-conv"})
+            self.assertEqual(en_hi["status"], "VERIFIED")
+            self.assertEqual(en_hi["cognitive_state"], "UNDERSTOOD")
+            self.assertIn("Good morning", en_hi["content"])
+            self.assertIn("Welcome", en_hi["content"])
+
+            # 4. Compound greeting + real calculation extracts task cleanly
+            compound = zc.handle_infer({"prompt": "สวัสดีครับ ช่วยคำนวณ 12 * 8", "mode": "auto", "user_id": "u-conv"})
+            self.assertEqual(compound["status"], "VERIFIED")
+            self.assertEqual(compound["trace"]["math"]["result"], 96)
+
+            # 5. Unfamiliar technical term is preserved and asks focused clarification without fabrication
+            unfamiliar = zc.handle_infer({"prompt": "XenoFlux-9 ทำงานอย่างไร", "mode": "auto", "user_id": "u-conv"})
+            self.assertIn(unfamiliar["status"], ("NEEDS_CLARIFICATION", "NOT_LEARNED"))
+            self.assertIn("XenoFlux-9", unfamiliar["content"])
+
+            # 6. Multi-turn contextual follow-up resolution using conversation history
+            conn = zc.get_db()
+            cid = "conv-followup-test"
+            now = zc.now_iso()
+            with conn:
+                conn.execute(
+                    "INSERT INTO users (id, email, display_name, role, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("u-conv", "u-conv@zyrquen.local", "Conv Tester", "user", "test-hash", now),
+                )
+                conn.execute(
+                    "INSERT INTO conversations (id, user_id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (cid, "u-conv", "Follow-up", "auto", now, now),
+                )
+                conn.execute(
+                    "INSERT INTO messages (id, conversation_id, role, content, mode, trace_json, status, created_at) VALUES (?, ?, 'user', ?, 'auto', NULL, 'USER', ?)",
+                    ("m1", cid, "การแบ่งข้อมูล Train และ Test สำคัญอย่างไร", now),
+                )
+                conn.execute(
+                    "INSERT INTO messages (id, conversation_id, role, content, mode, trace_json, status, created_at) VALUES (?, ?, 'assistant', ?, 'auto', NULL, 'UNDERSTOOD', ?)",
+                    ("m2", cid, "ช่วยป้องกัน data leakage และวัดผลบนข้อมูลที่ไม่เคยเห็นได้จริงครับ", now),
+                )
+            conn.close()
+
+            followup = zc.handle_infer({"prompt": "แล้วมันช่วยป้องกันอะไรได้อีก", "mode": "auto", "user_id": "u-conv", "conversation_id": cid})
+            self.assertTrue(followup["trace"]["cognitive_pipeline"]["understand"]["has_followup_reference"])
+            self.assertTrue(followup["trace"]["cognitive_pipeline"]["understand"]["resolved_referent"])
+
+    def test_workspace_dataset_and_code_inspection_and_approval_gate_integrity(self) -> None:
+        with isolated_core_env() as data_dir:
+            from tools_engine import invoke_tool_governed, save_workspace_file
+
+            # Seed real CSV and buggy Python files inside workspace_files sandbox
+            save_workspace_file(
+                data_dir,
+                "metrics.csv",
+                "step,loss,acc\n1,0.9,0.5\n2,0.4,0.8\n2,0.4,0.8\n3,,0.9\n",
+            )
+            conn = zc.get_db()
+            # 1. Read-only dataset analysis works deterministically
+            ds_res = invoke_tool_governed(
+                conn,
+                data_dir,
+                "workspace_file_read",
+                {"action": "analyze_dataset", "filename": "metrics.csv"},
+                user_id="dev-1",
+                tokenize_fn=zc.tokenize,
+                extract_terms_fn=zc.extract_query_terms,
+                query_kg_fn=zc.query_knowledge_graph,
+                calc_fn=zc._calc_any_for_tool,
+            )
+            self.assertEqual(ds_res["status"], "COMPLETED")
+            self.assertEqual(ds_res["raw_output"]["rows"], 4)
+            self.assertEqual(ds_res["raw_output"]["duplicate_rows"], 1)
+            self.assertEqual(ds_res["raw_output"]["missing_counts"], {"loss": 1})
+
+            # 2. Inline Python defect inspection detects real syntax error line
+            code_res = invoke_tool_governed(
+                conn,
+                data_dir,
+                "workspace_file_read",
+                {"action": "inspect", "content": "def broken(x):\n    return x +\n"},
+                user_id="dev-1",
+                tokenize_fn=zc.tokenize,
+                extract_terms_fn=zc.extract_query_terms,
+                query_kg_fn=zc.query_knowledge_graph,
+                calc_fn=zc._calc_any_for_tool,
+            )
+            self.assertEqual(code_res["status"], "COMPLETED")
+            self.assertFalse(code_res["raw_output"]["passed"])
+            self.assertEqual(code_res["raw_output"]["defects"][0]["severity"], "error")
+
+            # 3. Write action MUST STILL require Approval Gate (never bypassed)
+            write_res = invoke_tool_governed(
+                conn,
+                data_dir,
+                "workspace_file_read",
+                {"action": "write", "filename": "report.md", "content": "# Summary"},
+                user_id="dev-1",
+                approved_by=None,
+                tokenize_fn=zc.tokenize,
+                extract_terms_fn=zc.extract_query_terms,
+                query_kg_fn=zc.query_knowledge_graph,
+                calc_fn=zc._calc_any_for_tool,
+            )
+            self.assertEqual(write_res["status"], "PENDING_APPROVAL")
+            conn.close()
+
+            # 4. Attachment analysis in handle_infer analyzes CSV/Python deterministically
+            csv_infer = zc.handle_infer(
+                {
+                    "prompt": "วิเคราะห์ข้อมูลชุดนี้",
+                    "mode": "auto",
+                    "user_id": "dev-1",
+                    "attachment": "id,score\na,10\nb,20\nb,20\n",
+                }
+            )
+            self.assertEqual(csv_infer["status"], "VERIFIED")
+            self.assertIn("dataset_structure_analyzer", csv_infer["trace"]["engine_path"])
+            self.assertEqual(csv_infer["trace"]["dataset_analysis"]["duplicate_rows"], 1)
+
+            # 5. Autonomous mission runs full workspace inspection DAG cleanly
+            mission = zc.run_autonomous_mission(
+                {
+                    "goal": "วิเคราะห์ข้อมูล metrics.csv",
+                    "user_id": "dev-1",
+                    "enable_research": False,
+                    "enable_knowledge_dev": False,
+                    "enable_execution": True,
+                }
+            )
+            self.assertTrue(mission["ok"])
+            self.assertEqual(mission["mission"]["status"], "COMPLETED")
+            self.assertTrue(any(n["task_id"] == "node_workspace_inspect" and n["execution_status"] == "COMPLETED" for n in mission["nodes"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -696,5 +696,91 @@ describe('Isolated 6-Step Non-Skippable Native Training Pipeline Gate E2E', () =
     expect(committed.length).toBe(3);
     expect(committed[0].source).toContain('dataset:e2e-csv-kg-corpus|e2e_verified_spec');
   }, 60_000);
+
+  it('Handles natural Thai/English greetings on fresh empty KG and structured CSV attachment inspection over HTTP', async () => {
+    // Login as seeded admin (gate-admin) or claim? Re-use existing DB in this test suite or login cleanly:
+    const statusRes = await fetch(`${gateBaseUrl}/api/auth/status`);
+    const statusJson = (await statusRes.json()) as { initialized: boolean };
+    let token = '';
+    if (!statusJson.initialized) {
+      const claimRes = await fetch(`${gateBaseUrl}/api/auth/claim-admin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'gate-admin@zyrquen.local',
+          displayName: 'Gate Admin',
+          password: 'StrongPassword123!',
+        }),
+      });
+      token = ((await claimRes.json()) as { token: string }).token;
+    } else {
+      const loginRes = await fetch(`${gateBaseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'gate-admin@zyrquen.local',
+          password: 'StrongPassword123!',
+        }),
+      });
+      token = ((await loginRes.json()) as { token: string }).token;
+    }
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+
+    const convRes = await fetch(`${gateBaseUrl}/api/conversations`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: 'Natural Conversation E2E', mode: 'auto' }),
+    });
+    expect(convRes.status).toBe(201);
+    const { conversation } = (await convRes.json()) as { conversation: { id: string } };
+
+    // 1. Exact mandatory Thai greeting response over HTTP
+    const hiRes = await fetch(`${gateBaseUrl}/api/conversations/${conversation.id}/messages`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ content: 'สวัสดี', mode: 'auto' }),
+    });
+    expect(hiRes.status).toBe(201);
+    const hiJson = (await hiRes.json()) as {
+      assistant_message: { status: string; content: string; trace_json: string };
+    };
+    expect(hiJson.assistant_message.status).toBe('VERIFIED');
+    expect(hiJson.assistant_message.content).toBe(
+      'สวัสดีครับ ยินดีต้อนรับ มีอะไรให้ช่วยวันนี้ครับ'
+    );
+    expect(hiJson.assistant_message.content).not.toContain('ไม่ได้เรียนรู้');
+    expect(hiJson.assistant_message.content).not.toContain('Not Learned');
+    const hiTrace = JSON.parse(hiJson.assistant_message.trace_json) as {
+      external_models_used: boolean;
+      cognitive_state?: string;
+    };
+    expect(hiTrace.external_models_used).toBe(false);
+    expect(hiTrace.cognitive_state).toBe('UNDERSTOOD');
+
+    // 2. Structured CSV attachment inspection over HTTP
+    const csvAttachRes = await fetch(`${gateBaseUrl}/api/conversations/${conversation.id}/messages`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        content: 'วิเคราะห์ข้อมูลไฟล์นี้',
+        mode: 'auto',
+        attachment: 'name,score\nalice,90\nbob,80\nbob,80\n',
+      }),
+    });
+    expect(csvAttachRes.status).toBe(201);
+    const csvAttachJson = (await csvAttachRes.json()) as {
+      assistant_message: { status: string; content: string; trace_json: string };
+    };
+    expect(csvAttachJson.assistant_message.status).toBe('VERIFIED');
+    expect(csvAttachJson.assistant_message.content).toContain('วิเคราะห์ข้อมูลโครงสร้าง');
+    const csvTrace = JSON.parse(csvAttachJson.assistant_message.trace_json) as {
+      dataset_analysis?: { duplicate_rows?: number };
+    };
+    expect(csvTrace.dataset_analysis?.duplicate_rows).toBe(1);
+  }, 45_000);
 });
+
 

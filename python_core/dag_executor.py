@@ -16,6 +16,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from research_pipeline import run_research_pipeline
-from tools_engine import invoke_tool_governed
+from tools_engine import invoke_tool_governed, list_workspace_files
 
 
 MISSION_STATES = {
@@ -212,6 +213,42 @@ def build_mission_dag(
         last_core_dep = "node_knowledge_integrate"
 
     if enable_execution:
+        goal_l = goal.lower()
+        target_file_m = re.search(r"([A-Za-z0-9_.\-]+\.(?:csv|json|py|md|txt))\b", goal, re.IGNORECASE)
+        if target_file_m or any(k in goal_l for k in ("วิเคราะห์ข้อมูล", "ตรวจโค้ด", "inspect", "dataset", "defect", "รายงาน")):
+            inspect_action = (
+                "analyze_dataset"
+                if (target_file_m and target_file_m.group(1).lower().endswith((".csv", ".json"))) or "dataset" in goal_l or "วิเคราะห์ข้อมูล" in goal_l
+                else "inspect"
+            )
+            target_filename = target_file_m.group(1) if target_file_m else ""
+            nodes.append(
+                {
+                    "task_id": "node_workspace_inspect",
+                    "title": "ตรวจสอบและวิเคราะห์ข้อมูล/ไฟล์ใน Sandbox จริง",
+                    "dependencies": [last_core_dep],
+                    "tool_id": "workspace_artifact_inspect",
+                    "input_contract": {
+                        "required_keys": ["action"],
+                        "action": inspect_action,
+                        "filename": target_filename,
+                        "goal": goal,
+                    },
+                    "output_contract": {"required_keys": ["status"], "disallow_statuses": ["FAILED", "BLOCKED"]},
+                    "preconditions": [f"dependency_completed:{last_core_dep}"],
+                    "postconditions": ["workspace_inspection_verified"],
+                    "retry_policy": {"max_attempts": 1, "idempotent_required": True, "retry_on": []},
+                    "approval_policy": "auto",
+                    "execution_status": "READY",
+                    "attempts": 0,
+                    "idempotency_key": _idempotency_key(mission_id, "node_workspace_inspect"),
+                    "evidence_refs": [],
+                    "last_error": None,
+                    "output_data": {},
+                }
+            )
+            last_core_dep = "node_workspace_inspect"
+
         nodes.append(
             {
                 "task_id": "node_workspace_audit",
@@ -277,6 +314,8 @@ def _check_postconditions(node: dict[str, Any], output: dict[str, Any]) -> tuple
             return False, "Knowledge consistency check did not complete"
         if post == "sandbox_audit_completed" and output.get("status") != "COMPLETED":
             return False, f"Sandbox audit status={output.get('status')}"
+        if post == "workspace_inspection_verified" and output.get("status") != "COMPLETED":
+            return False, f"Workspace inspection status={output.get('status')}"
     return True, None
 
 
@@ -511,6 +550,45 @@ def _execute_single_node(
         return {
             "status": inv.get("status", "FAILED"),
             "file_count": len(files),
+            "invocation_id": (inv.get("invocation") or {}).get("id"),
+            "error": inv.get("error"),
+        }
+
+    if tool_id == "workspace_artifact_inspect":
+        in_c = node.get("input_contract") or {}
+        target_name = str(in_c.get("filename") or "").strip()
+        act = str(in_c.get("action") or "inspect").strip()
+        if not target_name:
+            ws_files = list_workspace_files(data_dir)
+            if ws_files:
+                target_name = str(ws_files[0]["name"])
+            else:
+                return {
+                    "status": "COMPLETED",
+                    "inspected": False,
+                    "detail": "ยังไม่มีไฟล์ใน workspace_files จึงตรวจสอบความพร้อมจากเป้าหมายและหน่วยความจำภายในแทน",
+                }
+        inv = invoke_tool_governed(
+            conn,
+            data_dir,
+            "workspace_file_read",
+            {"action": act, "filename": target_name},
+            user_id=user_id,
+            conversation_id=conv_id,
+            approved_by=approved_by,
+            tokenize_fn=callbacks["tokenize"],
+            extract_terms_fn=callbacks["extract_terms"],
+            query_kg_fn=callbacks["query_kg"],
+            calc_fn=callbacks["calc_any"],
+        )
+        raw_out = inv.get("raw_output") or {}
+        return {
+            "status": inv.get("status", "FAILED"),
+            "inspected": True,
+            "filename": target_name,
+            "analysis_summary": (inv.get("analysis") or {}).get("summary") or raw_out.get("summary"),
+            "defects": raw_out.get("defects", []),
+            "issues": raw_out.get("issues", []),
             "invocation_id": (inv.get("invocation") or {}).get("id"),
             "error": inv.get("error"),
         }

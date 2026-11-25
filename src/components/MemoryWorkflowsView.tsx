@@ -20,6 +20,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
+import { serializeTableToTsv } from '../lib/clipboard';
 import type {
   AutonomousMissionItem,
   KnowledgeTriple,
@@ -32,6 +33,7 @@ import type {
   WorkflowRun,
   WorkflowStageResult,
 } from '../types';
+import { CopyButton } from './CopyButton';
 
 interface MemoryWorkflowsViewProps {
   token: string;
@@ -221,10 +223,38 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
                 : 'ตรวจพบการอ้างอิงภายนอก'}
             </span>
           </span>
-          <span className="font-mono text-[11px] text-[var(--color-text-secondary)] tabular-nums">
-            mode: {item.mode} · {item.latency_ms} ms ·{' '}
-            {new Date(item.created_at).toLocaleString('th-TH')}
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[11px] text-[var(--color-text-secondary)] tabular-nums">
+              mode: {item.mode} · {item.latency_ms} ms ·{' '}
+              {new Date(item.created_at).toLocaleString('th-TH')}
+            </span>
+            <CopyButton
+              getText={() => {
+                const lines = [
+                  `ZYRQUEN Reasoning Trace Report`,
+                  `Status: ${item.status} | Model: ${item.model_version} | Mode: ${item.mode} | Latency: ${item.latency_ms} ms`,
+                  `Engine Path: ${enginePath.join(' -> ') || item.mode}`,
+                  `Prompt:\n${item.prompt}`,
+                  `Response:\n${item.response_preview || '-'}`,
+                ];
+                if (orderedSteps.length > 0) {
+                  lines.push(`Steps:\n${orderedSteps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`);
+                }
+                if (taskTimings.length > 0) {
+                  lines.push(
+                    `Task Timings:\n${serializeTableToTsv(
+                      ['Task', 'Status', 'Duration (ms)'],
+                      taskTimings.map((t) => [t.task, t.status, t.duration_ms])
+                    )}`
+                  );
+                }
+                return lines.join('\n\n');
+              }}
+              ariaLabel="คัดลอกรายงาน Reasoning Trace"
+              title="คัดลอกรายงาน Reasoning Trace ฉบับเต็ม"
+              size="xs"
+            />
+          </div>
         </div>
 
         <div className="grid gap-3 md:grid-cols-2">
@@ -736,9 +766,14 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
       {error && (
         <div
           role="alert"
-          className="mb-5 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
+          className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
         >
-          {error}
+          <span className="min-w-0 flex-1 break-words">{error}</span>
+          <CopyButton
+            getText={() => error}
+            ariaLabel="คัดลอกข้อความข้อผิดพลาด"
+            size="xs"
+          />
         </div>
       )}
 
@@ -1028,9 +1063,31 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                           </span>
                           {renderStatusLabel(run.status)}
                         </div>
-                        <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
-                          {new Date(run.created_at).toLocaleString('th-TH')}
-                        </span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
+                            {new Date(run.created_at).toLocaleString('th-TH')}
+                          </span>
+                          <CopyButton
+                            getText={() => {
+                              const lines = [
+                                `Workflow: ${run.group_id} [${run.status}]`,
+                                `Summary: ${run.summary}`,
+                              ];
+                              if (stages.length > 0) {
+                                lines.push(
+                                  serializeTableToTsv(
+                                    ['Stage', 'Status', 'Detail'],
+                                    stages.map((st) => [st.stage, st.status, st.detail || ''])
+                                  )
+                                );
+                              }
+                              return lines.join('\n\n');
+                            }}
+                            ariaLabel={`คัดลอกผลเวิร์กโฟลว์ ${run.group_id}`}
+                            title="คัดลอกรายงานผลการทำงานเวิร์กโฟลว์"
+                            size="xs"
+                          />
+                        </div>
                       </div>
                       <p className="mt-1.5 text-sm text-[var(--color-text-secondary)]">{run.summary}</p>
                       {stages.length > 0 && (
@@ -1234,7 +1291,37 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                         ID: {selectedMissionDetail.mission.id}
                       </p>
                     </div>
-                    {renderStatusLabel(selectedMissionDetail.mission.status)}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {renderStatusLabel(selectedMissionDetail.mission.status)}
+                      <CopyButton
+                        getText={() => {
+                          const m = selectedMissionDetail.mission;
+                          const nodeTable = serializeTableToTsv(
+                            ['Task ID', 'Status', 'Attempts', 'Last Error'],
+                            selectedMissionDetail.nodes.map((nd) => [
+                              nd.task_id,
+                              nd.execution_status,
+                              nd.attempt_count,
+                              nd.last_error || '',
+                            ])
+                          );
+                          const evLines = selectedMissionDetail.evidence.map(
+                            (ev) => `- ${ev.provider} [${ev.trust_grade}]: ${ev.source_url}`
+                          );
+                          return [
+                            `Mission: ${m.goal}`,
+                            `ID: ${m.id} | Status: ${m.status}`,
+                            `DAG Nodes:\n${nodeTable}`,
+                            evLines.length > 0 ? `Evidence:\n${evLines.join('\n')}` : '',
+                          ]
+                            .filter(Boolean)
+                            .join('\n\n');
+                        }}
+                        ariaLabel="คัดลอกรายงานภารกิจ"
+                        title="คัดลอกรายงานภารกิจและตาราง DAG Nodes"
+                        size="xs"
+                      />
+                    </div>
                   </div>
 
                   <div>

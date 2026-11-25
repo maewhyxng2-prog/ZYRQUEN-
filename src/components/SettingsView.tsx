@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
-  Copy,
   Database,
   KeyRound,
   LogOut,
@@ -20,8 +19,10 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
 import { runNativeCapabilityBenchmark } from '../lib/benchmark';
+import { serializeTableToTsv } from '../lib/clipboard';
 import { useZyrquenTheme } from '../lib/theme';
 import { MODEL_VARIANTS } from '../types';
+import { CopyButton } from './CopyButton';
 import { ToolRegistry } from './ToolRegistry';
 
 const AdminStabilityPanel = lazy(() =>
@@ -81,7 +82,6 @@ export function SettingsView({
 
   const [keyName, setKeyName] = useState('');
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
-  const [copiedSecret, setCopiedSecret] = useState(false);
 
   const [dsName, setDsName] = useState('');
   const [dsContent, setDsContent] = useState('');
@@ -495,9 +495,14 @@ export function SettingsView({
       {error && (
         <div
           role="alert"
-          className="mb-5 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
+          className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
         >
-          {error}
+          <span className="min-w-0 flex-1 break-words">{error}</span>
+          <CopyButton
+            getText={() => error}
+            ariaLabel="คัดลอกข้อความข้อผิดพลาด"
+            size="xs"
+          />
         </div>
       )}
 
@@ -696,20 +701,14 @@ export function SettingsView({
 
                 {createdSecret && (
                   <div className="mt-4 rounded-xl border border-[var(--color-accent)]/45 bg-[var(--color-surface)] p-3.5">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="break-all font-mono text-xs text-[var(--color-accent)]">{createdSecret}</p>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void navigator.clipboard?.writeText(createdSecret);
-                          setCopiedSecret(true);
-                          setTimeout(() => setCopiedSecret(false), 2000);
-                        }}
-                        className="flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-                      >
-                        {copiedSecret ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                        <span>{copiedSecret ? 'คัดลอกแล้ว' : 'คัดลอก'}</span>
-                      </button>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <p className="min-w-0 flex-1 break-all font-mono text-xs text-[var(--color-accent)]">{createdSecret}</p>
+                      <CopyButton
+                        text={createdSecret}
+                        ariaLabel="คัดลอก API Key"
+                        title="คัดลอก API Key"
+                        size="xs"
+                      />
                     </div>
                   </div>
                 )}
@@ -923,18 +922,40 @@ export function SettingsView({
                   </p>
 
                   {devData?.evaluations?.[0] && (
-                    <div className="mt-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 text-xs text-[var(--color-text)] tabular-nums">
-                      <span className="font-semibold text-[var(--color-accent)]">
-                        ผลประเมินล่าสุด ({devData.evaluations[0].overall_status})
-                      </span>
-                      {' · '}คณิต {Math.round(devData.evaluations[0].math_score * 100)}%
-                      {' · '}ความจำ {Math.round(devData.evaluations[0].knowledge_score * 100)}%
-                      {' · '}แผน DAG {Math.round(devData.evaluations[0].planning_score * 100)}%
-                      {devData.evaluations[0].test_accuracy !== null && (
-                        <span>
-                          {' · '}Test {(devData.evaluations[0].test_accuracy * 100).toFixed(1)}%
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 text-xs text-[var(--color-text)] tabular-nums">
+                      <div>
+                        <span className="font-semibold text-[var(--color-accent)]">
+                          ผลประเมินล่าสุด ({devData.evaluations[0].overall_status})
                         </span>
-                      )}
+                        {' · '}คณิต {Math.round(devData.evaluations[0].math_score * 100)}%
+                        {' · '}ความจำ {Math.round(devData.evaluations[0].knowledge_score * 100)}%
+                        {' · '}แผน DAG {Math.round(devData.evaluations[0].planning_score * 100)}%
+                        {devData.evaluations[0].test_accuracy !== null && (
+                          <span>
+                            {' · '}Test {(devData.evaluations[0].test_accuracy * 100).toFixed(1)}%
+                          </span>
+                        )}
+                      </div>
+                      <CopyButton
+                        getText={() => {
+                          const ev = devData.evaluations[0];
+                          return serializeTableToTsv(
+                            ['Status', 'Math %', 'Knowledge %', 'Planning %', 'Test Accuracy %'],
+                            [
+                              [
+                                ev.overall_status,
+                                Math.round(ev.math_score * 100),
+                                Math.round(ev.knowledge_score * 100),
+                                Math.round(ev.planning_score * 100),
+                                ev.test_accuracy !== null ? (ev.test_accuracy * 100).toFixed(1) : '-',
+                              ],
+                            ]
+                          );
+                        }}
+                        ariaLabel="คัดลอกผลการประเมิน"
+                        title="คัดลอกผลการประเมินเทียบ Baseline"
+                        size="xs"
+                      />
                     </div>
                   )}
 
@@ -1033,10 +1054,51 @@ export function SettingsView({
                           Python {benchmarkEval.report.environment.python_version} · {benchmarkEval.report.environment.model_version}
                         </span>
                       </div>
-                      <span className="inline-flex items-center gap-1 rounded-lg border border-[var(--color-accent)]/35 bg-[var(--color-surface-raised)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-accent)]">
-                        <ShieldCheck className="h-3.5 w-3.5" />
-                        <span>Zero External LLMs</span>
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 rounded-lg border border-[var(--color-accent)]/35 bg-[var(--color-surface-raised)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-accent)]">
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                          <span>Zero External LLMs</span>
+                        </span>
+                        <CopyButton
+                          getText={() => {
+                            const rep = benchmarkEval.report;
+                            const parts = [
+                              `ZYRQUEN Native Capability Benchmark (${rep.benchmark_version})`,
+                              `Model: ${rep.environment.model_version} | Python: ${rep.environment.python_version}`,
+                              `Score: ${rep.summary.passed}/${rep.summary.total_cases} (${(rep.summary.overall_score * 100).toFixed(1)}%) | Failed: ${rep.summary.failed}`,
+                              `Source Verification: ${benchmarkEval.sourceVerification.status} (${benchmarkEval.sourceVerification.passed}/${benchmarkEval.sourceVerification.total})`,
+                              `Abstention Accuracy: ${(benchmarkEval.abstentionAccuracy.overallAbstentionAccuracy * 100).toFixed(1)}% | False Positives: ${benchmarkEval.abstentionAccuracy.falsePositives}`,
+                            ];
+                            if (rep.capability_ledger) {
+                              parts.push(
+                                `Capability Ledger:\n${serializeTableToTsv(
+                                  ['Domain', 'Status', 'Passed', 'Total', 'Score %', 'FP', 'Evidence Hash'],
+                                  Object.values(rep.capability_ledger.domains).map((d) => [
+                                    d.domain,
+                                    d.status,
+                                    d.passed,
+                                    d.total,
+                                    (d.score * 100).toFixed(1),
+                                    d.false_positives,
+                                    d.evidence_hash,
+                                  ])
+                                )}`
+                              );
+                            }
+                            if (rep.failures.length > 0) {
+                              parts.push(
+                                `Failures:\n${rep.failures
+                                  .map((f) => `- [${f.id}] (${f.failure_type}) ${f.input} | expected=${f.expected} actual=${f.actual}`)
+                                  .join('\n')}`
+                              );
+                            }
+                            return parts.join('\n\n');
+                          }}
+                          ariaLabel="คัดลอกรายงาน Benchmark"
+                          title="คัดลอกรายงาน Capability Benchmark ฉบับเต็ม"
+                          size="xs"
+                        />
+                      </div>
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-2">
@@ -1445,13 +1507,35 @@ export function SettingsView({
                           ZYRQUEN — ปัญญาประดิษฐ์พื้นฐานแบบอัตโนมัติ (Autonomous Foundational Intelligence) · แยกสถานะทรัพยากรเครื่องออกจากความพร้อมในการฝึกจริง
                         </p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => onChangeTab('developer')}
-                        className="min-h-[36px] shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-accent)] hover:border-[var(--color-accent)] whitespace-nowrap"
-                      >
-                        เปิดหน้านักพัฒนา
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <CopyButton
+                          getText={() =>
+                            [
+                              `ZYRQUEN Training Readiness Gate: ${gateStatus}`,
+                              serializeTableToTsv(
+                                ['Check', 'Value'],
+                                [
+                                  ['Clean Datasets', `${cleanDatasets}/${datasetsTotal}`],
+                                  ['Verified Triples', `${verifiedTriples}/${tr?.triples_total ?? 0}`],
+                                  ['Experiments', experimentsTotal],
+                                  ['Pending Approvals', pendingApprovals],
+                                  ['Checkpoints', `${checkpointsTotal} (Neural ${neuralCheckpoints})`],
+                                ]
+                              ),
+                            ].join('\n\n')
+                          }
+                          ariaLabel="คัดลอกสรุปความพร้อมการฝึก"
+                          title="คัดลอกรายงานความพร้อมก่อนเริ่มฝึก Native Model"
+                          size="xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => onChangeTab('developer')}
+                          className="min-h-[36px] shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-accent)] hover:border-[var(--color-accent)] whitespace-nowrap"
+                        >
+                          เปิดหน้านักพัฒนา
+                        </button>
+                      </div>
                     </div>
 
                     {sys && (
@@ -1876,11 +1960,33 @@ export function SettingsView({
               </details>
 
               <details className="rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 sm:p-6">
-                <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-semibold text-[var(--color-text)]">
+                <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 text-sm font-semibold text-[var(--color-text)]">
                   <span>บันทึกการตรวจสอบความปลอดภัย (Audit Logs)</span>
-                  <span className="font-mono text-xs text-[var(--color-text-secondary)]">
-                    {adminData?.audit_logs?.length ?? 0} รายการ
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs text-[var(--color-text-secondary)]">
+                      {adminData?.audit_logs?.length ?? 0} รายการ
+                    </span>
+                    {(adminData?.audit_logs?.length ?? 0) > 0 && (
+                      <CopyButton
+                        stopPropagation
+                        getText={() =>
+                          serializeTableToTsv(
+                            ['เวลา', 'ผู้ดำเนินการ', 'การกระทำ', 'ผลลัพธ์'],
+                            (adminData?.audit_logs || []).map((log) => [
+                              new Date(log.created_at).toLocaleString('th-TH'),
+                              log.actor_email,
+                              log.action,
+                              log.outcome,
+                            ])
+                          )
+                        }
+                        label="คัดลอกตาราง"
+                        ariaLabel="คัดลอกตาราง Audit Logs"
+                        title="คัดลอกตาราง Audit Logs เป็นรูปแบบคั่นด้วยแท็บ (TSV)"
+                        size="xs"
+                      />
+                    )}
+                  </div>
                 </summary>
                 <div className="mt-4 overflow-x-auto">
                   <table className="w-full text-left text-xs">

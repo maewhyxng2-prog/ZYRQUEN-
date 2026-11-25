@@ -185,7 +185,7 @@ export function AppShell({
 
       {/* Main Content Area */}
       <main
-        className={`flex-1 ${
+        className={`flex min-h-0 flex-1 flex-col ${
           hideBottomBarOnMobile ? 'pb-0' : 'pb-[72px] md:pb-8'
         }`}
       >

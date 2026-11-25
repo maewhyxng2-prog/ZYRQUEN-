@@ -2061,4 +2061,557 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
       globalThis.IntersectionObserver = prevIO;
     }
   });
+
+  it('ปุ่มคัดลอกใน WorkspaceView คัดลอกข้อความไทย/อังกฤษ/หลายบรรทัด/ยาว, กรอง JSON ภายใน, รองรับ fallback มือถือ และจัดการ error เมื่อคลิปบอร์ดถูกบล็อก', async () => {
+    const { WorkspaceView } = await import('../components/WorkspaceView');
+    const { sanitizeAssistantDisplayContent, toPlainAssistantCopyText } = await import(
+      '../components/SafeMessageText'
+    );
+
+    const origClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const origExecCommand = (document as unknown as { execCommand?: unknown }).execCommand;
+    const copiedTexts: string[] = [];
+
+    try {
+      // 1. Mock modern Clipboard API
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: vi.fn(async (txt: string) => {
+            copiedTexts.push(txt);
+          }),
+        },
+      });
+
+      const longBody = Array.from({ length: 24 }, (_, idx) => `บรรทัดที่ ${idx + 1}: ข้อมูลยืนยันต่อเนื่อง`).join('\n');
+      const leakedJsonMsg = JSON.stringify({
+        response: 'สวัสดีครับ ยินดีต้อนรับ มีอะไรให้ช่วยวันนี้ครับ',
+        cognitive_pipeline: { stage: 'internal' },
+        inference_gap: 'none',
+        epistemic_state: 'UNDERSTOOD',
+        model_weights_changed: false,
+      });
+
+      const messages = [
+        {
+          id: 'm-thai',
+          conversation_id: 'c-copy',
+          role: 'assistant' as const,
+          content: 'สวัสดีครับ **ZYRQUEN** พร้อมช่วยเหลือ\n> ข้อความอ้างอิง\n- รายการที่ `1`',
+          mode: 'auto' as const,
+          trace_json: JSON.stringify({ engine_path: ['cognitive_pipeline'], latency_ms: 4.2 }),
+          status: 'UNDERSTOOD',
+          created_at: '2026-11-25T00:00:00Z',
+        },
+        {
+          id: 'm-en',
+          conversation_id: 'c-copy',
+          role: 'assistant' as const,
+          content: 'Hello! Native reasoning check passed with 100% deterministic verification.',
+          mode: 'auto' as const,
+          trace_json: null,
+          status: 'UNDERSTOOD',
+          created_at: '2026-11-25T00:01:00Z',
+        },
+        {
+          id: 'm-long',
+          conversation_id: 'c-copy',
+          role: 'assistant' as const,
+          content: longBody,
+          mode: 'auto' as const,
+          trace_json: null,
+          status: 'VERIFIED',
+          created_at: '2026-11-25T00:02:00Z',
+        },
+        {
+          id: 'm-json-leak',
+          conversation_id: 'c-copy',
+          role: 'assistant' as const,
+          content: leakedJsonMsg,
+          mode: 'auto' as const,
+          trace_json: null,
+          status: 'UNDERSTOOD',
+          created_at: '2026-11-25T00:03:00Z',
+        },
+      ];
+
+      render(
+        <WorkspaceView
+          token="tok-copy"
+          conversations={[]}
+          activeConversationId="c-copy"
+          activeTitle="ทดสอบปุ่มคัดลอก"
+          messages={messages}
+          loadingThread={false}
+          sending={false}
+          error={null}
+          autoExpandTrace={false}
+          defaultMode="auto"
+          onSelectConversation={vi.fn()}
+          onNewConversation={vi.fn()}
+          onDeleteConversation={vi.fn()}
+          onSendMessage={vi.fn(async () => {})}
+        />
+      );
+
+      // Assistant identity must display "ZYRQUEN" on every assistant card and never expose raw internal JSON fields in user view
+      expect(screen.getAllByText('ZYRQUEN').length).toBeGreaterThanOrEqual(4);
+      expect(screen.queryByText(/cognitive_pipeline/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/model_weights_changed/)).not.toBeInTheDocument();
+      expect(screen.getByText('Developer Trace')).toBeInTheDocument();
+      expect(screen.getByText('สวัสดีครับ ยินดีต้อนรับ มีอะไรให้ช่วยวันนี้ครับ')).toBeInTheDocument();
+
+      const copyButtons = screen.getAllByRole('button', { name: 'คัดลอกข้อความตอบกลับ' });
+      expect(copyButtons).toHaveLength(4);
+
+      // Copy Thai + multiline + Markdown-stripped plain text
+      fireEvent.click(copyButtons[0]);
+      expect(await screen.findByText('คัดลอกแล้ว')).toBeInTheDocument();
+      expect(copiedTexts[0]).toBe('สวัสดีครับ ZYRQUEN พร้อมช่วยเหลือ\nข้อความอ้างอิง\n- รายการที่ 1');
+
+      // Copy English
+      fireEvent.click(copyButtons[1]);
+      await waitFor(() => expect(copiedTexts).toHaveLength(2));
+      expect(copiedTexts[1]).toBe('Hello! Native reasoning check passed with 100% deterministic verification.');
+
+      // Copy long text without truncation
+      fireEvent.click(copyButtons[2]);
+      await waitFor(() => expect(copiedTexts).toHaveLength(3));
+      expect(copiedTexts[2]).toBe(longBody);
+
+      // Copy sanitized message from leaked JSON without internal keys
+      fireEvent.click(copyButtons[3]);
+      await waitFor(() => expect(copiedTexts).toHaveLength(4));
+      expect(copiedTexts[3]).toBe('สวัสดีครับ ยินดีต้อนรับ มีอะไรให้ช่วยวันนี้ครับ');
+
+      // Verify sanitize/copy utility handles mixed diagnostic lines without discarding useful text
+      const mixed = 'คำตอบจริงของระบบ\ncognitive_pipeline: {"a":1}\ninference_gap: none\nบรรทัดที่สอง';
+      expect(sanitizeAssistantDisplayContent(mixed)).toBe('คำตอบจริงของระบบ\nบรรทัดที่สอง');
+      expect(toPlainAssistantCopyText(mixed)).toBe('คำตอบจริงของระบบ\nบรรทัดที่สอง');
+
+      // 2. Android/legacy fallback when navigator.clipboard is undefined
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: undefined,
+      });
+      const execSpy = vi.fn(() => true);
+      (document as unknown as { execCommand?: unknown }).execCommand = execSpy;
+
+      fireEvent.click(copyButtons[0]);
+      await waitFor(() => {
+        expect(execSpy).toHaveBeenCalledWith('copy');
+      });
+
+      // 3. Graceful failure handling when clipboard API & execCommand both fail
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: vi.fn(async () => {
+            throw new Error('Permission denied');
+          }),
+        },
+      });
+      (document as unknown as { execCommand?: unknown }).execCommand = vi.fn(() => false);
+
+      fireEvent.click(copyButtons[1]);
+      expect(await screen.findByText(/คัดลอกไม่สำเร็จ/)).toBeInTheDocument();
+    } finally {
+      if (origClipboard) {
+        Object.defineProperty(navigator, 'clipboard', origClipboard);
+      } else {
+        delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+      }
+      (document as unknown as { execCommand?: unknown }).execCommand = origExecCommand;
+    }
+  });
+
+  it('กู้คืนเซสชันอัตโนมัติเมื่อ cid ใน URL คืนค่า 404 โดยไม่แสดง Conversation not found', async () => {
+    let createdCidCount = 0;
+    mockFetch({
+      'GET /api/auth/status': () =>
+        new Response(
+          JSON.stringify({ initialized: true, userCount: 1, envPasscodeConfigured: false }),
+          { status: 200 }
+        ),
+      'GET /api/health': () =>
+        new Response(JSON.stringify({ ok: true, nativeCore: 'ready' }), { status: 200 }),
+      'GET /api/auth/me': () =>
+        new Response(
+          JSON.stringify({
+            user: {
+              id: 'u1',
+              email: 'admin@zyrquen.local',
+              display_name: 'ผู้ดูแล',
+              role: 'admin',
+              created_at: '2026-11-25T00:00:00Z',
+            },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/home': () =>
+        new Response(
+          JSON.stringify({
+            recent_conversations: [],
+            counts: { triples: 0, checkpoints: 0, datasets: 0, pending_approvals: 0 },
+            system: { python_version: '3.11.2' },
+          }),
+          { status: 200 }
+        ),
+      'GET /api/conversations': () =>
+        new Response(JSON.stringify({ conversations: [] }), { status: 200 }),
+      'GET /api/conversations/stale-cid-404': () =>
+        new Response(JSON.stringify({ error: 'Conversation not found' }), { status: 404 }),
+      'POST /api/conversations': () => {
+        createdCidCount += 1;
+        return new Response(
+          JSON.stringify({
+            conversation: {
+              id: 'fresh-cid-1',
+              title: 'สวัสดี',
+              mode: 'auto',
+              updated_at: '2026-11-25T00:00:00Z',
+            },
+          }),
+          { status: 201 }
+        );
+      },
+      'POST /api/conversations/fresh-cid-1/stream': () =>
+        new Response(
+          JSON.stringify({
+            title: 'สวัสดี',
+            modelVersion: 'zyrquen-omega-v1',
+            user_message: {
+              id: 'u-hi',
+              conversation_id: 'fresh-cid-1',
+              role: 'user',
+              content: 'สวัสดี',
+              mode: 'auto',
+              trace_json: null,
+              status: 'USER',
+              created_at: '2026-11-25T00:00:00Z',
+            },
+            assistant_message: {
+              id: 'a-hi',
+              conversation_id: 'fresh-cid-1',
+              role: 'assistant',
+              content: 'สวัสดีครับ ยินดีต้อนรับ มีอะไรให้ช่วยวันนี้ครับ',
+              mode: 'auto',
+              trace_json: JSON.stringify({ engine_path: ['cognitive_pipeline'], latency_ms: 2.1 }),
+              status: 'VERIFIED',
+              created_at: '2026-11-25T00:00:01Z',
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        ),
+    });
+
+    window.history.replaceState({}, '', '/?view=workspace&cid=stale-cid-404');
+    render(<App />);
+
+    // Must recover cleanly into fresh empty workspace without surfacing "Conversation not found"
+    expect(await screen.findByText('แกนประมวลผลและเหตุผล ZYRQUEN Ω∞')).toBeInTheDocument();
+    expect(screen.queryByText(/Conversation not found/i)).not.toBeInTheDocument();
+    expect(window.location.search).not.toContain('stale-cid-404');
+
+    // Sending a message afterwards creates a fresh session and displays natural Thai greeting
+    const composer = screen.getByLabelText('ช่องพิมพ์ข้อความ');
+    fireEvent.change(composer, { target: { value: 'สวัสดี' } });
+    fireEvent.keyDown(composer, { key: 'Enter', shiftKey: false });
+
+    expect(
+      await screen.findByText('สวัสดีครับ ยินดีต้อนรับ มีอะไรให้ช่วยวันนี้ครับ')
+    ).toBeInTheDocument();
+    expect(createdCidCount).toBe(1);
+    expect(screen.queryByText(/Conversation not found/i)).not.toBeInTheDocument();
+  });
+
+  it('Universal Copy: คัดลอกโค้ดหลายบรรทัดพร้อมการเยื้อง, ตาราง TSV, รายงานภารกิจ/เวิร์กโฟลว์/เสถียรภาพ และคัดกรองข้อมูลลับไม่ให้หลุด', async () => {
+    const { WorkspaceView } = await import('../components/WorkspaceView');
+    const { HomeView } = await import('../components/HomeView');
+    const { AdminStabilityPanel } = await import('../components/AdminStabilityPanel');
+    const { serializeTableToTsv } = await import('../lib/clipboard');
+
+    const origClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const copiedTexts: string[] = [];
+
+    try {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: vi.fn(async (txt: string) => {
+            copiedTexts.push(txt);
+          }),
+        },
+      });
+
+      const pythonCode = [
+        'def compute_mean(values):',
+        '    # คอมเมนต์ต้องอยู่ครบไม่ถูกตัด',
+        '    if not values:',
+        '        return 0.0',
+        '    return sum(values) / len(values)',
+      ].join('\n');
+
+      const mdMessage = [
+        'สรุปผลวิเคราะห์โครงสร้างโค้ดและตารางข้อมูล:',
+        '',
+        '```python',
+        pythonCode,
+        '```',
+        '',
+        '| โมดูล | สถานะ | หมายเหตุ |',
+        '| --- | --- | --- |',
+        '| dataset_leakage_detector | VERIFIED | ตรวจแฮชสมบูรณ์ |',
+        '| checkpoint_tracker | VERIFIED | ไม่เขียนทับของเดิม |',
+      ].join('\n');
+
+      const secretLeakedTrace = JSON.stringify({
+        engine_path: ['tools_engine'],
+        latency_ms: 8.4,
+        token: 'secret-jwt-should-not-copy',
+        api_key: 'zyrq_secret_12345',
+        password_hash: 'hash_xyz',
+      });
+
+      // 1. WorkspaceView: Code block (with indentation + # comment), Markdown TSV Table, Redacted Developer Trace, and Error banner
+      const ws = render(
+        <WorkspaceView
+          token="tok-univ"
+          conversations={[]}
+          activeConversationId="c-univ"
+          activeTitle="ทดสอบ Universal Copy"
+          messages={[
+            {
+              id: 'm-code-table',
+              conversation_id: 'c-univ',
+              role: 'assistant',
+              content: mdMessage,
+              mode: 'auto',
+              trace_json: secretLeakedTrace,
+              status: 'VERIFIED',
+              created_at: '2026-11-25T00:00:00Z',
+            },
+          ]}
+          loadingThread={false}
+          sending={false}
+          error="การเชื่อมต่อฐานข้อมูลขัดข้อง (SQLITE_BUSY)"
+          autoExpandTrace={true}
+          defaultMode="auto"
+          onSelectConversation={vi.fn()}
+          onNewConversation={vi.fn()}
+          onDeleteConversation={vi.fn()}
+          onSendMessage={vi.fn(async () => {})}
+        />
+      );
+
+      // Copy code block preserving exact indentation and `#` comment without fences/line numbers
+      fireEvent.click(screen.getByRole('button', { name: 'คัดลอกโค้ด' }));
+      await waitFor(() => expect(copiedTexts).toHaveLength(1));
+      expect(copiedTexts[0]).toBe(pythonCode);
+      expect(copiedTexts[0]).not.toContain('```');
+
+      // Copy Markdown table as Tab-Separated Values (TSV)
+      fireEvent.click(screen.getByRole('button', { name: 'คัดลอกตาราง' }));
+      await waitFor(() => expect(copiedTexts).toHaveLength(2));
+      expect(copiedTexts[1]).toBe(
+        serializeTableToTsv(
+          ['โมดูล', 'สถานะ', 'หมายเหตุ'],
+          [
+            ['dataset_leakage_detector', 'VERIFIED', 'ตรวจแฮชสมบูรณ์'],
+            ['checkpoint_tracker', 'VERIFIED', 'ไม่เขียนทับของเดิม'],
+          ]
+        )
+      );
+      expect(copiedTexts[1]).toContain('\t');
+
+      // Copy Developer Trace JSON — credentials/tokens must NEVER be copied
+      fireEvent.click(screen.getByRole('button', { name: 'คัดลอก Developer Trace' }));
+      await waitFor(() => expect(copiedTexts).toHaveLength(3));
+      expect(copiedTexts[2]).toContain('"tools_engine"');
+      expect(copiedTexts[2]).not.toContain('secret-jwt-should-not-copy');
+      expect(copiedTexts[2]).not.toContain('zyrq_secret_12345');
+      expect(copiedTexts[2]).not.toContain('hash_xyz');
+
+      // Copy Error Alert
+      fireEvent.click(screen.getByRole('button', { name: 'คัดลอกข้อความข้อผิดพลาด' }));
+      await waitFor(() => expect(copiedTexts).toHaveLength(4));
+      expect(copiedTexts[3]).toBe('การเชื่อมต่อฐานข้อมูลขัดข้อง (SQLITE_BUSY)');
+
+      ws.unmount();
+
+      // 2. HomeView: Project Status Summary Copy (TSV metrics)
+      const hv = render(
+        <HomeView
+          user={{
+            id: 'u1',
+            email: 'admin@zyrquen.local',
+            display_name: 'Admin',
+            role: 'admin',
+            created_at: '2026-11-25T00:00:00Z',
+          }}
+          homeSummary={{
+            recent_conversations: [],
+            counts: { triples: 12, checkpoints: 2, datasets: 3, pending_approvals: 1 },
+            system: {
+              python_version: '3.11.2',
+              platform: 'Linux',
+              cpu_count: 4,
+              load_1m: 0.1,
+              mem_total_mb: 4096,
+              mem_available_mb: 2048,
+              disk_free_gb: 20,
+              disk_total_gb: 50,
+              sqlite_db_kb: 16,
+            },
+          }}
+          nativeReady={true}
+          loading={false}
+          error={null}
+          onStartPrompt={vi.fn()}
+          onOpenConversation={vi.fn()}
+          onNavigate={vi.fn()}
+          onRetry={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'คัดลอกสรุปสถานะระบบ' }));
+      await waitFor(() => expect(copiedTexts).toHaveLength(5));
+      expect(copiedTexts[4]).toContain('Knowledge Triples\t12');
+      expect(copiedTexts[4]).toContain('Model Checkpoints\t2');
+      hv.unmount();
+
+      // 3. AdminStabilityPanel: Bottleneck TSV table & Stability Report Copy
+      const asp = render(
+        <AdminStabilityPanel
+          adminData={{
+            users: [],
+            pending_runs: [],
+            audit_logs: [],
+            reasoning_traces: [
+              {
+                id: 'rt-1',
+                conversation_id: 'c1',
+                user_id: 'u1',
+                prompt: 'ทดสอบคอขวด',
+                response_preview: 'ผ่าน',
+                status: 'VERIFIED',
+                mode: 'auto',
+                model_version: 'zyrquen-omega-v1',
+                engine_path_json: '["cognitive_pipeline"]',
+                trace_json: JSON.stringify({
+                  task_timings: [
+                    { task: 'cognitive_pipeline', order: 1, duration_ms: 4.5, matched: true, status: 'VERIFIED' },
+                  ],
+                }),
+                latency_ms: 4.5,
+                external_models_used: 0,
+                created_at: '2026-11-25T00:00:00Z',
+              },
+            ],
+            recent_api_usage: [],
+          }}
+          perfSamples={[]}
+          clientLatencies={[]}
+          cleanupVerification={null}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'คัดลอกตาราง Bottleneck' }));
+      await waitFor(() => expect(copiedTexts).toHaveLength(6));
+      expect(copiedTexts[5]).toContain('Task\tRuns\tAvg (ms)\tMax (ms)');
+      expect(copiedTexts[5]).toContain('cognitive_pipeline\t1\t4.5\t4.5');
+      asp.unmount();
+
+      // 4. MemoryWorkflowsView: Mission Report Copy (Goal + DAG Nodes TSV)
+      mockFetch({
+        'GET /api/knowledge': () => new Response(JSON.stringify({ triples: [] }), { status: 200 }),
+        'GET /api/workflows': () =>
+          new Response(
+            JSON.stringify({
+              groups: [],
+              runs: [
+                {
+                  id: 'wr-1',
+                  group_id: 'system_ops',
+                  status: 'PASS',
+                  summary: 'ระบบและฐานข้อมูล SQLite พร้อมทำงาน',
+                  stages_json: JSON.stringify([{ stage: 'health_check', status: 'PASS', detail: 'OK' }]),
+                  created_at: '2026-11-25T00:00:00Z',
+                },
+              ],
+              reasoning_traces: [],
+            }),
+            { status: 200 }
+          ),
+        'GET /api/autonomous/missions': () =>
+          new Response(
+            JSON.stringify({
+              missions: [
+                {
+                  id: 'ms-copy-1',
+                  user_id: 'u1',
+                  goal: 'ตรวจสอบความพร้อมชุดข้อมูลในเวิร์กสเปซ',
+                  status: 'COMPLETED',
+                  created_at: '2026-11-25T00:00:00Z',
+                  updated_at: '2026-11-25T00:00:05Z',
+                },
+              ],
+            }),
+            { status: 200 }
+          ),
+        'GET /api/autonomous/missions/ms-copy-1': () =>
+          new Response(
+            JSON.stringify({
+              mission: {
+                id: 'ms-copy-1',
+                user_id: 'u1',
+                goal: 'ตรวจสอบความพร้อมชุดข้อมูลในเวิร์กสเปซ',
+                status: 'COMPLETED',
+                created_at: '2026-11-25T00:00:00Z',
+                updated_at: '2026-11-25T00:00:05Z',
+              },
+              nodes: [
+                {
+                  id: 'nd-1',
+                  mission_id: 'ms-copy-1',
+                  task_id: 'workspace_artifact_inspect',
+                  execution_status: 'COMPLETED',
+                  attempt_count: 1,
+                  node_json: JSON.stringify({ title: 'ตรวจสอบไฟล์ชุดข้อมูล' }),
+                  last_error: null,
+                },
+              ],
+              evidence: [],
+            }),
+            { status: 200 }
+          ),
+      });
+
+      const mw = render(
+        <MemoryWorkflowsView
+          token="tok-univ"
+          user={{
+            id: 'u1',
+            email: 'admin@zyrquen.local',
+            display_name: 'Admin',
+            role: 'admin',
+            created_at: '2026-11-25T00:00:00Z',
+          }}
+        />
+      );
+      fireEvent.click(await screen.findByRole('button', { name: /ภารกิจอัตโนมัติ/ }));
+      fireEvent.click(await screen.findByText('ตรวจสอบความพร้อมชุดข้อมูลในเวิร์กสเปซ'));
+      const copyMissionBtn = await screen.findByRole('button', { name: 'คัดลอกรายงานภารกิจ' });
+      fireEvent.click(copyMissionBtn);
+      await waitFor(() => expect(copiedTexts).toHaveLength(7));
+      expect(copiedTexts[6]).toContain('ตรวจสอบความพร้อมชุดข้อมูลในเวิร์กสเปซ');
+      expect(copiedTexts[6]).toContain('workspace_artifact_inspect\tCOMPLETED\t1');
+      mw.unmount();
+    } finally {
+      if (origClipboard) {
+        Object.defineProperty(navigator, 'clipboard', origClipboard);
+      } else {
+        delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+      }
+    }
+  });
 });
+

@@ -9,6 +9,7 @@ import {
   type ToolId,
 } from '../lib/tools';
 import type { ExternalToolItem, ToolInvocationItem, ToolsOverview } from '../types';
+import { CopyButton } from './CopyButton';
 
 interface ToolRegistryProps {
   token: string;
@@ -402,7 +403,17 @@ export function ToolRegistry({
           เครื่องมือนี้ควบคุมโดย P5 Approval Gate ({selectedPolicy.modeLabel})
         </p>
       )}
-      {toolMessage && <p className="mt-2.5 text-xs text-[var(--color-accent)]">{toolMessage}</p>}
+      {toolMessage && (
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs text-[var(--color-accent)]">
+          <span className="min-w-0 flex-1 break-words">{toolMessage}</span>
+          <CopyButton
+            getText={() => toolMessage}
+            ariaLabel="คัดลอกผลลัพธ์เครื่องมือ"
+            title="คัดลอกผลลัพธ์การทำงานของเครื่องมือ"
+            size="xs"
+          />
+        </div>
+      )}
 
       <form
         onSubmit={handleSaveWorkspaceFile}

@@ -7,6 +7,7 @@ import {
   Sparkles,
   Workflow,
 } from 'lucide-react';
+import { serializeTableToTsv } from '../lib/clipboard';
 import type {
   AppScreen,
   AutonomousMissionItem,
@@ -15,6 +16,7 @@ import type {
   ReasoningMode,
   User,
 } from '../types';
+import { CopyButton } from './CopyButton';
 import { SpacetimeFabric } from './SpacetimeFabric';
 import { TemporalIntelligenceCore } from './TemporalIntelligenceCore';
 
@@ -268,16 +270,23 @@ export function HomeView({
       {error && (
         <div
           role="alert"
-          className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
+          className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]"
         >
-          <span>{error}</span>
-          <button
-            type="button"
-            onClick={onRetry}
-            className="min-h-[40px] rounded-lg border border-[var(--color-danger)]/35 bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-surface-hover)]"
-          >
-            ลองใหม่
-          </button>
+          <span className="min-w-0 flex-1 break-words">{error}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <CopyButton
+              getText={() => error}
+              ariaLabel="คัดลอกข้อความข้อผิดพลาด"
+              size="xs"
+            />
+            <button
+              type="button"
+              onClick={onRetry}
+              className="min-h-[40px] rounded-lg border border-[var(--color-danger)]/35 bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-surface-hover)]"
+            >
+              ลองใหม่
+            </button>
+          </div>
         </div>
       )}
 
@@ -381,10 +390,29 @@ export function HomeView({
         </div>
 
         <section className="lg:col-span-5">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-base font-semibold text-[var(--color-text)]">
               สรุปสถานะการพัฒนาและความรู้
             </h3>
+            <CopyButton
+              getText={() =>
+                [
+                  'ZYRQUEN Project Status Summary',
+                  serializeTableToTsv(
+                    ['Metric', 'Value'],
+                    [
+                      ['Knowledge Triples', counts?.triples ?? 0],
+                      ['Datasets', counts?.datasets ?? 0],
+                      ['Model Checkpoints', counts?.checkpoints ?? 0],
+                      ['Pending Gate Approvals', counts?.pending_approvals ?? 0],
+                    ]
+                  ),
+                ].join('\n\n')
+              }
+              ariaLabel="คัดลอกสรุปสถานะระบบ"
+              title="คัดลอกสรุปสถานะการพัฒนาและความรู้"
+              size="xs"
+            />
           </div>
 
           <div className="space-y-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5">
