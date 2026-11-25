@@ -24,6 +24,7 @@ import { useZyrquenTheme } from '../lib/theme';
 import { MODEL_VARIANTS } from '../types';
 import { AdminStabilityPanel } from './AdminStabilityPanel';
 import { ToolRegistry } from './ToolRegistry';
+import { MemoryWorkflowsView } from './MemoryWorkflowsView';
 import type {
   AdminOverview,
   ClientLatencySample,
@@ -380,6 +381,19 @@ export function SettingsView({
 
           <button
             type="button"
+            onClick={() => onChangeTab('knowledge')}
+            className={`flex min-h-[40px] items-center gap-2 rounded-lg px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
+              activeTab === 'knowledge'
+                ? 'bg-[var(--color-primary)] text-white'
+                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
+            }`}
+          >
+            <Database className="h-3.5 w-3.5" />
+            <span>ความรู้และโฟลว์</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => onChangeTab('developer')}
             className={`flex min-h-[40px] items-center gap-2 rounded-lg px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
               activeTab === 'developer'
@@ -416,6 +430,8 @@ export function SettingsView({
           {error}
         </div>
       )}
+
+      {activeTab === 'knowledge' && <MemoryWorkflowsView token={token} user={user} />}
 
       {/* TAB 1: บัญชีผู้ใช้ */}
       {activeTab === 'account' && (
