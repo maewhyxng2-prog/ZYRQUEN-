@@ -89,6 +89,15 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
     const artifactListJson = (await artifactListRes.json()) as { workspace_files: Array<{ name: string }> };
     expect(artifactListJson.workspace_files.some((file) => file.name === 'e2e-report.md')).toBe(true);
 
+    const artifactReadRes = await fetch(`${baseUrl}/api/developer/tools/workspace_file_read/invoke`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ input: { action: 'read', filename: 'e2e-report.md' } }),
+    });
+    expect(artifactReadRes.status).toBe(201);
+    const artifactReadJson = (await artifactReadRes.json()) as { raw_output: { content: string } };
+    expect(artifactReadJson.raw_output.content).toContain('Verified workspace output');
+
     // Workspace projects use authenticated, owner-scoped persistent API storage.
     const projectCreateRes = await fetch(`${baseUrl}/api/projects`, {
       method: 'POST',
@@ -355,6 +364,13 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
       headers: { Authorization: `Bearer ${regJson.token}` },
     });
     expect(adminOverviewRes.status).toBe(403);
+
+    const memberMissionsRes = await fetch(`${baseUrl}/api/autonomous/missions`, {
+      headers: { Authorization: `Bearer ${regJson.token}` },
+    });
+    expect(memberMissionsRes.status).toBe(200);
+    const memberMissionsJson = (await memberMissionsRes.json()) as { missions: Array<{ created_by: string }> };
+    expect(memberMissionsJson.missions).toHaveLength(0);
   }, 30_000);
 
   it('Exposes platform-independent /api/v1 manifest, failure-driven curriculum synthesis, and continual learning round', async () => {
