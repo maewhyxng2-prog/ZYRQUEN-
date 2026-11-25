@@ -993,8 +993,7 @@ export default function App() {
                 }
                 pushRoute('workspace', cid, settingsTab);
               }}
-              onNewConversation={() => void handleNewConversation()}
-              onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
+                    onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
               onSendMessage={(content, mode, attachment, variant) =>
                 sendMessageToConversation(
                   activeConversationId,
