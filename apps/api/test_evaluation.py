@@ -11,7 +11,9 @@ from apps.api.database import Base, get_db
 from apps.api.evaluation_models import EvaluationRun
 from apps.api.main import app
 from apps.api.models import User
+from apps.api.routers import evaluation as evaluation_router
 from apps.api.security import get_current_user
+from apps.core.native.evaluation import EvaluationNotConfiguredError
 from apps.core.native.dataset import PrepConfig, Source, prepare_dataset
 
 client = TestClient(app, client=("127.0.0.1", 12345))
@@ -187,6 +189,12 @@ def test_evaluation_rejects_missing_or_tampered_dataset_and_checkpoint(
     )
     assert missing_version.status_code == 422
 
+    def unavailable_inference(*args, **kwargs):
+        raise EvaluationNotConfiguredError("PyTorch runtime is not installed")
+
+    monkeypatch.setattr(
+        evaluation_router.EvaluationEngine, "run_evaluation", unavailable_inference
+    )
     valid_artifacts = test_client.post(
         "/v1/evaluation/runs",
         json={
@@ -197,6 +205,11 @@ def test_evaluation_rejects_missing_or_tampered_dataset_and_checkpoint(
     )
     assert valid_artifacts.status_code == 503
     assert valid_artifacts.json()["detail"]["status"] == "not_configured"
+    with eval_client[1]() as db:
+        runs = db.query(EvaluationRun).all()
+        assert len(runs) == 1
+        assert runs[0].status == "failed"
+        assert "PyTorch runtime is not installed" in runs[0].error_message
 
 
 def test_list_evaluation_runs_enforces_ownership(eval_client):
