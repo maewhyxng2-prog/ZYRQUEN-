@@ -275,13 +275,19 @@ def get_training_readiness(
         engine = get_workflow_engine()
         approved_list = engine.governance.store.list_approvals(status="approved", limit=100)
         pending_list = engine.governance.store.list_approvals(status="pending", limit=100)
+
+        # Count only approvals that pass the same status, expiry, action binding,
+        # and HMAC verification used immediately before training dispatch.
+        for item in approved_list:
+            if item.get("action_type") != "training.execute":
+                continue
+            try:
+                _verify_training_approval_readonly(engine, str(item["id"]))
+            except (ApprovalViolationError, OSError, ValueError, KeyError, TypeError):
+                continue
+            approved_training_approvals += 1
+
         now = datetime.now(timezone.utc)
-        approved_training_approvals = sum(
-            1
-            for item in approved_list
-            if item.get("action_type") == "training.execute"
-            and datetime.fromisoformat(item["expires_at"]) > now
-        )
         pending_training_approvals = sum(
             1
             for item in pending_list
@@ -291,8 +297,11 @@ def get_training_readiness(
     except (OSError, ValueError, KeyError, TypeError):
         pass
 
-    if approved_training_approvals == 0:
-        reasons.append("No active signed Tier-2 approval token for training.execute (required before dispatch).")
+    approval_ready = approved_training_approvals > 0
+    if not approval_ready:
+        reasons.append(
+            "No active, validly signed Tier-2 approval token for training.execute (required before dispatch)."
+        )
 
     configured = dataset_configured and tokenizer_configured and admin_configured
     all_ready = (
@@ -304,6 +313,8 @@ def get_training_readiness(
         and worker_ready
         and not worker_busy
         and admin_configured
+        and is_training_admin
+        and approval_ready
     )
     status_value = (
         "ready"
@@ -328,6 +339,7 @@ def get_training_readiness(
         "tier2_approval_required": True,
         "approval_secret_configured": approval_secret_configured,
         "approved_training_approvals": approved_training_approvals,
+        "approval_ready": approval_ready,
         "pending_training_approvals": pending_training_approvals,
         "active_run_id": active_run_id,
         "dataset": {
