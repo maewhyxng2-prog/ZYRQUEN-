@@ -1039,12 +1039,23 @@ def handle_action(action: str, payload: dict) -> dict:
         return res
 
     if action == "missions_list":
-        rows = [
-            dict(r)
-            for r in conn.execute(
-                "SELECT * FROM autonomous_missions ORDER BY created_at DESC LIMIT 25"
-            ).fetchall()
-        ]
+        uid = str(payload.get("user_id", ""))
+        is_admin = bool(payload.get("is_admin", False))
+        if is_admin:
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM autonomous_missions ORDER BY created_at DESC LIMIT 50"
+                ).fetchall()
+            ]
+        else:
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM autonomous_missions WHERE created_by=? ORDER BY created_at DESC LIMIT 50",
+                    (uid,),
+                ).fetchall()
+            ]
         conn.close()
         return {"ok": True, "missions": rows}
 
