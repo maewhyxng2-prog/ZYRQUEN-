@@ -451,6 +451,12 @@ def test_training_readiness_counts_only_valid_signed_approvals(api_client, monke
         "signature_hmac": "valid-signature",
     }
 
+    fake_run = {
+        "workflow_key": "training.native_controlled_run",
+        "trigger_payload": {"dataset_version": "0.1.0"},
+        "steps": [{"step_key": "execute_training"}],
+    }
+
     class FakeStore:
         def list_approvals(self, *, status, limit):
             return [approval] if status == "approved" else []
@@ -459,13 +465,7 @@ def test_training_readiness_counts_only_valid_signed_approvals(api_client, monke
             return approval if approval_id == approval["id"] else None
 
         def get_run(self, run_id):
-            if run_id != "run-1":
-                return None
-            return {
-                "workflow_key": "training.native_controlled_run",
-                "trigger_payload": {"dataset_version": "0.1.0"},
-                "steps": [{"step_key": "execute_training"}],
-            }
+            return fake_run if run_id == "run-1" else None
 
     fake_store = FakeStore()
 
@@ -496,6 +496,13 @@ def test_training_readiness_counts_only_valid_signed_approvals(api_client, monke
     assert wrong_scope.json()["approval_ready"] is False
 
     approval["scope"] = "training.native_controlled_run:execute_training"
+    fake_run["trigger_payload"]["dataset_version"] = "different-version"
+    wrong_dataset = client.get("/training/readiness")
+    assert wrong_dataset.status_code == 200
+    assert wrong_dataset.json()["approved_training_approvals"] == 0
+    assert wrong_dataset.json()["approval_ready"] is False
+
+    fake_run["trigger_payload"]["dataset_version"] = "0.1.0"
     approval["signature_hmac"] = "tampered-signature"
     invalid = client.get("/training/readiness")
     assert invalid.status_code == 200
