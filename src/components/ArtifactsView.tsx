@@ -34,6 +34,9 @@ export function ArtifactsView({ token }: { token: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [newFilename, setNewFilename] = useState('');
+  const [newContent, setNewContent] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const loadFiles = useCallback(async () => {
     setLoading(true);
@@ -51,6 +54,27 @@ export function ArtifactsView({ token }: { token: string }) {
   useEffect(() => {
     void loadFiles();
   }, [loadFiles]);
+
+  async function saveArtifact(event: React.FormEvent) {
+    event.preventDefault();
+    if (!newFilename.trim() || !newContent.trim() || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await apiRequest('/api/developer/workspace-files', {
+        method: 'POST',
+        token,
+        body: { filename: newFilename.trim(), content: newContent },
+      });
+      setNewFilename('');
+      setNewContent('');
+      await loadFiles();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'บันทึกผลงานไม่สำเร็จ');
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function openFile(file: WorkspaceFile) {
     setSelectedName(file.name);
@@ -107,6 +131,16 @@ export function ArtifactsView({ token }: { token: string }) {
       </header>
 
       {error && <div role="alert" className="rounded-xl border border-[var(--color-danger)]/40 bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]">{error}</div>}
+
+      <form onSubmit={saveArtifact} className="grid gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 sm:grid-cols-[minmax(180px,0.7fr)_minmax(0,1.5fr)_auto] sm:items-end">
+        <label className="space-y-1 text-xs font-medium text-[var(--color-text-secondary)]">ชื่อไฟล์
+          <input value={newFilename} onChange={(event) => setNewFilename(event.target.value)} maxLength={96} placeholder="report.md" className="min-h-[40px] w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-focus)]" />
+        </label>
+        <label className="space-y-1 text-xs font-medium text-[var(--color-text-secondary)]">เนื้อหาผลงาน
+          <textarea value={newContent} onChange={(event) => setNewContent(event.target.value)} rows={2} maxLength={50000} placeholder="วางเนื้อหาผลงานที่ต้องการบันทึก..." className="w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-focus)]" />
+        </label>
+        <button type="submit" disabled={saving || !newFilename.trim() || !newContent.trim()} className="min-h-[40px] rounded-lg bg-[var(--color-primary)] px-4 text-sm font-semibold text-white disabled:opacity-50">{saving ? 'กำลังบันทึก...' : 'บันทึกผลงาน'}</button>
+      </form>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(240px,0.8fr)_minmax(0,1.4fr)]">
         <section className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
