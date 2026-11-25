@@ -745,7 +745,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(signInButtons[signInButtons.length - 1]);
 
     expect(await screen.findByText(/สวัสดี, ผู้ดูแลเสียง/i)).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'เวิร์กสเปซ' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'สร้างงาน' })[0]);
 
     const micBtn = await screen.findByRole('button', { name: /พิมพ์ด้วยเสียง/i });
     fireEvent.click(micBtn);
