@@ -558,6 +558,75 @@ export async function createApp(options: { attachVite?: boolean } = {}) {
     res.json(summary);
   });
 
+  app.get('/api/projects', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript<{ ok: boolean; projects?: Record<string, unknown>[] }>('db_bridge.py', {
+      action: 'projects_list',
+      payload: { user_id: req.user!.id },
+    });
+    res.json({ projects: data.projects || [] });
+  });
+
+  app.post('/api/projects', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const name = String(req.body?.name || '').trim().slice(0, 120);
+    const description = String(req.body?.description || '').trim().slice(0, 2000);
+    if (!name) {
+      res.status(400).json({ error: 'Project name is required.' });
+      return;
+    }
+    const data = await runPythonScript<{ ok: boolean; project?: Record<string, unknown>; error?: string }>('db_bridge.py', {
+      action: 'projects_create',
+      payload: { user_id: req.user!.id, name, description },
+    });
+    if (!data.ok || !data.project) {
+      res.status(400).json({ error: data.error || 'Project creation failed.' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: { actor_id: req.user!.id, actor_email: req.user!.email, action: 'PROJECT_CREATE', target: String(data.project.id), outcome: 'CREATED' },
+    });
+    res.status(201).json(data);
+  });
+
+  app.patch('/api/projects/:id', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const name = String(req.body?.name || '').trim().slice(0, 120);
+    const description = String(req.body?.description || '').trim().slice(0, 2000);
+    const projectStatus = String(req.body?.status || 'active').trim().toLowerCase();
+    if (!name || !['active', 'archived'].includes(projectStatus)) {
+      res.status(400).json({ error: 'Valid project name and status are required.' });
+      return;
+    }
+    const data = await runPythonScript<{ ok: boolean; project?: Record<string, unknown>; error?: string }>('db_bridge.py', {
+      action: 'projects_update',
+      payload: { user_id: req.user!.id, project_id: req.params.id, name, description, status: projectStatus },
+    });
+    if (!data.ok || !data.project) {
+      res.status(404).json({ error: data.error || 'Project not found.' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: { actor_id: req.user!.id, actor_email: req.user!.email, action: 'PROJECT_UPDATE', target: req.params.id, outcome: projectStatus.toUpperCase() },
+    });
+    res.json(data);
+  });
+
+  app.delete('/api/projects/:id', requireAuth, async (req: AuthedRequest, res: Response) => {
+    const data = await runPythonScript<{ ok: boolean }>('db_bridge.py', {
+      action: 'projects_delete',
+      payload: { user_id: req.user!.id, project_id: req.params.id },
+    });
+    if (!data.ok) {
+      res.status(404).json({ error: 'Project not found.' });
+      return;
+    }
+    await runPythonScript('db_bridge.py', {
+      action: 'log_audit',
+      payload: { actor_id: req.user!.id, actor_email: req.user!.email, action: 'PROJECT_DELETE', target: req.params.id, outcome: 'DELETED' },
+    });
+    res.json({ ok: true });
+  });
+
   app.get('/api/conversations', requireAuth, async (req: AuthedRequest, res: Response) => {
     const data = await runPythonScript('db_bridge.py', {
       action: 'conv_list',
