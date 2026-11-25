@@ -285,6 +285,33 @@ def test_training_start_enforces_tier2_approval_when_artifacts_configured(api_cl
         assert wrong_scope.status_code == 403
         assert isolated_engine.store.get_approval(wrong_scope_approved["id"])["status"] == "approved"
 
+        # A valid HMAC token for another workflow step must not authorize training.
+        wrong_step_pending = isolated_engine.governance.ensure_pending_approval(
+            run_id=wf_run["id"],
+            step=WorkflowStepSpec(
+                step_key="unrelated_step",
+                handler_key="training.execute",
+                description="Unrelated workflow step",
+                tier="tier2_approval",
+                action_type="training.execute",
+            ),
+            requested_by_user_id=str(user.id),
+            scope="dataset:0.1.0",
+        )
+        wrong_step_approved = isolated_engine.governance.decide_approval(
+            wrong_step_pending["id"],
+            approve=True,
+            approver_user_id=str(user.id),
+            approver_role="admin",
+            reason="Step binding regression test",
+        )
+        wrong_step = client.post(
+            "/training/runs",
+            json={"dataset_version": "0.1.0", "approval_id": wrong_step_approved["id"]},
+        )
+        assert wrong_step.status_code == 403
+        assert isolated_engine.store.get_approval(wrong_step_approved["id"])["status"] == "approved"
+
         # 503 during prepare() preserves approved status without burning single-use token
         resp_503 = client.post(
             "/training/runs",
