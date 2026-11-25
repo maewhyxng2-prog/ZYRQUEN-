@@ -1,5 +1,6 @@
 import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 from apps.api.database import get_db
 from apps.api.evaluation_models import EvaluationRun
 from apps.api.evaluation_schemas import EvaluationRunCreate
-from apps.api.evaluation_service import list_evaluation_runs
+from apps.api.evaluation_service import create_evaluation_run, list_evaluation_runs
 from apps.api.models import User
 from apps.api.security import get_current_user
 from apps.core.native.evaluation import (
@@ -79,6 +80,7 @@ async def trigger_evaluation(
     payload: EvaluationRunCreate | None = Body(default=None),
     model_version: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     if payload is None:
         raise HTTPException(
@@ -100,6 +102,10 @@ async def trigger_evaluation(
             },
         )
 
+    run = create_evaluation_run(db, current_user.id, payload)
+    run.status = "running"
+    run.started_at = datetime.utcnow()
+    db.commit()
     engine = EvaluationEngine(checkpoint_dir=checkpoint_dir)
     try:
         engine.verify_dataset(
@@ -114,20 +120,58 @@ async def trigger_evaluation(
             payload.model_version,
             dataset_dir=dataset_dir,
             dataset_checksum=payload.dataset_checksum,
+            run_inference=True,
+            tokenizer_path=os.getenv("ZYRQUEN_TOKENIZER_PATH", "").strip() or None,
         )
-        return {"message": "Evaluation completed", "results": results}
+        metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
+        if not isinstance(metrics, dict):
+            raise EvaluationEvidenceError("Native evaluation returned invalid metrics.")
+        run.status = "completed"
+        run.sample_count = int(metrics.get("examples_evaluated") or 0)
+        run.token_count = int(metrics.get("tokens_evaluated") or 0)
+        run.metrics = metrics
+        run.metadata_json = {
+            key: value
+            for key, value in results.items()
+            if key not in {"metrics"}
+        } if isinstance(results, dict) else {}
+        run.completed_at = datetime.utcnow()
+        db.commit()
+        return {
+            "message": "Evaluation completed",
+            "run": _serialize_run(run),
+            "results": results,
+        }
     except EvaluationEvidenceError as exc:
+        run.status = "failed"
+        run.error_message = str(exc)
+        run.completed_at = datetime.utcnow()
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
     except EvaluationNotConfiguredError as exc:
+        run.status = "failed"
+        run.error_message = str(exc)
+        run.completed_at = datetime.utcnow()
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "status": "not_configured",
                 "detail": str(exc),
+                "run_id": str(run.id),
             },
+        ) from exc
+    except Exception as exc:
+        run.status = "failed"
+        run.error_message = str(exc)
+        run.completed_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Native evaluation failed; inspect the recorded evaluation run.",
         ) from exc
 
 
