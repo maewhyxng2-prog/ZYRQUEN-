@@ -424,10 +424,10 @@ def _generate_complex_workload(rng: random.Random, count: int) -> list[tuple[str
                 tasks.append((
                     cid, "plan_mlops", goal, "plan",
                     lambda r: (
-                        r["status"] == "VERIFIED"
+                        r["status"] == "PLANNED"
                         and (r["trace"].get("plan") or {}).get("domain_mode") == "mlops_native"
                         and _check_dag_acyclic((r["trace"].get("plan") or {}).get("steps", [])),
-                        "VERIFIED(mlops_native acyclic DAG)",
+                        "PLANNED(mlops_native acyclic DAG)",
                         f"{r['status']}({(r['trace'].get('plan') or {}).get('domain_mode')})"
                     ),
                     "positive",
@@ -439,10 +439,10 @@ def _generate_complex_workload(rng: random.Random, count: int) -> list[tuple[str
                 tasks.append((
                     cid, f"plan_domain_{mode_sel}", prompt, mode_sel,
                     lambda r: (
-                        r["status"] == "VERIFIED"
+                        r["status"] == "PLANNED"
                         and (r["trace"].get("plan") or {}).get("domain_mode") == "general_engineering"
                         and _check_dag_acyclic((r["trace"].get("plan") or {}).get("steps", [])),
-                        "VERIFIED(general_engineering acyclic DAG)",
+                        "PLANNED(general_engineering acyclic DAG)",
                         f"{r['status']}({(r['trace'].get('plan') or {}).get('domain_mode')})"
                     ),
                     "positive",
@@ -680,7 +680,7 @@ def run_load_simulation(
                 ("PROC-QUAD", "แก้สมการ: x^2 - 7x + 10 = 0", "auto", "VERIFIED", "roots(2,5)"),
                 ("PROC-SYS", "แก้สมการ: 2x + y = 9, x - y = 3", "auto", "VERIFIED", "system(x=4,y=1)"),
                 ("PROC-BFS", "เชื่อมโยง: Chain0_N0 -> Chain0_N7", "auto", "VERIFIED", 7),
-                ("PROC-PLAN", "สร้างระบบจัดการนัดหมายทันตกรรม", "plan", "VERIFIED", "general_engineering"),
+                ("PROC-PLAN", "สร้างระบบจัดการนัดหมายทันตกรรม", "plan", "PLANNED", "general_engineering"),
                 ("PROC-NEG", "ราคาทองคำในอีก 50 ปีข้างหน้าเป็นเท่าไร", "auto", "NOT_LEARNED", None),
             ]
 

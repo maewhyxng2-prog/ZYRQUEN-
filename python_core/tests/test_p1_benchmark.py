@@ -299,7 +299,7 @@ class P2ReasoningAndPlanningTests(unittest.TestCase):
 
             # Domain-adaptive non-ML planner produces acyclic non-MLOps DAG (PLN-02)
             plan = zc.handle_infer({"prompt": "วางแผน: พัฒนาแอปพลิเคชันจัดการคลังสินค้าออนไลน์", "mode": "auto", "user_id": "u"})
-            self.assertEqual(plan["status"], "VERIFIED")
+            self.assertEqual(plan["status"], "PLANNED")
             steps = plan["trace"]["plan"]["steps"]
             groups = {s["workflow_group"] for s in steps}
             self.assertIn("domain_requirements", groups)
@@ -333,7 +333,7 @@ class P2ReasoningAndPlanningTests(unittest.TestCase):
 
             # 2. Explicit mode="plan" with non-ML goal uses domain-adaptive planner (not MLOps fallback)
             p_mode = zc.handle_infer({"prompt": "สร้างระบบจองห้องประชุมออนไลน์", "mode": "plan", "user_id": "u"})
-            self.assertEqual(p_mode["status"], "VERIFIED")
+            self.assertEqual(p_mode["status"], "PLANNED")
             self.assertEqual(p_mode["trace"]["plan"]["domain_mode"], "general_engineering")
 
             # 3. calc_ast tool integrates P2 quadratic & multivariate solvers

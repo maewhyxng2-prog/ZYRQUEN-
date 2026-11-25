@@ -666,6 +666,7 @@ def handle_action(action: str, payload: dict) -> dict:
                 "approved_by": admin_email,
                 "run_id": run_id,
                 "dataset_id": payload.get("dataset_id"),
+                "_verified_approval_context": True,
             }
         )
 

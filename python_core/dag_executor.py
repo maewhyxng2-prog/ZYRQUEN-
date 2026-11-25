@@ -688,16 +688,24 @@ def execute_dag_loop(
                 continue
 
             deps = node.get("dependencies", [])
-            dep_statuses = [node_map[d]["execution_status"] for d in deps if d in node_map]
-            if any(ds in {"BLOCKED", "FAILED", "CANCELLED"} for ds in dep_statuses):
-                # Upstream failed or remains blocked without recovery replacement
+            dep_nodes = [node_map[d] for d in deps if d in node_map]
+            hard_blocked = any(
+                dn.get("execution_status") in {"FAILED", "CANCELLED"}
+                or (
+                    dn.get("execution_status") == "BLOCKED"
+                    and (int(dn.get("attempts") or 0) > 0 or bool(dn.get("last_error")))
+                )
+                for dn in dep_nodes
+            )
+            if hard_blocked:
+                # Upstream failed, cancelled, or was rejected/blocked with an error
                 if status != "BLOCKED" or not node.get("last_error"):
                     node["execution_status"] = "BLOCKED"
                     node["status"] = "BLOCKED"
                     node["last_error"] = "Upstream dependency failed, cancelled, or blocked"
                     progressed = True
                 continue
-            if not all(ds == "COMPLETED" for ds in dep_statuses):
+            if not all(dn.get("execution_status") == "COMPLETED" for dn in dep_nodes):
                 if status != "BLOCKED":
                     node["execution_status"] = "BLOCKED"
                     node["status"] = "BLOCKED"

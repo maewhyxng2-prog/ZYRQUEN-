@@ -532,8 +532,8 @@ def run_capability_benchmark(
         )
         _record(
             cases, "PLN-01", "planning_research", "ML Pipeline DAG Decomposition",
-            plan_ml["status"] == "VERIFIED" and dag_valid,
-            "VERIFIED acyclic DAG", f"{plan_ml['status']} (steps={len(steps_ml)}, valid={dag_valid})",
+            plan_ml["status"] == "PLANNED" and dag_valid,
+            "PLANNED acyclic DAG", f"{plan_ml['status']} (steps={len(steps_ml)}, valid={dag_valid})",
             polarity="positive", failure_type="DAG_PLANNER_ERROR",
             engine_path=plan_ml["trace"]["engine_path"],
         )
