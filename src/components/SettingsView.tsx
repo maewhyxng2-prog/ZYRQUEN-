@@ -361,7 +361,7 @@ export function SettingsView({
         <div>
           <h2 className="text-2xl font-bold tracking-tight text-[var(--color-text)]">ตั้งค่า</h2>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-            แยกการตั้งค่าบัญชีผู้ใช้ออกจากเครื่องมือนักพัฒนาและส่วนผู้ดูแลระบบอย่างชัดเจน
+            จัดการบัญชี ความรู้ภายใน เครื่องมือพัฒนา โมเดล และการกำกับดูแลระบบ
           </p>
         </div>
 
