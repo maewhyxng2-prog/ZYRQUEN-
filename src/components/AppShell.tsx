@@ -2,7 +2,7 @@ import React from 'react';
 import {
   ArrowLeft,
   Home,
-  MessageSquareText,
+  PlusSquare,
   FolderKanban,
   ListTodo,
   ChartNoAxesCombined,
@@ -33,7 +33,7 @@ const NAV_ITEMS: Array<{ id: AppScreen; label: string; icon: React.ComponentType
   { id: 'home', label: 'ภาพรวม', icon: Home },
   { id: 'projects', label: 'โปรเจกต์', icon: FolderKanban },
   { id: 'memory', label: 'งานของฉัน', icon: ListTodo },
-  { id: 'workspace', label: 'สร้างงาน', icon: MessageSquareText },
+  { id: 'create', label: 'สร้างงาน', icon: PlusSquare },
   { id: 'analysis', label: 'วิเคราะห์', icon: ChartNoAxesCombined },
   { id: 'artifacts', label: 'คลังผลงาน', icon: Files },
 ];
