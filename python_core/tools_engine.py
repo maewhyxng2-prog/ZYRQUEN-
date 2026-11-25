@@ -1422,9 +1422,24 @@ def detect_tool_intent(prompt: str) -> tuple[str, dict] | None:
     )
     if m_inspect:
         target_arg = m_inspect.group(1).strip()
-        if any(k in cleaned.lower() for k in ("วิเคราะห์ไฟล์ข้อมูล", "วิเคราะห์ข้อมูลไฟล์", "analyze_dataset", ".csv")):
-            return "workspace_file_read", {"action": "analyze_dataset", "filename": target_arg}
-        return "workspace_file_read", {"action": "inspect", "filename": target_arg}
+        target_low = target_arg.lower()
+        is_attached_ref = target_low in {
+            "นี้",
+            "ชุดนี้",
+            "ไฟล์นี้",
+            "อันนี้",
+            "โค้ดนี้",
+            "ที่แนบ",
+            "ด้านล่าง",
+            "this",
+            "this file",
+            "attached",
+            "attachment",
+        }
+        if not is_attached_ref:
+            if any(k in cleaned.lower() for k in ("วิเคราะห์ไฟล์ข้อมูล", "วิเคราะห์ข้อมูลไฟล์", "analyze_dataset", ".csv")):
+                return "workspace_file_read", {"action": "analyze_dataset", "filename": target_arg}
+            return "workspace_file_read", {"action": "inspect", "filename": target_arg}
 
     m_file = re.match(
         r"^(?:อ่านไฟล์|จัดการไฟล์|ไฟล์เวิร์กสเปซ|ไฟล์|file_read|read_file)\s*:?\s*(.*)$",

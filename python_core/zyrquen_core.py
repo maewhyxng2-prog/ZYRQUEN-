@@ -2823,6 +2823,11 @@ def handle_infer(payload: dict) -> dict:
     if mode == "auto":
         t0 = time.perf_counter()
         tool_req = detect_tool_intent(prompt)
+        if tool_req and attachment and tool_req[0] == "workspace_file_read":
+            req_file = str(tool_req[1].get("filename") or "").strip()
+            workspace_dir = DATA_DIR / "workspace_files"
+            if not req_file or not (workspace_dir / Path(req_file).name).exists():
+                tool_req = None
         if tool_req:
             tool_id, tool_input = tool_req
             _record_task_timing("external_tool_detect", t0, matched=True, status_label="HIT", detail=tool_id)
@@ -2938,9 +2943,9 @@ def handle_infer(payload: dict) -> dict:
             else:
                 _record_task_timing("knowledge_multihop_bfs", t0, matched=True, status_label="NOT_LEARNED")
                 content = (
-                    f"**ไม่พบเส้นทางเชื่อมโยงในกราฟความรู้ภายใน (Not Learned)**\n\n"
-                    f"ค้นหาแบบ BFS สูงสุด {path_res.get('max_depth', 8)} ช่วงจาก `{path_res['start']}` ไปยัง `{path_res['end']}` แล้วไม่พบความสัมพันธ์ที่เชื่อมต่อถึงกัน\n"
-                    f"สามารถสอนความสัมพันธ์เชื่อมโยงเพิ่มด้วย: `สอน: {path_res['start']} -> ความสัมพันธ์ -> {path_res['end']}`"
+                    f"ยังไม่พบเส้นทางความสัมพันธ์ที่เชื่อมโยงจาก `{path_res['start']}` ไปยัง `{path_res['end']}` ในข้อมูลที่บันทึกไว้ตอนนี้ครับ "
+                    f"(ตรวจสอบแล้วสูงสุด {path_res.get('max_depth', 8)} ช่วง)\n\n"
+                    f"หากคุณมีข้อมูลความสัมพันธ์เพิ่มเติม สามารถพิมพ์บอกเพื่อบันทึกได้ เช่น `สอน: {path_res['start']} -> ความสัมพันธ์ -> {path_res['end']}`"
                 )
                 _finalize_trace()
                 conn.close()

@@ -2490,6 +2490,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
               {
                 id: 'rt-1',
                 conversation_id: 'c1',
+                message_id: null,
                 user_id: 'u1',
                 prompt: 'ทดสอบคอขวด',
                 response_preview: 'ผ่าน',
@@ -2508,6 +2509,17 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
               },
             ],
             recent_api_usage: [],
+            system: {
+              python_version: '3.11.2',
+              platform: 'Linux',
+              cpu_count: 4,
+              load_1m: 0.1,
+              mem_total_mb: 4096,
+              mem_available_mb: 2048,
+              disk_free_gb: 20,
+              disk_total_gb: 50,
+              sqlite_db_kb: 16,
+            },
           }}
           perfSamples={[]}
           clientLatencies={[]}

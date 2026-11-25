@@ -742,8 +742,12 @@ def _detect_followup_reference(prompt: str, query_terms: list[str], ctx: dict[st
     # Exclude explicit math/logic/teaching/planning commands
     if _EXPLICIT_CMD_RE.match(prompt.strip()):
         return False
-    # If the prompt is short/dependent and refers anaphorically, treat as contextual followup
-    return len(query_terms) <= 5
+    # If the prompt is short/dependent and refers anaphorically, treat as contextual followup.
+    # Thai syllable segmentation can expand one short phrase into >5 syllable tokens, so bound by surface words/length.
+    ascii_words = re.findall(r"[a-z0-9_]+", low)
+    if ascii_words:
+        return len(ascii_words) <= 6 and len(low) <= 48
+    return len(low) <= 48 and len(prompt.split()) <= 5
 
 
 def understand_input(
@@ -1881,6 +1885,7 @@ def run_cognitive_fallback_pipeline(
                 "speech_act": understanding["speech_act"],
                 "intent_subtype": interpretation.get("intent_subtype"),
                 "topic_focus": understanding["topic_focus"],
+                "has_followup_reference": bool(interpretation.get("is_followup")),
                 "resolved_referent": interpretation.get("resolved_referent"),
                 "semantic_primitives": understanding["semantics"]["primitive_ids"],
                 "symbol_count": understanding["unicode_semantics"]["symbol_count"],

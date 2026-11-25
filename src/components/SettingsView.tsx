@@ -938,7 +938,8 @@ export function SettingsView({
                       </div>
                       <CopyButton
                         getText={() => {
-                          const ev = devData.evaluations[0];
+                          const ev = devData.evaluations?.[0];
+                          if (!ev) return '';
                           return serializeTableToTsv(
                             ['Status', 'Math %', 'Knowledge %', 'Planning %', 'Test Accuracy %'],
                             [
