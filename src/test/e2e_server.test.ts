@@ -138,6 +138,13 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
     const projectListAfterDeleteJson = (await projectListAfterDelete.json()) as { projects: Array<{ id: string }> };
     expect(projectListAfterDeleteJson.projects.some((project) => project.id === projectId)).toBe(false);
 
+    const privateProjectRes = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ name: 'Private Admin Project', description: 'Must not leak to another user' }),
+    });
+    expect(privateProjectRes.status).toBe(201);
+
     const adminOverviewInit = await fetch(`${baseUrl}/api/admin/overview`, {
       headers: authHeaders,
     });
@@ -359,6 +366,13 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
     expect(memberArtifactsRes.status).toBe(200);
     const memberArtifacts = (await memberArtifactsRes.json()) as { workspace_files: Array<{ name: string }> };
     expect(memberArtifacts.workspace_files.some((file) => file.name === 'e2e-report.md')).toBe(false);
+
+    const memberProjectsRes = await fetch(`${baseUrl}/api/projects`, {
+      headers: { Authorization: `Bearer ${regJson.token}` },
+    });
+    expect(memberProjectsRes.status).toBe(200);
+    const memberProjects = (await memberProjectsRes.json()) as { projects: Array<{ name: string }> };
+    expect(memberProjects.projects.some((project) => project.name === 'Private Admin Project')).toBe(false);
 
     const adminOverviewRes = await fetch(`${baseUrl}/api/admin/overview`, {
       headers: { Authorization: `Bearer ${regJson.token}` },
