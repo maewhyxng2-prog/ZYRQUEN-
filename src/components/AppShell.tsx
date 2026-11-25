@@ -4,6 +4,10 @@ import {
   BrainCircuit,
   Home,
   MessageSquareText,
+  FolderKanban,
+  ListTodo,
+  ChartNoAxesCombined,
+  Files,
   Moon,
   Settings,
   Sun,
@@ -28,10 +32,12 @@ interface AppShellProps {
 }
 
 const NAV_ITEMS: Array<{ id: AppScreen; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: 'home', label: 'หน้าหลัก', icon: Home },
-  { id: 'workspace', label: 'เวิร์กสเปซ', icon: MessageSquareText },
-  { id: 'memory', label: 'ความจำ', icon: BrainCircuit },
-  { id: 'settings', label: 'ตั้งค่า', icon: Settings },
+  { id: 'home', label: 'ภาพรวม', icon: Home },
+  { id: 'projects', label: 'โปรเจกต์', icon: FolderKanban },
+  { id: 'memory', label: 'งานของฉัน', icon: ListTodo },
+  { id: 'workspace', label: 'สร้างงาน', icon: MessageSquareText },
+  { id: 'analysis', label: 'วิเคราะห์', icon: ChartNoAxesCombined },
+  { id: 'artifacts', label: 'คลังผลงาน', icon: Files },
 ];
 
 export function AppShell({
@@ -198,7 +204,7 @@ export function AppShell({
           aria-label="แถบนำทางมือถือ"
           className="fixed bottom-0 left-0 right-0 z-40 border-t border-[var(--color-border)] bg-[var(--color-surface)]/95 backdrop-blur-md pb-safe md:hidden"
         >
-          <div className="grid h-[56px] grid-cols-4 items-center">
+          <div className="grid h-[60px] grid-cols-6 items-center">
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
               const active = activeScreen === item.id;
@@ -215,7 +221,7 @@ export function AppShell({
                   }`}
                 >
                   <Icon className="h-5 w-5" />
-                  <span className="text-[11px] font-medium leading-none tracking-tight">
+                  <span className="text-[10px] font-medium leading-none tracking-tight">
                     {item.label}
                   </span>
                 </button>
