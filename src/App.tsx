@@ -595,28 +595,26 @@ export default function App() {
     };
   }, [activeConversationId, loadConversationThread, screen, token]);
 
-  async function handleStartPrompt(prompt: string, mode: ReasoningMode) {
-    if (!token) return;
-    setWorkspaceError(null);
-    try {
-      const created = await apiRequest<{ conversation: ConversationSummary }>('/api/conversations', {
+  async function handleStartTask(goal: string) {
+    if (!token) throw new Error('กรุณาเข้าสู่ระบบก่อนเริ่มงาน');
+    const result = await apiRequest<{ ok: boolean; mission?: { id: string; status: string }; error?: string }>(
+      '/api/autonomous/missions',
+      {
         method: 'POST',
         token,
-        body: { title: prompt.slice(0, 48), mode },
-      });
-      const cid = created.conversation.id;
-      skipNextLoadCidRef.current = cid;
-      setConversations((prev) => [
-        { ...created.conversation, message_count: 0 },
-        ...prev,
-      ]);
-      setActiveTitle(created.conversation.title);
-      setMessages([]);
-      pushRoute('workspace', cid, settingsTab);
-      await sendMessageToConversation(cid, prompt, mode, undefined, selectedModelVariant);
-    } catch (err) {
-      setWorkspaceError(err instanceof ApiError ? err.message : 'Failed to start conversation');
+        body: {
+          goal,
+          enableResearch: false,
+          enableKnowledgeDev: false,
+          enablePlanning: true,
+          enableExecution: true,
+        },
+      }
+    );
+    if (!result.ok || !result.mission) {
+      throw new Error(result.error || 'ไม่สามารถเริ่มภารกิจ Native ได้');
     }
+    pushRoute('memory', null, settingsTab);
   }
 
   async function sendMessageToConversation(
@@ -954,7 +952,7 @@ export default function App() {
               nativeReady={nativeReady}
               loading={homeLoading}
               error={homeError}
-              onStartPrompt={(prompt, mode) => void handleStartPrompt(prompt, mode)}
+              onStartTask={handleStartTask}
               onOpenConversation={(cid) => pushRoute('workspace', cid, settingsTab)}
               onNavigate={(next) => pushRoute(next, null, settingsTab)}
               onRetry={() => void loadHomeAndConversations()}
