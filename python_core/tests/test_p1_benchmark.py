@@ -262,14 +262,14 @@ class P2ReasoningAndPlanningTests(unittest.TestCase):
             l_undet = zc.handle_infer(
                 {"prompt": "ถ้า A > B และ C > D แล้ว A เทียบกับ D เป็นอย่างไร", "mode": "auto", "user_id": "u"}
             )
-            self.assertEqual(l_undet["status"], "NOT_LEARNED")
+            self.assertEqual(l_undet["status"], "UNABLE_TO_INFER")
             self.assertFalse(l_undet["trace"]["logic"]["determined"])
 
             # Mixed attribute comparatives must abstain rather than conflate height & weight
             l_mixed = zc.handle_infer(
                 {"prompt": "ถ้า A สูงกว่า B และ B หนักกว่า C แล้ว A เทียบกับ C เป็นอย่างไร", "mode": "auto", "user_id": "u"}
             )
-            self.assertEqual(l_mixed["status"], "NOT_LEARNED")
+            self.assertEqual(l_mixed["status"], "UNABLE_TO_INFER")
 
             # Unseen Thai word-math problems + division-by-zero / non-math abstention (RSN-12)
             w_mul = zc.handle_infer(
@@ -287,7 +287,7 @@ class P2ReasoningAndPlanningTests(unittest.TestCase):
             w_zero = zc.handle_infer(
                 {"prompt": "มีแอปเปิ้ล 12 ผล แบ่งให้ 0 คนเท่าๆ กัน จะได้คนละกี่ผล", "mode": "auto", "user_id": "u"}
             )
-            self.assertEqual(w_zero["status"], "NOT_LEARNED")
+            self.assertEqual(w_zero["status"], "UNABLE_TO_INFER")
 
     def test_p2_multihop_6_domain_planner_and_research_intent(self) -> None:
         with isolated_core_env():
@@ -1175,6 +1175,69 @@ class DatasetIngestionPipelineTests(unittest.TestCase):
             self.assertEqual(second["dataset"]["status"], "LEAKAGE_BLOCKED")
             viols = second["leakage_report"]["violations"]
             self.assertTrue(any(v.startswith("semantic_hash:") for v in viols), viols)
+
+
+class CognitiveGeneralizationAndEpistemicTests(unittest.TestCase):
+    def test_unseen_inputs_separate_unknown_uncertain_not_learned_and_unable_to_infer(self) -> None:
+        with isolated_core_env():
+            # 1. Unseen expressive emoji ('😂') -> understood via general unicodedata decomposition -> UNCERTAIN
+            emoji_joy = zc.handle_infer({"prompt": "😂", "mode": "auto", "user_id": "u-cog"})
+            self.assertEqual(emoji_joy["status"], "UNCERTAIN")
+            self.assertEqual(emoji_joy["epistemic_state"], "UNCERTAIN")
+            self.assertFalse(emoji_joy["trace"]["external_models_used"])
+            cp_joy = emoji_joy["trace"]["cognitive_pipeline"]
+            self.assertEqual(cp_joy["understand"]["speech_act"], "affective_expression")
+            self.assertEqual(cp_joy["understand"]["dominant_affect"], "joy_amusement")
+            self.assertFalse(cp_joy["learn"]["model_weights_changed"])
+            # Must NOT leak internal DB/checkpoint/AST plumbing to normal conversational users
+            for noise in ("0 รายการ", "0 รุ่น", "AST", "SQLite"):
+                self.assertNotIn(noise, emoji_joy["content"])
+
+            # 2. Unseen emoji combinations (generalizes via unicodedata, not hardcoded per-emoji table)
+            emoji_curious = zc.handle_infer({"prompt": "🤔❓", "mode": "auto", "user_id": "u-cog"})
+            self.assertEqual(emoji_curious["status"], "UNCERTAIN")
+            self.assertEqual(emoji_curious["trace"]["cognitive_pipeline"]["understand"]["dominant_affect"], "curiosity_thinking")
+
+            emoji_celeb = zc.handle_infer({"prompt": "🎉🔥", "mode": "auto", "user_id": "u-cog"})
+            self.assertEqual(emoji_celeb["status"], "UNCERTAIN")
+            self.assertEqual(emoji_celeb["trace"]["cognitive_pipeline"]["understand"]["dominant_affect"], "celebration_excitement")
+
+            # 3. Unseen opaque gibberish/noise -> UNKNOWN
+            gibberish = zc.handle_infer({"prompt": "asdfqwerzxcv", "mode": "auto", "user_id": "u-cog"})
+            self.assertEqual(gibberish["status"], "UNKNOWN")
+            self.assertFalse(gibberish["trace"]["cognitive_pipeline"]["evaluate"]["understood"])
+            self.assertNotIn("AST", gibberish["content"])
+
+            punct_noise = zc.handle_infer({"prompt": "???###", "mode": "auto", "user_id": "u-cog"})
+            self.assertEqual(punct_noise["status"], "UNKNOWN")
+
+            # 4. Unseen well-formed conceptual question outside learned knowledge -> NOT_LEARNED
+            unlearned = zc.handle_infer(
+                {"prompt": "ระบบนิเวศใต้ทะเลลึกทำงานอย่างไร", "mode": "auto", "user_id": "u-cog"}
+            )
+            self.assertEqual(unlearned["status"], "NOT_LEARNED")
+            self.assertTrue(unlearned["trace"]["cognitive_pipeline"]["evaluate"]["understood"])
+            self.assertNotIn("0 รายการ", unlearned["content"])
+
+            # 5. Unseen formal inference failure (missing link / mismatched attributes / zero divisor) -> UNABLE_TO_INFER
+            unable = zc.handle_infer(
+                {"prompt": "ถ้า ดาวอังคาร ใหญ่กว่า ดวงจันทร์ และ ดาวศุกร์ ร้อนกว่า โลก แล้ว ดาวอังคาร เทียบกับ โลก เป็นอย่างไร", "mode": "auto", "user_id": "u-cog"}
+            )
+            self.assertEqual(unable["status"], "UNABLE_TO_INFER")
+            self.assertEqual(unable["epistemic_state"], "UNABLE_TO_INFER")
+            self.assertFalse(unable["trace"]["logic"]["determined"])
+
+            # 6. Verify experiences were logged to episodic_experiences without mutating model weights
+            conn = zc.get_db()
+            exp_rows = conn.execute(
+                "SELECT outcome_status, gap_type FROM episodic_experiences"
+            ).fetchall()
+            ckpts = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
+            conn.close()
+            self.assertGreaterEqual(len(exp_rows), 4)
+            self.assertEqual(ckpts, 0)
+            recorded_statuses = {r["outcome_status"] for r in exp_rows}
+            self.assertTrue({"UNCERTAIN", "UNKNOWN", "NOT_LEARNED", "UNABLE_TO_INFER"}.issubset(recorded_statuses))
 
 
 if __name__ == "__main__":

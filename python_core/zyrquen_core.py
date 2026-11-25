@@ -59,6 +59,10 @@ from dataset_ingestion import (
     verify_all_datasets_for_workflow,
     verify_dataset_integrity,
 )
+from cognitive_pipeline import (
+    run_cognitive_fallback_pipeline,
+    learn_from_experience as _learn_cognitive_experience,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("ZYRQUEN_DATA_DIR") or (BASE_DIR / "data"))
@@ -1086,6 +1090,21 @@ def _parse_comparison_clause(clause: str) -> tuple[str, str, str, str] | None:
             rhs = m.group(2).strip(" .,:;\"'")
             if lhs and rhs and lhs.lower() != rhs.lower():
                 return (lhs, op, rhs, attr)
+    # Generalizable comparative predicate fallback (arbitrary Thai "<adj>กว่า" or English "<adj>er than")
+    m_th_comp = re.match(r"^(.+?)\s+([^\s]+กว่า)\s+(.+)$", c)
+    if m_th_comp:
+        lhs = m_th_comp.group(1).strip(" .,:;\"'")
+        comp = m_th_comp.group(2).strip()
+        rhs = m_th_comp.group(3).strip(" .,:;\"'")
+        if lhs and rhs and lhs.lower() != rhs.lower():
+            return (lhs, ">", rhs, f"comp:{comp}")
+    m_en_comp = re.match(r"^(.+?)\s+(?:is\s+|are\s+)?([A-Za-z]+er)\s+than\s+(.+)$", c, re.IGNORECASE)
+    if m_en_comp:
+        lhs = m_en_comp.group(1).strip(" .,:;\"'")
+        comp = m_en_comp.group(2).strip().lower()
+        rhs = m_en_comp.group(3).strip(" .,:;\"'")
+        if lhs and rhs and lhs.lower() != rhs.lower():
+            return (lhs, ">", rhs, f"comp:{comp}")
     return None
 
 
@@ -1451,7 +1470,19 @@ def try_word_math_reasoning(prompt: str) -> dict | None:
     steps: list[str]
     if has_div_cue:
         if abs(b) < 1e-12:
-            return None
+            return {
+                "engine": "word_math_native",
+                "operation": "division",
+                "determined": False,
+                "unable_reason": "division_by_zero",
+                "operands": [a_fmt, 0],
+                "expression": f"{a_fmt} / 0",
+                "result": None,
+                "steps": [
+                    f"ระบุปริมาณตั้งต้น {a_fmt} และตัวหาร 0",
+                    "ไม่สามารถคำนวณได้เนื่องจากการหารด้วย 0 ไม่นิยามในระบบจำนวนจริง",
+                ],
+            }
         val = a / b
         op_name = "division"
         expr_str = f"{a_fmt} / {b_fmt}"
@@ -2930,9 +2961,38 @@ def handle_infer(payload: dict) -> dict:
         t0 = time.perf_counter()
         word_math_res = try_word_math_reasoning(prompt)
         if word_math_res:
-            _record_task_timing("word_math_native", t0, matched=True, status_label="VERIFIED")
             trace["engine_path"].append("word_math_native")
             trace["word_math"] = word_math_res
+            if word_math_res.get("determined") is False:
+                cog = run_cognitive_fallback_pipeline(
+                    conn,
+                    prompt=prompt,
+                    attachment=attachment,
+                    mode=mode,
+                    conversation_id=str(conversation_id) if conversation_id else None,
+                    attempted_engines=[t["task"] for t in task_timings] + ["word_math_native"],
+                    failure_context={
+                        "unable_reason": word_math_res.get("unable_reason") or "underdetermined",
+                        "detail": "; ".join(word_math_res.get("steps") or []),
+                    },
+                    explicit_status="UNABLE_TO_INFER",
+                    tokenize_fn=tokenize,
+                    extract_terms_fn=extract_query_terms,
+                    query_kg_fn=query_knowledge_graph,
+                )
+                trace["engine_path"].append("cognitive_pipeline")
+                trace["epistemic_state"] = "UNABLE_TO_INFER"
+                trace["cognitive_pipeline"] = cog["pipeline_trace"]
+                _record_task_timing("word_math_native", t0, matched=True, status_label="UNABLE_TO_INFER")
+                _finalize_trace()
+                conn.close()
+                return {
+                    "content": cog["response"],
+                    "status": "UNABLE_TO_INFER",
+                    "epistemic_state": "UNABLE_TO_INFER",
+                    "trace": trace,
+                }
+            _record_task_timing("word_math_native", t0, matched=True, status_label="VERIFIED")
             steps_md = "\n".join(f"- {s}" for s in word_math_res["steps"])
             content = (
                 f"**คำตอบเชิงปริมาณ:** `{word_math_res['result']}`\n\n"
@@ -2940,7 +3000,7 @@ def handle_infer(payload: dict) -> dict:
             )
             _finalize_trace()
             conn.close()
-            return {"content": content, "status": "VERIFIED", "trace": trace}
+            return {"content": content, "status": "VERIFIED", "epistemic_state": "VERIFIED", "trace": trace}
         _record_task_timing("word_math_native", t0, matched=False, status_label="MISS")
 
     if mode in ("auto", "math", "knowledge"):
@@ -2958,7 +3018,7 @@ def handle_infer(payload: dict) -> dict:
                 )
                 _finalize_trace()
                 conn.close()
-                return {"content": content, "status": "BLOCKED", "trace": trace}
+                return {"content": content, "status": "BLOCKED", "epistemic_state": "BLOCKED", "trace": trace}
             if logic_res["determined"] and logic_res["derived_relation"]:
                 _record_task_timing("transitive_logic_native", t0, matched=True, status_label="VERIFIED")
                 content = (
@@ -2967,14 +3027,40 @@ def handle_infer(payload: dict) -> dict:
                 )
                 _finalize_trace()
                 conn.close()
-                return {"content": content, "status": "VERIFIED", "trace": trace}
-            _record_task_timing("transitive_logic_native", t0, matched=True, status_label="NOT_LEARNED")
+                return {"content": content, "status": "VERIFIED", "epistemic_state": "VERIFIED", "trace": trace}
+            cog = run_cognitive_fallback_pipeline(
+                conn,
+                prompt=prompt,
+                attachment=attachment,
+                mode=mode,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                attempted_engines=[t["task"] for t in task_timings] + ["transitive_logic_native"],
+                failure_context={
+                    "unable_reason": "missing_premise_or_rule",
+                    "detail": "; ".join(logic_res.get("steps") or []),
+                },
+                explicit_status="UNABLE_TO_INFER",
+                tokenize_fn=tokenize,
+                extract_terms_fn=extract_query_terms,
+                query_kg_fn=query_knowledge_graph,
+            )
+            trace["engine_path"].append("cognitive_pipeline")
+            trace["epistemic_state"] = "UNABLE_TO_INFER"
+            trace["cognitive_pipeline"] = cog["pipeline_trace"]
+            _record_task_timing("transitive_logic_native", t0, matched=True, status_label="UNABLE_TO_INFER")
             content = (
-                f"**ไม่สามารถสรุปความสัมพันธ์ได้จากข้อตั้งที่มี (Undetermined)**\n\n{steps_md}"
+                f"{cog['response']}\n\n**รายละเอียดการตรวจสอบข้อตั้ง:**\n{steps_md}"
+                if steps_md
+                else cog["response"]
             )
             _finalize_trace()
             conn.close()
-            return {"content": content, "status": "NOT_LEARNED", "trace": trace}
+            return {
+                "content": content,
+                "status": "UNABLE_TO_INFER",
+                "epistemic_state": "UNABLE_TO_INFER",
+                "trace": trace,
+            }
         _record_task_timing("transitive_logic_native", t0, matched=False, status_label="MISS")
 
         t0 = time.perf_counter()
@@ -2991,7 +3077,7 @@ def handle_infer(payload: dict) -> dict:
                 )
                 _finalize_trace()
                 conn.close()
-                return {"content": content, "status": "BLOCKED", "trace": trace}
+                return {"content": content, "status": "BLOCKED", "epistemic_state": "BLOCKED", "trace": trace}
             if causal_res.get("determined") and causal_res.get("derived_conclusion"):
                 sub_t = causal_res.get("sub_type", "causal")
                 _record_task_timing("causal_logic_native", t0, matched=True, status_label="VERIFIED", detail=str(sub_t))
@@ -3001,14 +3087,40 @@ def handle_infer(payload: dict) -> dict:
                 )
                 _finalize_trace()
                 conn.close()
-                return {"content": content, "status": "VERIFIED", "trace": trace}
-            _record_task_timing("causal_logic_native", t0, matched=True, status_label="NOT_LEARNED")
+                return {"content": content, "status": "VERIFIED", "epistemic_state": "VERIFIED", "trace": trace}
+            cog = run_cognitive_fallback_pipeline(
+                conn,
+                prompt=prompt,
+                attachment=attachment,
+                mode=mode,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                attempted_engines=[t["task"] for t in task_timings] + ["causal_logic_native"],
+                failure_context={
+                    "unable_reason": "missing_premise_or_rule",
+                    "detail": "; ".join(causal_res.get("steps") or []),
+                },
+                explicit_status="UNABLE_TO_INFER",
+                tokenize_fn=tokenize,
+                extract_terms_fn=extract_query_terms,
+                query_kg_fn=query_knowledge_graph,
+            )
+            trace["engine_path"].append("cognitive_pipeline")
+            trace["epistemic_state"] = "UNABLE_TO_INFER"
+            trace["cognitive_pipeline"] = cog["pipeline_trace"]
+            _record_task_timing("causal_logic_native", t0, matched=True, status_label="UNABLE_TO_INFER")
             content = (
-                f"**ไม่สามารถสรุปผลจากเงื่อนไข/ข้อตั้งที่มี (Undetermined)**\n\n{steps_md}"
+                f"{cog['response']}\n\n**รายละเอียดการตรวจสอบข้อตั้ง:**\n{steps_md}"
+                if steps_md
+                else cog["response"]
             )
             _finalize_trace()
             conn.close()
-            return {"content": content, "status": "NOT_LEARNED", "trace": trace}
+            return {
+                "content": content,
+                "status": "UNABLE_TO_INFER",
+                "epistemic_state": "UNABLE_TO_INFER",
+                "trace": trace,
+            }
         _record_task_timing("causal_logic_native", t0, matched=False, status_label="MISS")
 
     is_explicit_math_cmd = bool(
@@ -3153,27 +3265,41 @@ def handle_infer(payload: dict) -> dict:
         conn.close()
         return {"content": content, "status": "VERIFIED", "trace": trace}
 
-    # 8. Honest Unlearned Boundary (NEVER fabricate intelligence)
+    # 8. Native Cognitive Pipeline: Understand -> Reason -> Evaluate -> Respond -> Learn
+    # Separates UNKNOWN, UNCERTAIN, NOT_LEARNED, and UNABLE_TO_INFER cleanly without external LLMs or canned rules.
     t0 = time.perf_counter()
-    trace["engine_path"].append("unlearned_boundary")
-    triple_count = conn.execute("SELECT COUNT(*) FROM knowledge_triples").fetchone()[0]
-    ckpt_count = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
-    conn.close()
-    _record_task_timing("unlearned_boundary", t0, matched=True, status_label="NOT_LEARNED")
-    _finalize_trace()
-
-    content = (
-        f"**สถานะ: ยังไม่ได้เรียนรู้ในแกนสมองภายใน (Not Learned)**\n\n"
-        f"ZYRQUEN Ω∞ ไม่ส่งคำขอไปยังโมเดล LLM ภายนอก และจะไม่สร้างคำตอบสมมติ "
-        f"คำถาม (`{prompt_with_ctx[:80]}`) ไม่ตรงกับนิพจน์คณิตศาสตร์ AST, "
-        f"ความสัมพันธ์ในกราฟความรู้ ({triple_count} รายการ), หรือคำศัพท์ใน Checkpoint ที่ฝึกไว้ ({ckpt_count} รุ่น)\n\n"
-        f"**สิ่งที่สามารถทำได้ทันที:**\n"
-        f"- สอนความรู้ใหม่โดยตรง: `สอน: ประธาน -> ความสัมพันธ์ -> กรรม` หรือ `จำว่า: X เป็น Y`\n"
-        f"- ค้นหาเส้นทางหลายช่วง: `เชื่อมโยง: ต้นทาง -> ปลายทาง`\n"
-        f"- วางแผนงานจากสถานะจริง: `วางแผน: เป้าหมาย`\n"
-        f"- คำนวณ AST / สมการ / สถิติ: `แก้สมการ: 3x + 7 = 22` หรือ `สถิติ: 10, 20, 30, 40`"
+    cog = run_cognitive_fallback_pipeline(
+        conn,
+        prompt=prompt,
+        attachment=attachment,
+        mode=mode,
+        conversation_id=str(conversation_id) if conversation_id else None,
+        attempted_engines=[t["task"] for t in task_timings],
+        tokenize_fn=tokenize,
+        extract_terms_fn=extract_query_terms,
+        query_kg_fn=query_knowledge_graph,
     )
-    return {"content": content, "status": "NOT_LEARNED", "trace": trace}
+    epistemic_state = cog["epistemic_state"]
+    trace["engine_path"].append("cognitive_pipeline")
+    if epistemic_state == "NOT_LEARNED":
+        trace["engine_path"].append("unlearned_boundary")
+    trace["epistemic_state"] = epistemic_state
+    trace["cognitive_pipeline"] = cog["pipeline_trace"]
+    conn.close()
+    _record_task_timing(
+        "unlearned_boundary" if epistemic_state == "NOT_LEARNED" else "cognitive_pipeline",
+        t0,
+        matched=True,
+        status_label=epistemic_state,
+        detail=cog["pipeline_trace"]["understand"]["speech_act"],
+    )
+    _finalize_trace()
+    return {
+        "content": cog["response"],
+        "status": epistemic_state,
+        "epistemic_state": epistemic_state,
+        "trace": trace,
+    }
 
 
 def _canonical_record_key(line: str) -> str:
@@ -4136,7 +4262,7 @@ def summarize_conversation(messages: list[dict]) -> dict:
 
         if status == "VERIFIED":
             verified_count += 1
-        elif status == "NOT_LEARNED":
+        elif status in {"NOT_LEARNED", "UNCERTAIN", "UNKNOWN", "UNABLE_TO_INFER"}:
             not_learned_count += 1
 
         trace_raw = m.get("trace_json")

@@ -178,17 +178,19 @@ class DatasetLeakageDetectorTests(unittest.TestCase):
 
     @unittest.skipUnless(_HAS_V11_INGEST, "Requires full apps.core.native V11 runtime dependencies")
     def test_blocks_cross_version_v11_ingestion(self) -> None:
+        from apps.core.workflow import ApprovalViolationError, CentralWorkflowOrchestrator
+
         assert ingest_v11_dataset is not None
         with tempfile.TemporaryDirectory() as tmp:
             ds_root = Path(tmp) / "v11_root"
             ds_root.mkdir()
-            v1 = ingest_v11_dataset(
-                dataset_version="1.0.0",
-                dataset_root=ds_root,
-                source_name="native_engineering_docs",
-                license_str="Apache-2.0",
-                provenance="verified_project_documentation",
-                splits={
+            engine = CentralWorkflowOrchestrator(
+                db_path=Path(tmp) / "wf.db",
+                work_dir=Path(tmp) / "wf_work",
+                approval_secret="unit-test-approval-secret-minimum-32-chars",
+            )
+            try:
+                v1_splits = {
                     "train": [
                         {
                             "input": "explain checkpoint versioning",
@@ -213,47 +215,111 @@ class DatasetLeakageDetectorTests(unittest.TestCase):
                             "target": "Topological DAG sorting fails closed whenever directed workflow steps form cycles.",
                         }
                     ],
-                },
-            )
-            self.assertTrue(v1["verified"])
-            self.assertTrue(v1["semantic_leakage_check"]["passed"])
+                }
 
-            with self.assertRaises(DatasetLeakageError) as ctx:
-                ingest_v11_dataset(
-                    dataset_version="1.1.0",
-                    dataset_root=ds_root,
-                    source_name="native_engineering_docs_v2",
-                    license_str="Apache-2.0",
-                    provenance="verified_project_documentation_v2",
-                    splits={
-                        "train": [
-                            {
-                                "input": "detail memory isolation tiers",
-                                "target": "Episodic working verified knowledge training and eval corpora remain separate.",
-                            }
-                        ],
-                        "validation": [
-                            {
-                                "input": "specify tokenizer roundtrip",
-                                "target": "Byte-level BPE restores normalized input strings deterministically across runs.",
-                            }
-                        ],
-                        "unseen": [
-                            {
-                                "input": "explain checkpoint versioning",
-                                "target": "Each model training round persists an isolated immutable versioned checkpoint.",
-                            }
-                        ],
-                        "ood": [
-                            {
-                                "input": "verify causal contradiction halt",
-                                "target": "Conflicting source assertions transition immediately to a blocked contradiction state.",
-                            }
-                        ],
-                    },
+                # Without an Approval Gate ticket from apps/core/workflow/, ingestion must fail closed
+                with self.assertRaises(ApprovalViolationError):
+                    ingest_v11_dataset(
+                        dataset_version="1.0.0",
+                        dataset_root=ds_root,
+                        source_name="native_engineering_docs",
+                        license_str="Apache-2.0",
+                        provenance="verified_project_documentation",
+                        splits=v1_splits,
+                        workflow_engine=engine,
+                    )
+                self.assertFalse((ds_root / "1.0.0").exists())
+
+                # Issue and approve a valid dataset.ingest Approval Gate ticket
+                run1 = engine.trigger_workflow(
+                    "dataset.governed_ingest",
+                    payload={"dataset_version": "1.0.0"},
+                    requested_by_user_id="dev-1",
+                    actor_id="dev-1",
                 )
-            self.assertIn("Semantic hash leakage gate failed", str(ctx.exception))
-            self.assertFalse((ds_root / "1.1.0").exists())
+                ticket1 = run1["pending_approval_id"]
+                engine.governance.decide_approval(
+                    ticket1,
+                    approve=True,
+                    approver_user_id="admin-1",
+                    approver_role="admin",
+                    reason="Approve v1.0.0 ingestion",
+                )
+
+                v1 = ingest_v11_dataset(
+                    dataset_version="1.0.0",
+                    dataset_root=ds_root,
+                    source_name="native_engineering_docs",
+                    license_str="Apache-2.0",
+                    provenance="verified_project_documentation",
+                    splits=v1_splits,
+                    approval_id=ticket1,
+                    workflow_engine=engine,
+                )
+                self.assertTrue(v1["verified"])
+                self.assertEqual(v1["status"], "ready")
+                self.assertTrue(v1["approval_gate_verified"])
+                self.assertTrue(v1["semantic_leakage_check"]["passed"])
+                self.assertEqual(engine.store.get_approval(ticket1)["status"], "consumed")
+
+                # Second version with valid Approval Gate ticket must still block semantic leakage
+                run2 = engine.trigger_workflow(
+                    "dataset.governed_ingest",
+                    payload={"dataset_version": "1.1.0"},
+                    requested_by_user_id="dev-1",
+                    actor_id="dev-1",
+                )
+                ticket2 = run2["pending_approval_id"]
+                engine.governance.decide_approval(
+                    ticket2,
+                    approve=True,
+                    approver_user_id="admin-1",
+                    approver_role="admin",
+                    reason="Approve v1.1.0 ingestion",
+                )
+
+                with self.assertRaises(DatasetLeakageError) as ctx:
+                    ingest_v11_dataset(
+                        dataset_version="1.1.0",
+                        dataset_root=ds_root,
+                        source_name="native_engineering_docs_v2",
+                        license_str="Apache-2.0",
+                        provenance="verified_project_documentation_v2",
+                        approval_id=ticket2,
+                        workflow_engine=engine,
+                        splits={
+                            "train": [
+                                {
+                                    "input": "detail memory isolation tiers",
+                                    "target": "Episodic working verified knowledge training and eval corpora remain separate.",
+                                }
+                            ],
+                            "validation": [
+                                {
+                                    "input": "specify tokenizer roundtrip",
+                                    "target": "Byte-level BPE restores normalized input strings deterministically across runs.",
+                                }
+                            ],
+                            "unseen": [
+                                {
+                                    "input": "explain checkpoint versioning",
+                                    "target": "Each model training round persists an isolated immutable versioned checkpoint.",
+                                }
+                            ],
+                            "ood": [
+                                {
+                                    "input": "verify causal contradiction halt",
+                                    "target": "Conflicting source assertions transition immediately to a blocked contradiction state.",
+                                }
+                            ],
+                        },
+                    )
+                self.assertIn("Semantic hash leakage gate failed", str(ctx.exception))
+                self.assertFalse((ds_root / "1.1.0").exists())
+                # Rejected ingestion must preserve ticket2 (not burn single-use approval on failed ingest)
+                self.assertEqual(engine.store.get_approval(ticket2)["status"], "approved")
+            finally:
+                engine.shutdown(wait=True)
 
 
 if __name__ == "__main__":

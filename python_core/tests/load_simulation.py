@@ -322,8 +322,8 @@ def _generate_complex_workload(rng: random.Random, count: int) -> list[tuple[str
                 tasks.append((
                     cid, "logic_mixed_attr_abstain", prompt, "auto",
                     lambda r: (
-                        r["status"] == "NOT_LEARNED" and r["trace"].get("logic", {}).get("determined") is False,
-                        "NOT_LEARNED(determined=False)", f"{r['status']}({r['trace'].get('logic')})"
+                        r["status"] == "UNABLE_TO_INFER" and r["trace"].get("logic", {}).get("determined") is False,
+                        "UNABLE_TO_INFER(determined=False)", f"{r['status']}({r['trace'].get('logic')})"
                     ),
                     "negative",
                 ))
@@ -393,8 +393,8 @@ def _generate_complex_workload(rng: random.Random, count: int) -> list[tuple[str
                 tasks.append((
                     cid, "word_math_zero_div", prompt, "auto",
                     lambda r: (
-                        r["status"] == "NOT_LEARNED",
-                        "NOT_LEARNED", r["status"]
+                        r["status"] == "UNABLE_TO_INFER",
+                        "UNABLE_TO_INFER", r["status"]
                     ),
                     "negative",
                 ))

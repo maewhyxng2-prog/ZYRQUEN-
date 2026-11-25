@@ -8,14 +8,17 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from apps.api.models import User
+from apps.api.routers.workflows import get_workflow_engine
 from apps.api.security import get_current_user
 from apps.api.training_jobs import training_admin_emails
 from apps.core.native.dataset_status import (
     get_dataset_version_status,
     get_datasets_pipeline_status,
     ingest_v11_dataset,
+    verify_dataset_approval_ticket,
 )
 from apps.core.native.dataset_v11 import DatasetLeakageError
+from apps.core.workflow import ApprovalViolationError
 
 router = APIRouter(prefix="/v1/datasets", tags=["Datasets"])
 
@@ -26,6 +29,8 @@ class DatasetIngestRequest(BaseModel):
     license: str = Field(min_length=1, max_length=120)
     provenance: str = Field(min_length=1, max_length=200)
     redact_pii: bool = True
+    approval_id: str | None = Field(default=None, max_length=128)
+    approval_ticket: str | None = Field(default=None, max_length=128)
     splits: dict[str, list[dict[str, Any]]]
 
 
@@ -82,8 +87,21 @@ def ingest_dataset_version(
     payload: DatasetIngestRequest,
     _: User = Depends(_require_dataset_admin),
 ):
-    """Ingest a 4-split V11 dataset with required provenance/license, SHA-256 manifest, and leakage gate."""
+    """Ingest a 4-split V11 dataset with required Approval Gate ticket, provenance/license, SHA-256 manifest, and leakage gate."""
+    ticket = (payload.approval_id or payload.approval_ticket or "").strip()
+    if not ticket:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tier-2 workflow Approval Gate ticket (approval_id) is required before marking a dataset as 'ready'.",
+        )
+
+    engine = get_workflow_engine()
     try:
+        verify_dataset_approval_ticket(
+            engine,
+            ticket,
+            dataset_version=payload.dataset_version,
+        )
         return ingest_v11_dataset(
             dataset_version=payload.dataset_version,
             splits=payload.splits,
@@ -91,7 +109,15 @@ def ingest_dataset_version(
             license_str=payload.license,
             provenance=payload.provenance,
             do_redact_pii=payload.redact_pii,
+            approval_id=ticket,
+            workflow_engine=engine,
+            require_approval=True,
         )
+    except ApprovalViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Tier-2 dataset ingestion approval rejected: {exc}",
+        ) from exc
     except FileExistsError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -107,4 +133,5 @@ def ingest_dataset_version(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
+
 

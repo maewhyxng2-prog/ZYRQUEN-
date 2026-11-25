@@ -55,6 +55,9 @@ function renderStatusLabel(status: string) {
     case 'RECOVERING':
     case 'WARN':
     case 'NOT_LEARNED':
+    case 'UNCERTAIN':
+    case 'UNABLE_TO_INFER':
+    case 'UNKNOWN':
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-warning)]">
           <Clock className="h-3.5 w-3.5" />
@@ -1077,7 +1080,10 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                 >
                   <option value="ALL">ทุกสถานะ ({reasoningTraces.length})</option>
                   <option value="VERIFIED">VERIFIED</option>
+                  <option value="UNCERTAIN">UNCERTAIN</option>
                   <option value="NOT_LEARNED">NOT_LEARNED</option>
+                  <option value="UNABLE_TO_INFER">UNABLE_TO_INFER</option>
+                  <option value="UNKNOWN">UNKNOWN</option>
                   <option value="BLOCKED">BLOCKED</option>
                   <option value="PENDING_APPROVAL">PENDING_APPROVAL</option>
                 </select>

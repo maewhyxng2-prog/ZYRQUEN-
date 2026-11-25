@@ -57,9 +57,11 @@ def _classify_trace_failure(row: sqlite3.Row) -> str:
     trace_raw = str(row["trace_json"] or "")
     if "contradiction" in trace_raw.lower() or "ขัดแย้ง" in trace_raw:
         return "causal_contradiction"
-    if status == "NOT_LEARNED":
+    if status in {"NOT_LEARNED", "UNKNOWN"}:
         return "unlearned_concept"
-    if any(k in prompt_l for k in ("ถ้า", "หาก", "ทุก", "ไม่มี", "if ", "all ", "สมการ", "=")):
+    if status == "UNCERTAIN":
+        return "ambiguous_or_uncertain_intent"
+    if status == "UNABLE_TO_INFER" or any(k in prompt_l for k in ("ถ้า", "หาก", "ทุก", "ไม่มี", "if ", "all ", "สมการ", "=")):
         return "symbolic_reasoning_gap"
     return "execution_or_evidence_gap"
 
@@ -121,7 +123,7 @@ def synthesize_failure_curriculum(
         """
         SELECT id, prompt, status, mode, trace_json, created_at
         FROM reasoning_traces
-        WHERE status IN ('NOT_LEARNED', 'BLOCKED', 'FAILED')
+        WHERE status IN ('NOT_LEARNED', 'UNABLE_TO_INFER', 'UNCERTAIN', 'UNKNOWN', 'BLOCKED', 'FAILED')
         ORDER BY created_at DESC
         LIMIT ?
         """,
