@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Calculator,
+  Check,
+  Copy,
   ChevronDown,
   ChevronUp,
   Cpu,
@@ -120,6 +122,8 @@ export function WorkspaceView({
   onRetryLast,
 }: WorkspaceViewProps) {
   const [input, setInput] = useState('');
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [mode, setMode] = useState<ReasoningMode>(defaultMode);
   const [prevDefaultMode, setPrevDefaultMode] = useState<ReasoningMode>(defaultMode);
   if (prevDefaultMode !== defaultMode) {
@@ -153,6 +157,17 @@ export function WorkspaceView({
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const speechBaseTextRef = useRef<string>('');
   const speechFinalizedRef = useRef<string>('');
+
+  async function copyAssistantMessage(messageId: string, content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(messageId);
+      setCopyError(null);
+      window.setTimeout(() => setCopiedMessageId((current) => current === messageId ? null : current), 1600);
+    } catch {
+      setCopyError('คัดลอกไม่ได้ กรุณาตรวจสอบสิทธิ์ Clipboard ของอุปกรณ์');
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -492,6 +507,16 @@ export function WorkspaceView({
                       <SafeMessageText content={msg.content} />
                     )}
                   </div>
+
+                  {!isUser && (
+                    <div className="mt-1 flex w-full max-w-[92%] items-center gap-2 sm:max-w-[85%]">
+                      <button type="button" onClick={() => void copyAssistantMessage(msg.id, msg.content)} aria-label={copiedMessageId === msg.id ? 'คัดลอกแล้ว' : 'คัดลอกข้อความ'} className="inline-flex min-h-[32px] items-center gap-1.5 rounded-lg px-2 text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]">
+                        {copiedMessageId === msg.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                        {copiedMessageId === msg.id ? 'คัดลอกแล้ว' : 'คัดลอก'}
+                      </button>
+                      {copyError && <span role="alert" className="text-xs text-[var(--color-danger)]">{copyError}</span>}
+                    </div>
+                  )}
 
                   {!isUser && trace && (
                     <div className="mt-2 w-full max-w-[92%] sm:max-w-[85%]">
