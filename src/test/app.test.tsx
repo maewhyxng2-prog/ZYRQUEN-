@@ -295,6 +295,23 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
           }),
           { status: 200 }
         ),
+      'GET /api/autonomous/missions': () =>
+        new Response(JSON.stringify({ missions: [] }), { status: 200 }),
+      'POST /api/autonomous/missions': (init) => {
+        const body = JSON.parse(String(init?.body || '{}')) as { goal: string; enableExecution: boolean };
+        expect(body.goal).toBe('ตรวจสอบโครงสร้าง Native');
+        expect(body.enableExecution).toBe(true);
+        return new Response(JSON.stringify({
+          ok: true,
+          mission: {
+            id: 'm-home-1',
+            goal: body.goal,
+            status: 'COMPLETED',
+            created_at: '2026-11-25T00:00:00Z',
+            updated_at: '2026-11-25T00:00:00Z',
+          },
+        }), { status: 201 });
+      },
       'GET /api/conversations': () =>
         new Response(JSON.stringify({ conversations: [] }), { status: 200 }),
       'POST /api/conversations': () =>
@@ -502,16 +519,14 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(await screen.findByText(/สวัสดี, สมาชิกทดสอบ/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('กำหนดเป้าหมายของงาน'), {
-      target: { value: 'คำนวณ (2^12 - 96) / 16' },
+      target: { value: 'ตรวจสอบโครงสร้าง Native' },
     });
     fireEvent.click(screen.getByRole('button', { name: /เริ่มดำเนินงาน/i }));
-    expect(await screen.findByText('250')).toBeInTheDocument();
-    expect(window.location.search).toContain('view=workspace');
+    expect(await screen.findByRole('heading', { name: 'งานของฉัน' })).toBeInTheDocument();
+    expect(window.location.search).toContain('view=memory');
 
-    const variantSelect = screen.getByLabelText('เลือกรุ่นโมเดล (Model Variant)');
-    fireEvent.change(variantSelect, { target: { value: 'zyrquen-ast-pro' } });
-
-    const composer = screen.getByLabelText('รายละเอียดงาน');
+    fireEvent.keyDown(window, { key: 'n', altKey: true });
+    const composer = await screen.findByLabelText('รายละเอียดงาน');
     fireEvent.change(composer, { target: { value: 'คำนวณ 10 + 15' } });
     fireEvent.keyDown(composer, { key: 'Enter', shiftKey: false });
     await waitFor(() => {
@@ -519,7 +534,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     });
     expect(
       (globalThis as unknown as { __lastStreamMeta?: Record<string, unknown> }).__lastStreamMeta?.modelVersion
-    ).toBe('zyrquen-ast-pro');
+    ).toBe('zyrquen-omega-v1');
 
     // Smart Summary collapsible panel
     fireEvent.click(screen.getByRole('button', { name: /สรุปสำคัญ/i }));
