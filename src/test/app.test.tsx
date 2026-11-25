@@ -10,6 +10,7 @@ import App, {
 } from '../App';
 import { AuthGate } from '../components/AuthGate';
 import { MemoryWorkflowsView } from '../components/MemoryWorkflowsView';
+import { ProjectsView } from '../components/ProjectsView';
 import { SettingsView } from '../components/SettingsView';
 import { SpacetimeFabric } from '../components/SpacetimeFabric';
 import { TemporalIntelligenceCore } from '../components/TemporalIntelligenceCore';
@@ -33,6 +34,37 @@ function mockFetch(handlers: Record<string, (init?: RequestInit) => Response | P
 }
 
 describe('ZYRQUEN ประสบการณ์แอปพลิเคชันภาษาไทยเป็นหลัก', () => {
+  it('จัดการโปรเจกต์ผ่าน API จริงของ workspace และอัปเดตสถานะในหน้าจอ', async () => {
+    let stored = [{ id: 'p1', name: 'ZYRQUEN Core', description: 'Native intelligence project', status: 'active', created_at: '2026-11-25T00:00:00Z', updated_at: '2026-11-25T00:00:00Z' }];
+    mockFetch({
+      'GET /api/projects': () => new Response(JSON.stringify({ projects: stored }), { status: 200 }),
+      'POST /api/projects': (init) => {
+        const body = JSON.parse(String(init?.body || '{}')) as { name: string; description: string };
+        const project = { id: 'p2', ...body, status: 'active', created_at: '2026-11-25T00:00:00Z', updated_at: '2026-11-25T00:00:00Z' };
+        stored = [project, ...stored];
+        return new Response(JSON.stringify({ project }), { status: 201 });
+      },
+      'PATCH /api/projects/p1': (init) => {
+        const body = JSON.parse(String(init?.body || '{}')) as { name: string; description: string; status: 'active' | 'archived' };
+        const project = { ...stored[0], ...body };
+        stored = stored.map((item) => item.id === 'p1' ? project : item);
+        return new Response(JSON.stringify({ project }), { status: 200 });
+      },
+      'DELETE /api/projects/p1': () => {
+        stored = stored.filter((item) => item.id !== 'p1');
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+    });
+
+    render(<ProjectsView token="test-token" />);
+    expect(await screen.findByText('ZYRQUEN Core')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('ชื่อโปรเจกต์'), { target: { value: 'New Workspace Project' } });
+    fireEvent.change(screen.getByLabelText('รายละเอียดโปรเจกต์'), { target: { value: 'Project description' } });
+    fireEvent.click(screen.getByRole('button', { name: /บันทึกโปรเจกต์/i }));
+    expect(await screen.findByText('New Workspace Project')).toBeInTheDocument();
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects', expect.objectContaining({ method: 'POST' }));
+  });
+
   beforeEach(() => {
     window.history.replaceState({}, '', '/');
     vi.restoreAllMocks();
@@ -616,7 +648,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(await screen.findByText('เซสชันคณิตศาสตร์ก่อนหน้า')).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'แถบนำทางมือถือ' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'เวิร์กสเปซ' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'สร้างงาน' })[0]);
     expect(await screen.findByLabelText('ช่องพิมพ์ข้อความ')).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'แถบนำทางมือถือ' })).not.toBeInTheDocument();
 
@@ -624,7 +656,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(await screen.findByRole('dialog', { name: 'ประวัติบทสนทนา' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'ปิดประวัติ' }));
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'ความจำ' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'งานของฉัน' })[0]);
     expect(await screen.findByText('ความจำและระบบเวิร์กโฟลว์ภายใน')).toBeInTheDocument();
 
     // Global fuzzy search with Fuse.js queries across Knowledge Fragments & Workflow Definitions simultaneously
