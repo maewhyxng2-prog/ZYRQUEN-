@@ -161,13 +161,69 @@ def unwrap_command_wrapper(prompt: str) -> dict[str, Any]:
     m_plan = _PLAN_CMD_RE.match(raw)
     if m_plan:
         body = m_plan.group(1).strip()
+        body_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        cleaned_lines: list[str] = []
+        attachment_name = ""
+        for ln in body_lines:
+            if ln.startswith("รายละเอียดและข้อกำหนด:"):
+                after = ln.split(":", 1)[1].strip()
+                if after:
+                    cleaned_lines.append(after)
+                continue
+            if ln.startswith("อ้างอิงไฟล์แนบ:"):
+                attachment_name = ln.split(":", 1)[1].strip()
+                continue
+            cleaned_lines.append(ln)
+        eff = "\n".join(cleaned_lines).strip()
         return {
             "raw_prompt": raw,
             "wrapper_kind": "plan_prefix",
-            "title": body.splitlines()[0].strip() if body else "",
-            "spec_body": "\n".join(body.splitlines()[1:]).strip() if body and "\n" in body else "",
-            "attachment_name": "",
-            "effective_goal": body,
+            "title": cleaned_lines[0] if cleaned_lines else "",
+            "spec_body": "\n".join(cleaned_lines[1:]).strip() if len(cleaned_lines) > 1 else "",
+            "attachment_name": attachment_name,
+            "effective_goal": eff,
+        }
+
+    # Also unwrap standalone metadata labels ("รายละเอียดและข้อกำหนด:", "อ้างอิงไฟล์แนบ:")
+    # so malformed specs like "รายละเอียดและข้อกำหนด: ะะี" cannot disguise corrupt text as valid Thai.
+    plain_title = ""
+    plain_spec: list[str] = []
+    plain_attachment = ""
+    in_plain_spec = False
+    saw_metadata_label = False
+    for ln in lines:
+        stripped_ln = ln.strip()
+        if not stripped_ln:
+            continue
+        if stripped_ln.startswith("รายละเอียดและข้อกำหนด:"):
+            saw_metadata_label = True
+            in_plain_spec = True
+            after = stripped_ln.split(":", 1)[1].strip()
+            if after:
+                plain_spec.append(after)
+            continue
+        if stripped_ln.startswith("อ้างอิงไฟล์แนบ:"):
+            saw_metadata_label = True
+            in_plain_spec = False
+            plain_attachment = stripped_ln.split(":", 1)[1].strip()
+            continue
+        if in_plain_spec:
+            plain_spec.append(stripped_ln)
+        elif not plain_title:
+            plain_title = stripped_ln
+        else:
+            plain_spec.append(stripped_ln)
+
+    if saw_metadata_label:
+        spec_joined = "\n".join(plain_spec).strip()
+        eff_parts = [p for p in (plain_title, spec_joined) if p]
+        return {
+            "raw_prompt": raw,
+            "wrapper_kind": None,
+            "title": plain_title,
+            "spec_body": spec_joined,
+            "attachment_name": plain_attachment,
+            "effective_goal": " — ".join(eff_parts) if eff_parts else "",
         }
 
     return {
@@ -180,10 +236,25 @@ def unwrap_command_wrapper(prompt: str) -> dict[str, Any]:
     }
 
 
+_PLACEHOLDER_ONLY_RE = re.compile(
+    r"^(?:undefined|null|none|nan|\[object\s+object\]|tbd|todo|n/?a|placeholder|[-—_.•:;\s]+)$",
+    re.IGNORECASE,
+)
+
+
+def _is_generic_placeholder(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return True
+    return bool(_PLACEHOLDER_ONLY_RE.match(stripped))
+
+
 def _is_segment_corrupt_or_gibberish(text: str) -> tuple[bool, str | None]:
     stripped = text.strip()
     if not stripped:
         return True, "empty_segment"
+    if _is_generic_placeholder(stripped):
+        return True, "generic_placeholder"
     uni = _analyze_unicode_semantics(stripped)
     opaque, reason = _detect_opaque_noise(stripped, uni, kg_matched_any=False)
     if opaque:
@@ -196,18 +267,18 @@ def _is_segment_corrupt_or_gibberish(text: str) -> tuple[bool, str | None]:
         bad_thai = [sp for sp in thai_spans if not _is_plausible_thai_span(sp)]
         if bad_thai and len(bad_thai) == len(thai_spans) and not latin_words:
             return True, "implausible_thai_span"
-        # Short pure-vowel/tone-mark fragment like "ะะี" appended inside a mixed prompt
-        if any(
-            not any(0x0E01 <= ord(c) <= 0x0E2E for c in sp) and len(sp) >= 2
-            for sp in thai_spans
-        ):
+        # Pure vowel/tone-mark fragment like "ะ" or "ะะี" without any Thai consonant
+        if any(not any(0x0E01 <= ord(c) <= 0x0E2E for c in sp) for sp in thai_spans):
             return True, "thai_span_missing_consonants"
+        # Implausible Thai span appended inside mixed text
+        if any(len(sp) >= 2 and not _is_plausible_thai_span(sp) for sp in thai_spans):
+            return True, "implausible_thai_span"
 
     if latin_words and not thai_spans:
         if all(not _is_plausible_latin_word(w) for w in latin_words):
             return True, "implausible_latin_words"
 
-    # Repeated 3+ identical characters inside tokens (e.g. "aaaaa", "กกกก")
+    # Repeated 4+ identical characters inside tokens (e.g. "aaaaa", "กกกก")
     if re.search(r"(.)\1{3,}", stripped):
         return True, "repeated_character_noise"
 
@@ -248,6 +319,7 @@ def analyze_planner_goal(prompt: str, *, attachment: str = "") -> dict[str, Any]
             "raw_prompt": prompt,
             "wrapper_kind": wrapper_kind,
             "objective": "",
+            "is_actionable_goal": False,
             "requirements": [],
             "context_hints": [],
             "expected_deliverables": [],
@@ -280,7 +352,8 @@ def analyze_planner_goal(prompt: str, *, attachment: str = "") -> dict[str, Any]
         return {
             "raw_prompt": prompt,
             "wrapper_kind": wrapper_kind,
-            "objective": title or effective,
+            "objective": "",
+            "is_actionable_goal": False,
             "requirements": [],
             "context_hints": [],
             "expected_deliverables": [],
@@ -330,8 +403,9 @@ def analyze_planner_goal(prompt: str, *, attachment: str = "") -> dict[str, Any]
         return {
             "raw_prompt": prompt,
             "wrapper_kind": wrapper_kind,
-            "objective": objective,
-            "requirements": requirements,
+            "objective": "",
+            "is_actionable_goal": False,
+            "requirements": [],
             "context_hints": [],
             "expected_deliverables": [],
             "clarity_status": "INCOMPLETE",
@@ -377,6 +451,7 @@ def analyze_planner_goal(prompt: str, *, attachment: str = "") -> dict[str, Any]
         "raw_prompt": prompt,
         "wrapper_kind": wrapper_kind,
         "objective": objective,
+        "is_actionable_goal": True,
         "requirements": requirements,
         "context_hints": context_hints,
         "expected_deliverables": expected_deliverables,
@@ -386,18 +461,18 @@ def analyze_planner_goal(prompt: str, *, attachment: str = "") -> dict[str, Any]
     }
 
 
-def _walk_repo_files(repo_root: Path, max_files: int = 350) -> list[str]:
+def _walk_repo_files(repo_root: Path, max_files: int = 400) -> list[str]:
     files: list[str] = []
     if not repo_root.exists():
         return files
-    for root_name in ("python_core", "src", "apps"):
+    for root_name in ("python_core", "src", "apps", "tests", ".github"):
         base = repo_root / root_name
         if not base.exists():
             continue
         for p in sorted(base.rglob("*")):
             if any(part in _SKIP_REPO_DIRS for part in p.parts):
                 continue
-            if p.is_file() and p.suffix.lower() in {".py", ".ts", ".tsx", ".js", ".jsx", ".sql", ".md", ".json"}:
+            if p.is_file() and p.suffix.lower() in {".py", ".ts", ".tsx", ".js", ".jsx", ".sql", ".md", ".json", ".yml", ".yaml"}:
                 files.append(str(p.relative_to(repo_root)))
                 if len(files) >= max_files:
                     return files
@@ -406,6 +481,143 @@ def _walk_repo_files(repo_root: Path, max_files: int = 350) -> list[str]:
         if tp.is_file():
             files.append(top_name)
     return files
+
+
+def resolve_underspecified_goal_with_context(
+    conn: sqlite3.Connection,
+    goal_info: dict[str, Any],
+    repo_ctx: dict[str, Any],
+    *,
+    repo_root: Path,
+    recent_context: list[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Context-Aware Goal Resolution:
+    When a user goal has `underspecified_target`, infer concrete candidate goals
+    from verified repository artifacts, active SQLite runs/datasets/checkpoints,
+    and optional conversation context. Never fabricates files/state and never
+    authorizes risky/mutating actions without explicit user confirmation.
+    """
+    issues = list(goal_info.get("issues") or [])
+    if goal_info.get("clarity_status") == "INVALID_CORRUPT" or "underspecified_target" not in issues:
+        return {
+            "attempted": False,
+            "resolved_from_context": False,
+            "candidate_count": 0,
+            "candidates": [],
+            "missing_dimensions": [],
+            "auto_execution_blocked": True,
+            "requires_user_confirmation": True,
+        }
+
+    raw_l = str(goal_info.get("raw_prompt") or "").lower()
+    ctx_text = " ".join(str(x) for x in (recent_context or [])).lower()
+    combined = f"{raw_l} {ctx_text}".strip()
+    sql_st = repo_ctx.get("sqlite_state") or {}
+
+    all_files = _walk_repo_files(repo_root)
+    workflow_files = [f for f in all_files if f.startswith(".github/workflows/")]
+    sampler_files = [f for f in all_files if "StageAwareSampler" in f or f.startswith("apps/core/native/train/")]
+
+    candidates: list[dict[str, Any]] = []
+
+    # 1. Recent missions / workflow runs in SQLite
+    try:
+        recent_missions = conn.execute(
+            "SELECT id, goal, status FROM autonomous_missions ORDER BY updated_at DESC LIMIT 3"
+        ).fetchall()
+    except sqlite3.Error:
+        recent_missions = []
+
+    for m in recent_missions:
+        m_goal = str(m["goal"] or "").strip()
+        if m_goal:
+            candidates.append({
+                "candidate_id": f"mission:{m['id'][:8]}",
+                "domain": "Active Autonomous Mission",
+                "proposed_objective": f"ตรวจสอบและสานต่อภารกิจล่าสุด: {m_goal}",
+                "expected_deliverables": ["สถานะการดำเนินงานจริง", "ผลตรวจสอบหลังดำเนินการ"],
+                "success_criteria": "ภารกิจผ่านการตรวจสอบตามขั้นตอนและไม่เปลี่ยนสถานะที่ต้องอนุมัติโดยพลการ",
+                "grounded_evidence": [f"autonomous_missions:{m['id'][:8]} (status={m['status']})"],
+                "risk_level": "MEDIUM",
+                "requires_confirmation": True,
+            })
+            break
+
+    # 2. GitHub / CI / PR context (when mentioned in prompt or recent context, and workflow files exist)
+    pr_refs = re.findall(r"(?:pr\s*#?|#)(\d+)", combined, flags=re.IGNORECASE)
+    wants_ci_or_git = bool(pr_refs) or any(
+        tok in combined for tok in ("github", "pull request", "ci", "merge", "conflict", "branch", "workflow")
+    )
+    if workflow_files and (wants_ci_or_git or not candidates):
+        pr_label = f"PR #{', #'.join(dict.fromkeys(pr_refs))}" if pr_refs else "CI Workflows / Pull Requests"
+        candidates.append({
+            "candidate_id": "ctx:github_ci",
+            "domain": "GitHub Repository & CI Workflows",
+            "proposed_objective": f"ตรวจสอบ {pr_label}, แยกแยะข้อขัดแย้งของโค้ด/การทดสอบ และรายงานผล CI แบบ Read-Only",
+            "expected_deliverables": ["รายการปัญหา/ข้อขัดแย้งที่พบ", "ผลการตรวจ Syntax และชุดทดสอบ CI"],
+            "success_criteria": "ไม่มี merge conflicts, ชุดทดสอบผ่าน และไม่แก้ไข branch main โดยไม่ได้รับอนุญาต",
+            "grounded_evidence": workflow_files[:3],
+            "risk_level": "HIGH" if any(k in combined for k in ("merge", "push", "commit")) else "LOW",
+            "requires_confirmation": True,
+        })
+
+    # 3. Native Training & StageAwareSampler context
+    clean_ds = sql_st.get("clean_datasets") or []
+    leaked_ds = sql_st.get("leaked_datasets") or []
+    pending_runs = sql_st.get("pending_runs") or []
+    if sampler_files or clean_ds or leaked_ds or pending_runs:
+        evidence = list(sampler_files[:3])
+        if clean_ds:
+            evidence.append(f"dataset:{clean_ds[0]['name']} (records={clean_ds[0]['total_records']}, leakage=0)")
+        elif leaked_ds:
+            evidence.append(f"leaked_dataset:{leaked_ds[0]['name']}")
+        if pending_runs:
+            evidence.append(f"pending_approval_runs:{len(pending_runs)}")
+        candidates.append({
+            "candidate_id": "ctx:native_training",
+            "domain": "Native Training & Data Pipeline",
+            "proposed_objective": "ตรวจสอบความพร้อมของข้อมูลฝึก Provenance, Data Leakage และการสุ่มแบบ StageAwareSampler",
+            "expected_deliverables": ["ผลตรวจ Integrity/Leakage", "ผลการทดสอบ StageAwareSampler"],
+            "success_criteria": "ไม่มี Data Leakage, ผ่านเกณฑ์ Provenance และไม่เริ่มฝึกจริงก่อนผ่าน Approval Gate",
+            "grounded_evidence": evidence[:4],
+            "risk_level": "HIGH",
+            "requires_confirmation": True,
+        })
+
+    # 4. Knowledge Graph contradictions context
+    contradictions = int(sql_st.get("contradictions") or 0)
+    triple_rows = sql_st.get("triple_rows") or []
+    if contradictions > 0 or triple_rows:
+        candidates.append({
+            "candidate_id": "ctx:knowledge_graph",
+            "domain": "Knowledge Graph & Memory",
+            "proposed_objective": (
+                f"ตรวจสอบและแยกแยะความขัดแย้งในกราฟความรู้ ({contradictions} กลุ่ม)"
+                if contradictions > 0
+                else f"ตรวจสอบความครอบคลุมของ Provenance ในกราฟความรู้ ({len(triple_rows)} รายการ)"
+            ),
+            "expected_deliverables": ["รายงานความสอดคล้องและแหล่งที่มาของความรู้"],
+            "success_criteria": "ไม่มีความรู้ขัดแย้งที่ยังไม่ตรวจสอบและทุก Triple มี Provenance",
+            "grounded_evidence": [f"knowledge_triples:{len(triple_rows)} (contradictions={contradictions})"],
+            "risk_level": "LOW",
+            "requires_confirmation": True,
+        })
+
+    candidates = candidates[:3]
+    missing_dims = ["target_selection", "confirmation_for_risky_action"]
+    if not any("test" in c_txt for c_txt in (combined,)):
+        missing_dims.append("success_verification_criteria")
+
+    return {
+        "attempted": True,
+        "resolved_from_context": bool(candidates),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "missing_dimensions": missing_dims,
+        "auto_execution_blocked": True,
+        "requires_user_confirmation": True,
+    }
 
 
 def inspect_repository_context(
@@ -648,6 +860,7 @@ def build_context_aware_dag_plan(
     tc_reg: Any = None,
     repo_root: Path | None = None,
     force_plan: bool = False,
+    recent_context: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """
     Main entry point for ZYRQUEN Native Context-Aware DAG Planning.
@@ -684,16 +897,54 @@ def build_context_aware_dag_plan(
         "pending_approvals": len(sql_st["pending_runs"]),
     }
 
-    if goal_info["clarity_status"] != "VALID":
+    if goal_info["clarity_status"] != "VALID" or not goal_info.get("is_actionable_goal"):
+        context_resolution = resolve_underspecified_goal_with_context(
+            conn,
+            goal_info,
+            repo_ctx,
+            repo_root=actual_repo_root,
+            recent_context=recent_context,
+        )
+        questions = list(goal_info["clarification_questions"])
+        if context_resolution["resolved_from_context"]:
+            cand_summaries = [
+                f"[{idx + 1}] {c['domain']}: {c['proposed_objective']}"
+                for idx, c in enumerate(context_resolution["candidates"])
+            ]
+            questions = [
+                "ระบบดึงบริบทจากงานปัจจุบันมาตีความเป้าหมายที่เป็นไปได้: " + " | ".join(cand_summaries),
+                "กรุณายืนยันว่าจะเลือกเป้าหมายใด (หรือระบุเป้าหมายเฉพาะเพิ่มเติม) ก่อนที่ระบบจะสร้างแผนหรือเริ่มขั้นตอนที่มีความเสี่ยง",
+            ]
+            goal_info = {
+                **goal_info,
+                "context_resolution": context_resolution,
+                "clarification_questions": questions,
+            }
+        else:
+            goal_info = {
+                **goal_info,
+                "context_resolution": context_resolution,
+            }
+
         return {
             "engine": "native_planner",
             "domain_mode": "clarification_required",
             "plan_status": "NEEDS_CLARIFICATION",
             "status": "NEEDS_CLARIFICATION",
-            "goal": goal_info["objective"] or raw,
+            "goal": "",
+            "is_actionable_goal": False,
+            "plan_valid": False,
             "goal_interpretation": goal_info,
+            "context_resolution": context_resolution,
             "issues": goal_info["issues"],
-            "clarification_questions": goal_info["clarification_questions"],
+            "clarification_questions": questions,
+            "status_transitions": [
+                {
+                    "from_status": "RECEIVED",
+                    "to_status": "NEEDS_CLARIFICATION",
+                    "reason": ",".join(goal_info["issues"]) or "invalid_or_incomplete_goal",
+                }
+            ],
             "repo_context": {
                 "relevant_files": repo_ctx["relevant_files"],
                 "mentioned_missing_files": repo_ctx["mentioned_missing_files"],
@@ -1058,16 +1309,33 @@ def build_context_aware_dag_plan(
         ]
 
     dag_ok, dag_err = _validate_plan_dag(enriched_steps)
-    if not dag_ok:
+    steps_valid = bool(enriched_steps) and all(
+        not _is_generic_placeholder(s.get("step_id", ""))
+        and not _is_generic_placeholder(s.get("title", ""))
+        and not _is_generic_placeholder(s.get("detail", ""))
+        and s.get("status") in CANONICAL_DAG_STATES
+        for s in enriched_steps
+    )
+    if not dag_ok or not steps_valid or _is_generic_placeholder(goal):
+        reason = f"dag_validation_failed:{dag_err}" if not dag_ok else "invalid_plan_step_or_placeholder"
         return {
             "engine": engine_name,
             "domain_mode": domain_mode,
             "plan_status": "BLOCKED",
             "status": "BLOCKED",
-            "goal": goal,
+            "goal": goal if not _is_generic_placeholder(goal) else "",
+            "is_actionable_goal": False,
+            "plan_valid": False,
             "goal_interpretation": goal_info,
-            "issues": [f"dag_validation_failed:{dag_err}"],
+            "issues": [reason],
             "clarification_questions": [],
+            "status_transitions": [
+                {
+                    "from_status": "DRAFT",
+                    "to_status": "BLOCKED",
+                    "reason": reason,
+                }
+            ],
             "steps": [],
             "summary": {
                 "total_steps": 0,
@@ -1081,6 +1349,22 @@ def build_context_aware_dag_plan(
     ready_count = sum(1 for s in enriched_steps if s["status"] == "READY")
     blocked_count = sum(1 for s in enriched_steps if s["status"] == "BLOCKED")
     approval_count = sum(1 for s in enriched_steps if s["requires_approval"])
+    status_transitions = [
+        {"from_status": "DRAFT", "to_status": "PLANNED", "reason": "goal_and_dag_validated"},
+        *[
+            {
+                "step_id": s["step_id"],
+                "from_status": "DRAFT",
+                "to_status": s["status"],
+                "reason": (
+                    f"blocked_by:{','.join(s['depends_on'])}"
+                    if s["depends_on"]
+                    else "ready_no_dependencies"
+                ),
+            }
+            for s in enriched_steps
+        ],
+    ]
 
     return {
         "engine": engine_name,
@@ -1088,7 +1372,10 @@ def build_context_aware_dag_plan(
         "plan_status": "PLANNED",
         "status": "PLANNED",
         "goal": goal,
+        "is_actionable_goal": True,
+        "plan_valid": True,
         "goal_interpretation": goal_info,
+        "status_transitions": status_transitions,
         "repo_context": {
             "total_repo_files": repo_ctx["total_repo_files"],
             "relevant_files": rel_files,

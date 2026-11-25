@@ -23,7 +23,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { serializeTableToTsv } from '../lib/clipboard';
+import {
+  isMalformedOrEmptyTraceText,
+  sanitizeTraceDisplayText,
+  serializeTableToTsv,
+} from '../lib/clipboard';
 import type {
   AdminOverview,
   ClientLatencySample,
@@ -95,7 +99,7 @@ export function AdminStabilityPanel({
       .map((t, idx) => ({
         idx: idx + 1,
         time: formatTimeShort(t.created_at),
-        label: t.prompt.slice(0, 28) || t.mode,
+        label: sanitizeTraceDisplayText(t.prompt).slice(0, 28) || t.mode,
         source: 'Native Trace',
         nativeLatencyMs: Math.round((Number(t.latency_ms) || 0) * 100) / 100,
         clientLatencyMs: null as number | null,
@@ -141,6 +145,7 @@ export function AdminStabilityPanel({
         ? parsed.task_timings
         : [];
       for (const t of timings) {
+        if (!t?.task || isMalformedOrEmptyTraceText(t.task)) continue;
         const dur = Number(t.duration_ms) || 0;
         const prev = map.get(t.task) || { task: t.task, totalMs: 0, maxMs: 0, count: 0 };
         prev.totalMs += dur;

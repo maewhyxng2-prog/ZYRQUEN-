@@ -20,7 +20,13 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
-import { serializeTableToTsv } from '../lib/clipboard';
+import {
+  filterValidTraceSteps,
+  isMalformedOrEmptyTraceText,
+  sanitizeTraceDisplayText,
+  serializeTableToTsv,
+  validateTracePlan,
+} from '../lib/clipboard';
 import type {
   AutonomousMissionItem,
   KnowledgeTriple,
@@ -41,20 +47,32 @@ interface MemoryWorkflowsViewProps {
 }
 
 function renderStatusLabel(status: string) {
-  switch (status) {
+  const normalized = String(status || 'UNKNOWN').trim().toUpperCase();
+  switch (normalized) {
     case 'COMPLETED':
     case 'PASS':
     case 'VERIFIED':
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-success)]">
           <CheckCircle2 className="h-3.5 w-3.5" />
-          <span>{status}</span>
+          <span>{normalized}</span>
         </span>
       );
+    case 'PLANNED':
+    case 'READY':
+      return (
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-accent)]">
+          <GitBranch className="h-3.5 w-3.5" />
+          <span>{normalized}</span>
+        </span>
+      );
+    case 'RUNNING':
+    case 'EXECUTING':
     case 'PENDING_APPROVAL':
     case 'AWAITING_APPROVAL':
     case 'AWAITING_EVIDENCE':
     case 'RECOVERING':
+    case 'NEEDS_CLARIFICATION':
     case 'WARN':
     case 'NOT_LEARNED':
     case 'UNCERTAIN':
@@ -63,7 +81,7 @@ function renderStatusLabel(status: string) {
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-warning)]">
           <Clock className="h-3.5 w-3.5" />
-          <span>{status}</span>
+          <span>{normalized}</span>
         </span>
       );
     case 'FAILED':
@@ -73,13 +91,13 @@ function renderStatusLabel(status: string) {
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-danger)]">
           <XCircle className="h-3.5 w-3.5" />
-          <span>{status}</span>
+          <span>{normalized}</span>
         </span>
       );
     default:
       return (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-text-secondary)]">
-          <span>{status}</span>
+          <span>{normalized}</span>
         </span>
       );
   }
@@ -101,49 +119,70 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
     trace = {};
   }
 
-  const orderedSteps: string[] = [];
-  if (trace.math?.steps?.length) orderedSteps.push(...trace.math.steps);
-  if (trace.word_math?.steps?.length) orderedSteps.push(...trace.word_math.steps);
-  if (trace.algebra?.steps?.length) orderedSteps.push(...trace.algebra.steps);
-  if (trace.logic?.steps?.length) orderedSteps.push(...trace.logic.steps);
-  if (trace.causal_logic?.steps?.length) orderedSteps.push(...trace.causal_logic.steps);
+  const rawOrderedSteps: string[] = [];
+  if (trace.math?.steps?.length) rawOrderedSteps.push(...trace.math.steps);
+  if (trace.word_math?.steps?.length) rawOrderedSteps.push(...trace.word_math.steps);
+  if (trace.algebra?.steps?.length) rawOrderedSteps.push(...trace.algebra.steps);
+  if (trace.logic?.steps?.length) rawOrderedSteps.push(...trace.logic.steps);
+  if (trace.causal_logic?.steps?.length) rawOrderedSteps.push(...trace.causal_logic.steps);
   if (trace.statistics) {
-    orderedSteps.push(
+    rawOrderedSteps.push(
       `สถิติ ${trace.statistics.count} ค่า: mean=${trace.statistics.mean}, median=${trace.statistics.median}, stdev=${trace.statistics.stdev}`
     );
   }
   if (trace.graph_path?.path?.edges?.length) {
     trace.graph_path.path.edges.forEach((edge, i) => {
-      orderedSteps.push(`BFS Hop ${i + 1}: ${edge.from} -[${edge.relation}]-> ${edge.to} (${edge.source})`);
+      rawOrderedSteps.push(`BFS Hop ${i + 1}: ${edge.from} -[${edge.relation}]-> ${edge.to} (${edge.source})`);
     });
   }
-  if (trace.plan?.steps?.length) {
-    trace.plan.steps.forEach((s) => {
-      orderedSteps.push(`${s.step_id} · ${s.title} [${s.status}]: ${s.detail}`);
+  const validatedPlan = validateTracePlan(trace.plan);
+  if (validatedPlan.valid) {
+    rawOrderedSteps.push(`เป้าหมายแผนงาน (${validatedPlan.planStatus}): ${validatedPlan.goal}`);
+    validatedPlan.steps.forEach((s) => {
+      const deps = s.depends_on.length > 0 ? ` · รอ ${s.depends_on.join(', ')}` : '';
+      rawOrderedSteps.push(`${s.step_id} · ${s.title} [${s.status}${deps}]: ${s.detail}`);
+    });
+    validatedPlan.statusTransitions.forEach((tr) => {
+      rawOrderedSteps.push(
+        `สถานะ${tr.step_id ? ` ${tr.step_id}` : ''}: ${tr.from_status} → ${tr.to_status}${tr.reason ? ` (${tr.reason})` : ''}`
+      );
+    });
+  } else if (trace.goal_validation?.status_transitions?.length) {
+    trace.goal_validation.status_transitions.forEach((tr) => {
+      if (tr.from_status && tr.to_status) {
+        rawOrderedSteps.push(
+          `Goal Gate: ${tr.from_status} → ${tr.to_status}${tr.reason ? ` (${sanitizeTraceDisplayText(tr.reason)})` : ''}`
+        );
+      }
     });
   }
   if (trace.autonomous_mission?.stages?.length) {
     trace.autonomous_mission.stages.forEach((s) => {
-      orderedSteps.push(`Mission ${s.stage}: ${s.status}${s.detail ? ` — ${s.detail}` : ''}`);
+      const st = String(s.status || '').trim();
+      const stage = String(s.stage || '').trim();
+      if (stage && st) {
+        const cleanDetail = s.detail ? sanitizeTraceDisplayText(s.detail) : '';
+        rawOrderedSteps.push(`Mission ${stage}: ${st}${cleanDetail ? ` — ${cleanDetail}` : ''}`);
+      }
     });
   }
   if (trace.checkpoint) {
-    orderedSteps.push(
+    rawOrderedSteps.push(
       `Checkpoint v${trace.checkpoint.checkpoint_version} (${trace.checkpoint.engine || 'ngram'}) · ppl=${trace.checkpoint.perplexity.toFixed(2)}${
         trace.checkpoint.generated ? ` → "${trace.checkpoint.generated}"` : ''
       }`
     );
   }
   if (trace.external_tool) {
-    orderedSteps.push(
+    rawOrderedSteps.push(
       `Tool ${trace.external_tool.tool_id} [${trace.external_tool.status}]${
         trace.external_tool.trust_grade ? ` · trust=${trace.external_tool.trust_grade}` : ''
-      }${trace.external_tool.analysis_summary ? ` — ${trace.external_tool.analysis_summary}` : ''}`
+      }${trace.external_tool.analysis_summary ? ` — ${sanitizeTraceDisplayText(trace.external_tool.analysis_summary)}` : ''}`
     );
   }
   if (trace.teach) {
     const t = trace.teach.triple;
-    orderedSteps.push(
+    rawOrderedSteps.push(
       `บันทึกความรู้: ${t.subject} -> ${t.relation} -> ${t.object}${
         trace.teach.contradictions.length
           ? ` (พบข้อขัดแย้ง: ${trace.teach.contradictions.join(', ')})`
@@ -153,15 +192,31 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
       }`
     );
   }
+  const orderedSteps = filterValidTraceSteps(rawOrderedSteps);
   if (enginePath.includes('unlearned_boundary') && orderedSteps.length === 0) {
     orderedSteps.push(
       'งดตอบเดาอัตโนมัติ (Honest Abstention): ไม่ตรงกับ AST คณิตศาสตร์, กราฟความรู้, หรือคำศัพท์ใน Checkpoint และไม่ส่งต่อ LLM ภายนอก'
     );
   }
 
-  const taskTimings = Array.isArray(trace.task_timings) ? trace.task_timings : [];
+  const cleanPrompt =
+    sanitizeTraceDisplayText(item.prompt) || 'คำสั่งไม่สมบูรณ์หรือผิดรูปแบบ (ถูกคัดกรอง)';
+  const cleanResponse = sanitizeTraceDisplayText(item.response_preview) || '—';
+
+  const taskTimings = (Array.isArray(trace.task_timings) ? trace.task_timings : [])
+    .filter(
+      (t) =>
+        Boolean(t?.task) &&
+        !isMalformedOrEmptyTraceText(t.task) &&
+        Boolean(t?.status) &&
+        !isMalformedOrEmptyTraceText(t.status)
+    )
+    .map((t) => ({
+      ...t,
+      detail: t.detail ? sanitizeTraceDisplayText(t.detail) : '',
+    }));
   const totalTaskMs = taskTimings.reduce((acc, t) => acc + (Number(t.duration_ms) || 0), 0);
-  const bottleneck =
+  const rawBottleneck =
     trace.bottleneck_task ||
     (taskTimings.length > 0
       ? (() => {
@@ -178,6 +233,10 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
           };
         })()
       : null);
+  const bottleneck =
+    rawBottleneck && rawBottleneck.task && !isMalformedOrEmptyTraceText(rawBottleneck.task)
+      ? rawBottleneck
+      : null;
 
   return (
     <details className="group border-b border-[var(--color-border)] last:border-b-0">
@@ -198,7 +257,7 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
             )}
           </div>
           <p className="mt-1.5 line-clamp-1 text-sm font-medium text-[var(--color-text)]">
-            {item.prompt}
+            {cleanPrompt}
           </p>
         </div>
 
@@ -234,8 +293,8 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
                   `ZYRQUEN Reasoning Trace Report`,
                   `Status: ${item.status} | Model: ${item.model_version} | Mode: ${item.mode} | Latency: ${item.latency_ms} ms`,
                   `Engine Path: ${enginePath.join(' -> ') || item.mode}`,
-                  `Prompt:\n${item.prompt}`,
-                  `Response:\n${item.response_preview || '-'}`,
+                  `Prompt:\n${cleanPrompt}`,
+                  `Response:\n${cleanResponse}`,
                 ];
                 if (orderedSteps.length > 0) {
                   lines.push(`Steps:\n${orderedSteps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`);
@@ -263,7 +322,7 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
               คำถามตั้งต้น (Prompt)
             </p>
             <p className="mt-1 whitespace-pre-wrap break-words text-xs text-[var(--color-text)]">
-              {item.prompt}
+              {cleanPrompt}
             </p>
           </div>
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-3">
@@ -271,7 +330,7 @@ function ReasoningTraceRow({ item }: { item: ReasoningTraceRecord }) {
               คำตอบที่ได้ (Response Preview)
             </p>
             <p className="mt-1 whitespace-pre-wrap break-words text-xs text-[var(--color-text-secondary)]">
-              {item.response_preview || '—'}
+              {cleanResponse}
             </p>
           </div>
         </div>
@@ -1137,11 +1196,17 @@ export function MemoryWorkflowsView({ token, user }: MemoryWorkflowsViewProps) {
                 >
                   <option value="ALL">ทุกสถานะ ({reasoningTraces.length})</option>
                   <option value="VERIFIED">VERIFIED</option>
+                  <option value="PLANNED">PLANNED</option>
+                  <option value="RUNNING">RUNNING</option>
+                  <option value="EXECUTING">EXECUTING</option>
+                  <option value="COMPLETED">COMPLETED</option>
+                  <option value="NEEDS_CLARIFICATION">NEEDS_CLARIFICATION</option>
                   <option value="UNCERTAIN">UNCERTAIN</option>
                   <option value="NOT_LEARNED">NOT_LEARNED</option>
                   <option value="UNABLE_TO_INFER">UNABLE_TO_INFER</option>
                   <option value="UNKNOWN">UNKNOWN</option>
                   <option value="BLOCKED">BLOCKED</option>
+                  <option value="FAILED">FAILED</option>
                   <option value="PENDING_APPROVAL">PENDING_APPROVAL</option>
                 </select>
                 <button

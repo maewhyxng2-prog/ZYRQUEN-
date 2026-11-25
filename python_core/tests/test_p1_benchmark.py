@@ -1403,6 +1403,101 @@ class ConversationalAndWorkspaceIntelligenceTests(unittest.TestCase):
             self.assertEqual(mission["mission"]["status"], "COMPLETED")
             self.assertTrue(any(n["task_id"] == "node_workspace_inspect" and n["execution_status"] == "COMPLETED" for n in mission["nodes"]))
 
+    def test_malformed_spec_wrapper_rejected_and_valid_plan_emits_transitions(self) -> None:
+        from planner_intelligence import analyze_planner_goal, build_context_aware_dag_plan  # noqa: E402
+
+        with isolated_core_env():
+            conn = zc.get_db()
+            corrupt_inputs = [
+                "รายละเอียดและข้อกำหนด: ะะี",
+                "วางแผนและพัฒนาซอร์สโค้ด\n\nรายละเอียดและข้อกำหนด:\nะะี",
+                "รายละเอียดและข้อกำหนด: ะ",
+            ]
+            for raw in corrupt_inputs:
+                analysis = analyze_planner_goal(raw)
+                self.assertEqual(analysis["clarity_status"], "INVALID_CORRUPT", raw)
+                self.assertFalse(analysis["is_actionable_goal"], raw)
+                self.assertEqual(analysis["objective"], "", raw)
+
+                plan = build_context_aware_dag_plan(conn, raw, force_plan=True)
+                self.assertIsNotNone(plan)
+                assert plan is not None
+                self.assertEqual(plan["plan_status"], "NEEDS_CLARIFICATION")
+                self.assertFalse(plan["is_actionable_goal"])
+                self.assertFalse(plan["plan_valid"])
+                self.assertEqual(plan["goal"], "")
+                self.assertEqual(plan["steps"], [])
+                self.assertTrue(
+                    any(tr.get("to_status") == "NEEDS_CLARIFICATION" for tr in plan["status_transitions"])
+                )
+
+                infer_res = zc.handle_infer({"prompt": raw, "mode": "plan", "user_id": "u-trace"})
+                self.assertIn(infer_res["status"], ("UNKNOWN", "NEEDS_CLARIFICATION"))
+                self.assertIsNone(infer_res["trace"].get("plan"))
+                self.assertEqual(infer_res["trace"].get("execution_phase"), "CLARIFICATION_REQUIRED")
+                self.assertFalse(infer_res["trace"]["goal_validation"]["is_actionable_goal"])
+
+            # Bare label without any payload must also be rejected as INCOMPLETE
+            bare = analyze_planner_goal("รายละเอียดและข้อกำหนด:")
+            self.assertEqual(bare["clarity_status"], "INCOMPLETE")
+            self.assertFalse(bare["is_actionable_goal"])
+
+            # Valid actionable goal produces validated PLANNED DAG with explicit status transitions
+            valid_infer = zc.handle_infer(
+                {
+                    "prompt": "วางแผน: ตรวจสอบและปรับปรุงโมดูล planner_intelligence.py พร้อมชุดทดสอบ",
+                    "mode": "plan",
+                    "user_id": "u-trace",
+                }
+            )
+            self.assertEqual(valid_infer["status"], "PLANNED")
+            self.assertFalse(valid_infer["trace"]["external_models_used"])
+            valid_plan = valid_infer["trace"].get("plan")
+            self.assertIsNotNone(valid_plan)
+            self.assertTrue(valid_plan["plan_valid"])
+            self.assertTrue(valid_plan["is_actionable_goal"])
+            self.assertTrue(valid_plan["goal"])
+            self.assertGreater(len(valid_plan["steps"]), 0)
+            self.assertTrue(
+                any(tr.get("from_status") == "DRAFT" and tr.get("to_status") == "PLANNED" for tr in valid_plan["status_transitions"])
+            )
+            conn.close()
+
+    def test_context_aware_goal_resolution_proposes_grounded_candidates_without_auto_execution(self) -> None:
+        from planner_intelligence import build_context_aware_dag_plan  # noqa: E402
+
+        with isolated_core_env():
+            conn = zc.get_db()
+            # Underspecified input triggers context-aware candidate proposals without auto-execution
+            vague_plan = build_context_aware_dag_plan(
+                conn,
+                "วางแผน: ตรวจสอบ",
+                force_plan=True,
+                recent_context=["PR #1 .github/workflows/api-tests.yml StageAwareSampler"],
+            )
+            self.assertIsNotNone(vague_plan)
+            assert vague_plan is not None
+            self.assertEqual(vague_plan["plan_status"], "NEEDS_CLARIFICATION")
+            self.assertFalse(vague_plan["is_actionable_goal"])
+            self.assertEqual(vague_plan["steps"], [])
+            ctx_res = vague_plan.get("context_resolution") or {}
+            self.assertTrue(ctx_res.get("resolved_from_context"))
+            self.assertTrue(ctx_res.get("auto_execution_blocked"))
+            self.assertTrue(ctx_res.get("requires_user_confirmation"))
+            self.assertGreater(ctx_res.get("candidate_count", 0), 0)
+
+            infer_vague = zc.handle_infer({"prompt": "วางแผน: ตรวจสอบ", "mode": "plan", "user_id": "u-ctx"})
+            self.assertEqual(infer_vague["status"], "NEEDS_CLARIFICATION")
+            self.assertIn("ข้อเสนอเป้าหมายจากบริบทงานปัจจุบัน", infer_vague["content"])
+            self.assertTrue(infer_vague["trace"]["goal_validation"]["context_resolution"]["resolved_from_context"])
+
+            # Corrupt input must NOT invoke context-aware goal guessing
+            corrupt_plan = build_context_aware_dag_plan(conn, "รายละเอียดและข้อกำหนด: ะะี", force_plan=True)
+            assert corrupt_plan is not None
+            self.assertFalse(corrupt_plan["context_resolution"]["resolved_from_context"])
+            self.assertEqual(corrupt_plan["context_resolution"]["candidates"], [])
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

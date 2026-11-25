@@ -224,8 +224,30 @@ export interface NativeTrace {
       edges: Array<{ from: string; relation: string; to: string; source: string }>;
     } | null;
   };
+  execution_phase?: string;
+  goal_validation?: {
+    clarity_status?: string;
+    is_actionable_goal?: boolean;
+    issues?: string[];
+    status_transitions?: Array<{
+      step_id?: string;
+      from_status: string;
+      to_status: string;
+      reason?: string;
+    }>;
+  };
   plan?: {
     goal: string;
+    plan_status?: string;
+    status?: string;
+    is_actionable_goal?: boolean;
+    plan_valid?: boolean;
+    status_transitions?: Array<{
+      step_id?: string;
+      from_status: string;
+      to_status: string;
+      reason?: string;
+    }>;
     steps: Array<{
       step_id: string;
       title: string;

@@ -26,6 +26,11 @@ import {
   X,
 } from 'lucide-react';
 import { ApiError, apiRequest } from '../lib/api';
+import {
+  isMalformedOrEmptyTraceText,
+  sanitizeTraceDisplayText,
+  validateTracePlan,
+} from '../lib/clipboard';
 import type {
   ConversationSmartSummary,
   ConversationSummary,
@@ -185,16 +190,26 @@ function getStatusMeta(status: string): {
     case 'VERIFIED':
     case 'COMPLETED':
       return { label: 'ดำเนินการและตรวจสอบแล้ว', tone: 'verified' };
+    case 'PLANNED':
+    case 'READY':
+      return { label: 'วางแผนแล้ว · พร้อมตรวจสอบ', tone: 'neutral' };
+    case 'RUNNING':
+    case 'EXECUTING':
+      return { label: 'กำลังดำเนินงาน', tone: 'approval' };
     case 'PENDING_APPROVAL':
     case 'AWAITING_APPROVAL':
       return { label: 'รอการอนุมัติ', tone: 'approval' };
     case 'BLOCKED':
     case 'FAILED':
     case 'REJECTED':
+    case 'CANCELLED':
       return { label: 'ไม่สามารถดำเนินการต่อได้', tone: 'blocked' };
+    case 'NEEDS_CLARIFICATION':
     case 'NOT_LEARNED':
     case 'UNABLE_TO_INFER':
       return { label: 'ต้องการข้อมูลเพิ่มเติม', tone: 'boundary' };
+    case 'UNKNOWN':
+      return { label: 'ข้อมูลไม่สมบูรณ์', tone: 'boundary' };
     case 'UNDERSTOOD':
       return null;
     default:
@@ -729,6 +744,12 @@ export function WorkspaceView({
               const trace = !isUser ? parseTrace(msg.trace_json) : null;
               const statusMeta = !isUser ? getStatusMeta(msg.status) : null;
               const userParsed = isUser ? splitUserAttachmentNotice(msg.content) : null;
+              const cleanUserBody = userParsed
+                ? isMalformedOrEmptyTraceText(userParsed.body)
+                  ? sanitizeTraceDisplayText(userParsed.body)
+                  : sanitizeTraceDisplayText(userParsed.body) || userParsed.body
+                : '';
+              const validatedPlan = !isUser && trace?.plan ? validateTracePlan(trace.plan) : null;
               const deliverable = trace?.deliverable;
               const isArtifactExpanded = Boolean(expandedArtifacts[msg.id]);
               const needsApproval =
@@ -795,7 +816,7 @@ export function WorkspaceView({
                     {isUser && userParsed ? (
                       <div className="space-y-2">
                         <p className="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
-                          {userParsed.body}
+                          {cleanUserBody || 'คำสั่งไม่สมบูรณ์ (ถูกคัดกรอง)'}
                         </p>
                         {userParsed.attachmentChars !== null && (
                           <div className="inline-flex items-center gap-1.5 rounded-lg bg-white/15 px-2.5 py-1 text-[11px] text-white/95 tabular-nums">
@@ -806,6 +827,62 @@ export function WorkspaceView({
                       </div>
                     ) : (
                       <SafeMessageText content={msg.content} />
+                    )}
+
+                    {/* Validated Native DAG Plan Card (only rendered when goal & steps pass strict validation) */}
+                    {validatedPlan && validatedPlan.valid && (
+                      <div
+                        role="region"
+                        aria-label="แผนงานที่ตรวจสอบแล้ว"
+                        className="mt-3.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 py-3 text-xs"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <ListChecks className="h-4 w-4 shrink-0 text-[var(--color-accent)]" aria-hidden="true" />
+                            <span className="font-semibold text-[var(--color-text)]">แผนงานที่ตรวจสอบแล้ว</span>
+                          </div>
+                          <span className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2 py-0.5 font-mono text-[10px] font-medium text-[var(--color-accent)]">
+                            {validatedPlan.planStatus}
+                          </span>
+                        </div>
+                        <p className="mt-1.5 font-medium text-[var(--color-text)]">{validatedPlan.goal}</p>
+                        <ol className="mt-2.5 space-y-1.5">
+                          {validatedPlan.steps.map((step) => (
+                            <li
+                              key={step.step_id}
+                              className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-surface-raised)] px-2.5 py-2"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="font-medium text-[var(--color-text)]">
+                                  {step.step_id} · {step.title}
+                                </span>
+                                <span className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-text-secondary)]">
+                                  {step.status}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{step.detail}</p>
+                              {step.depends_on.length > 0 && (
+                                <p className="mt-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
+                                  ขึ้นกับ: {step.depends_on.join(', ')}
+                                </p>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                        {validatedPlan.statusTransitions.length > 0 && (
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-[var(--color-border)]/60 pt-2">
+                            {validatedPlan.statusTransitions.slice(0, 4).map((tr, idx) => (
+                              <span
+                                key={`${tr.step_id || 'plan'}-${idx}`}
+                                className="rounded bg-[var(--color-surface-raised)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)]"
+                              >
+                                {tr.step_id ? `${tr.step_id}: ` : ''}
+                                {tr.from_status} → {tr.to_status}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {/* Artifact / Deliverable Panel when produced */}
@@ -937,10 +1014,10 @@ export function WorkspaceView({
                   </div>
 
                   {isUser ? (
-                    userParsed?.body ? (
+                    cleanUserBody ? (
                       <div className="mt-1 flex items-center justify-end px-1">
                         <CopyButton
-                          getText={() => userParsed.body}
+                          getText={() => cleanUserBody}
                           label="คัดลอก"
                           ariaLabel="คัดลอกคำสั่ง"
                           title="คัดลอกคำสั่งที่ส่ง"

@@ -2380,6 +2380,38 @@ def run_ngram_continuation(conn: sqlite3.Connection, prompt: str, max_tokens: in
     }
 
 
+def _format_clarification_markdown(
+    *,
+    clarify_status: str,
+    issues: list[str],
+    questions: list[str],
+    context_resolution: dict | None = None,
+    heading: str = "ต้องการข้อมูลเพิ่มเติมก่อนวางแผน",
+) -> str:
+    ctx_res = context_resolution or {}
+    candidates = ctx_res.get("candidates") or []
+    parts = [f"**{heading} (`{clarify_status}`)**"]
+    if issues:
+        parts.append(f"สาเหตุที่ตรวจพบ: `{', '.join(issues)}`")
+    if ctx_res.get("resolved_from_context") and candidates:
+        cand_lines: list[str] = []
+        for idx, cand in enumerate(candidates, start=1):
+            ev = ", ".join(str(x) for x in (cand.get("grounded_evidence") or [])[:3])
+            cand_lines.append(
+                f"{idx}. **{cand.get('domain')}** — {cand.get('proposed_objective')}"
+                + (f"\n   - หลักฐานบริบทจริง: `{ev}`" if ev else "")
+                + (f"\n   - เงื่อนไขสำเร็จ: {cand.get('success_criteria')}" if cand.get("success_criteria") else "")
+            )
+        parts.append(
+            "**ข้อเสนอเป้าหมายจากบริบทงานปัจจุบัน (ยังไม่เริ่มขั้นที่มีความเสี่ยงจนกว่าจะยืนยัน):**\n"
+            + "\n".join(cand_lines)
+        )
+    if questions:
+        q_lines = "\n".join(f"- {q}" for q in questions)
+        parts.append(f"**คำถามเพื่อความชัดเจน:**\n{q_lines}")
+    return "\n\n".join(parts)
+
+
 def try_native_planning(conn: sqlite3.Connection, prompt: str, force_plan: bool = False) -> dict | None:
     return build_context_aware_dag_plan(
         conn,
@@ -2735,23 +2767,35 @@ def _try_execute_chat_autonomous_goal(
         return None
 
     goal_analysis = plan_res.get("goal_interpretation") or analyze_planner_goal(cleaned, attachment=attachment)
-    if plan_res.get("plan_status") == "NEEDS_CLARIFICATION" or goal_analysis.get("clarity_status") != "VALID":
+    if (
+        plan_res.get("plan_status") == "NEEDS_CLARIFICATION"
+        or plan_res.get("plan_valid") is False
+        or goal_analysis.get("clarity_status") != "VALID"
+    ):
         clarify_status = "UNKNOWN" if goal_analysis.get("clarity_status") == "INVALID_CORRUPT" else "NEEDS_CLARIFICATION"
         questions = plan_res.get("clarification_questions") or goal_analysis.get("clarification_questions") or []
         issues = plan_res.get("issues") or goal_analysis.get("issues") or []
-        q_lines = "\n".join(f"- {q}" for q in questions)
-        content = (
-            f"**ยังไม่สามารถสร้างหรือดำเนินการจากคำสั่งนี้ได้ (`{clarify_status}`)**\n\n"
-            + (f"สาเหตุที่ตรวจพบ: `{', '.join(issues)}`\n\n" if issues else "")
-            + (f"**คำถามเพื่อความชัดเจน:**\n{q_lines}" if q_lines else "")
+        ctx_res = plan_res.get("context_resolution") or goal_analysis.get("context_resolution") or {}
+        content = _format_clarification_markdown(
+            clarify_status=clarify_status,
+            issues=issues,
+            questions=questions,
+            context_resolution=ctx_res,
+            heading="ยังไม่สามารถสร้างหรือดำเนินการจากคำสั่งนี้ได้",
         )
         return {
             "content": content,
             "status": clarify_status,
             "execution_phase": "CLARIFICATION_REQUIRED",
             "goal_interpretation": goal_analysis,
+            "goal_validation": {
+                "clarity_status": goal_analysis.get("clarity_status"),
+                "is_actionable_goal": False,
+                "issues": issues,
+                "context_resolution": ctx_res,
+                "status_transitions": plan_res.get("status_transitions") or [],
+            },
             "engine_path": ["goal_understanding_gate"],
-            "plan": plan_res,
             "task_timings": [
                 {
                     "task": "goal_understanding_gate",
@@ -4051,15 +4095,27 @@ def handle_infer(payload: dict) -> dict:
         plan_res = try_native_planning(conn, prompt, force_plan=(mode == "plan"))
         if plan_res:
             trace["engine_path"].append("native_planner")
-            trace["plan"] = plan_res
             if plan_res.get("goal_interpretation"):
                 trace["goal_interpretation"] = plan_res["goal_interpretation"]
 
-            if plan_res.get("plan_status") == "NEEDS_CLARIFICATION":
+            if (
+                plan_res.get("plan_status") == "NEEDS_CLARIFICATION"
+                or plan_res.get("plan_valid") is False
+                or plan_res.get("is_actionable_goal") is False
+                or not (plan_res.get("steps") or [])
+            ):
                 clarity = (plan_res.get("goal_interpretation") or {}).get("clarity_status")
                 clarify_status = "UNKNOWN" if clarity == "INVALID_CORRUPT" else "NEEDS_CLARIFICATION"
                 issues = plan_res.get("issues") or []
                 questions = plan_res.get("clarification_questions") or []
+                ctx_res = plan_res.get("context_resolution") or (plan_res.get("goal_interpretation") or {}).get("context_resolution") or {}
+                trace["goal_validation"] = {
+                    "clarity_status": clarity,
+                    "is_actionable_goal": False,
+                    "issues": issues,
+                    "context_resolution": ctx_res,
+                    "status_transitions": plan_res.get("status_transitions") or [],
+                }
                 _record_task_timing(
                     "native_planner",
                     t0,
@@ -4068,16 +4124,18 @@ def handle_infer(payload: dict) -> dict:
                     detail=", ".join(issues) or clarify_status,
                 )
                 trace["execution_phase"] = "CLARIFICATION_REQUIRED"
-                q_md = "\n".join(f"- {q}" for q in questions)
-                content = (
-                    f"**ต้องการข้อมูลเพิ่มเติมก่อนวางแผน ({clarify_status})**\n\n"
-                    + (f"ประเด็นที่ตรวจพบ: `{', '.join(issues)}`\n\n" if issues else "")
-                    + (f"**คำถามเพื่อความชัดเจน:**\n{q_md}" if q_md else "")
+                content = _format_clarification_markdown(
+                    clarify_status=clarify_status,
+                    issues=issues,
+                    questions=questions,
+                    context_resolution=ctx_res,
+                    heading="ต้องการข้อมูลเพิ่มเติมก่อนวางแผน",
                 )
                 _finalize_trace()
                 conn.close()
                 return {"content": content, "status": clarify_status, "trace": trace}
 
+            trace["plan"] = plan_res
             _record_task_timing(
                 "native_planner",
                 t0,
@@ -4088,10 +4146,13 @@ def handle_infer(payload: dict) -> dict:
             trace["execution_phase"] = "PLANNED"
             step_lines = [
                 f"- **{s['step_id']} · {s['title']}** (`{s['status']}`"
-                + (f", รอ `{','.join(s['depends_on'])}`" if s["depends_on"] else "")
-                + (f", ต้องอนุมัติ" if s["requires_approval"] else "")
+                + (f", รอ `{','.join(s['depends_on'])}`" if s.get("depends_on") else "")
+                + (", ต้องอนุมัติ" if s.get("requires_approval") else "")
                 + f"): {s['detail']}"
                 for s in plan_res["steps"]
+                if str(s.get("step_id") or "").strip()
+                and str(s.get("title") or "").strip()
+                and str(s.get("detail") or "").strip()
             ]
             snap = plan_res["summary"]["state_snapshot"]
             content = (
@@ -4194,8 +4255,17 @@ def handle_infer(payload: dict) -> dict:
                 trace["execution_phase"] = "VERIFIED" if auto_res.get("status") == "VERIFIED" else "EXECUTED"
             if auto_res.get("goal_interpretation"):
                 trace["goal_interpretation"] = auto_res["goal_interpretation"]
-            if auto_res.get("plan"):
-                trace["plan"] = auto_res["plan"]
+            if auto_res.get("goal_validation"):
+                trace["goal_validation"] = auto_res["goal_validation"]
+            auto_plan = auto_res.get("plan")
+            if (
+                isinstance(auto_plan, dict)
+                and auto_plan.get("plan_valid") is not False
+                and auto_plan.get("is_actionable_goal") is not False
+                and auto_plan.get("plan_status") not in ("NEEDS_CLARIFICATION", "BLOCKED")
+                and (auto_plan.get("steps") or [])
+            ):
+                trace["plan"] = auto_plan
             if auto_res.get("deliverable"):
                 trace["deliverable"] = auto_res["deliverable"]
             if auto_res.get("orchestration"):
@@ -4870,6 +4940,15 @@ def check_training_pipeline_prerequisites(
     }
 
 
+def _load_stage_aware_sampler():
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from apps.core.native.train.StageAwareSampler import StageAwareSampler
+
+    return StageAwareSampler
+
+
 def train_checkpoint_from_dataset(conn: sqlite3.Connection, dataset_id: str, user_id: str) -> dict:
     ds = conn.execute("SELECT * FROM datasets WHERE id=?", (dataset_id,)).fetchone()
     if not ds:
@@ -4878,9 +4957,128 @@ def train_checkpoint_from_dataset(conn: sqlite3.Connection, dataset_id: str, use
         return {"ok": False, "error": "Training blocked: dataset leakage detected"}
 
     splits = json.loads(ds["records_json"])
-    train_lines = splits.get("train", [])
+    ds_keys = set(ds.keys())
+    raw_prov = (
+        ds["provenance"]
+        if "provenance" in ds_keys and ds["provenance"]
+        else splits.get("provenance")
+    )
+    provenance_str = str(raw_prov or "legacy_verified").strip()
+    if not provenance_str or any(tok in provenance_str.lower() for tok in DISALLOWED_PROVENANCE_TOKENS):
+        return {"ok": False, "error": f"Training blocked: invalid dataset provenance {provenance_str!r}"}
+
+    raw_train_lines = splits.get("train", [])
     val_lines = splits.get("val", [])
     test_lines = splits.get("test", [])
+    if not raw_train_lines:
+        return {"ok": False, "error": "Training blocked: train split is empty"}
+
+    kq = get_knowledge_quality_summary(conn)
+    conflicting_pairs = {
+        (str(d.get("subject") or "").lower(), str(d.get("relation") or "").lower())
+        for d in (kq.get("contradiction_details") or [])
+    }
+    heldout_keys = {
+        _canonical_record_key(str(x))
+        for x in (list(val_lines) + list(test_lines))
+        if _canonical_record_key(str(x))
+    }
+
+    ingestion_records: list[dict] = []
+    for item in raw_train_lines:
+        if isinstance(item, dict):
+            text_val = str(item.get("text") or item.get("input") or "").strip()
+            stage_val = str(item.get("stage") or "verified_dataset").strip() or "verified_dataset"
+            q_val = float(item.get("quality_score", 1.0) or 1.0)
+            rec_prov = str(item.get("provenance") or provenance_str).strip()
+        else:
+            text_val = str(item).strip()
+            stage_val = "verified_dataset"
+            q_val = 1.0
+            rec_prov = provenance_str
+        if not text_val or any(tok in rec_prov.lower() for tok in DISALLOWED_PROVENANCE_TOKENS):
+            continue
+        if q_val < 0.7:
+            continue
+        ingestion_records.append(
+            {
+                "text": text_val,
+                "stage": stage_val,
+                "provenance": rec_prov,
+                "quality_score": q_val,
+            }
+        )
+
+    # Supplement with non-contradictory, provenance-verified KG triples that do not overlap val/test
+    kg_rows = conn.execute(
+        "SELECT subject, relation, object, source, confidence FROM knowledge_triples ORDER BY created_at DESC"
+    ).fetchall()
+    for kr in kg_rows:
+        subj = str(kr["subject"] or "").strip()
+        rel = str(kr["relation"] or "").strip()
+        obj = str(kr["object"] or "").strip()
+        src = str(kr["source"] or "").strip()
+        conf = float(kr["confidence"] or 0.0)
+        if not subj or not rel or not obj or not src:
+            continue
+        src_low = src.lower()
+        if conf < 0.7 or any(tok in src_low for tok in DISALLOWED_PROVENANCE_TOKENS) or any(
+            bad in src_low for bad in ("uncorroborated", "conflicting", "stale")
+        ):
+            continue
+        if (subj.lower(), rel.lower()) in conflicting_pairs:
+            continue
+        fact_line = f"{subj} {rel} {obj}"
+        if _canonical_record_key(fact_line) in heldout_keys:
+            continue
+        ingestion_records.append(
+            {
+                "text": fact_line,
+                "stage": "verified_knowledge",
+                "provenance": src,
+                "quality_score": conf,
+            }
+        )
+
+    if not ingestion_records:
+        return {"ok": False, "error": "Training blocked: no verified provenance/quality training records available"}
+
+    stage_quality_sums: dict[str, float] = collections.defaultdict(float)
+    stage_counts: dict[str, int] = collections.Counter()
+    for rec in ingestion_records:
+        st = rec["stage"]
+        stage_quality_sums[st] += rec["quality_score"]
+        stage_counts[st] += 1
+
+    stage_weights: dict[str, float] = {}
+    for st, cnt in stage_counts.items():
+        avg_q = stage_quality_sums[st] / max(1, cnt)
+        if st == "verified_knowledge":
+            cov_factor = max(0.1, float(kq.get("provenance_coverage_pct") or 0.0) / 100.0)
+            stage_weights[st] = round(max(0.05, min(0.35, avg_q * cov_factor * 0.25)), 6)
+        else:
+            stage_weights[st] = round(max(0.1, avg_q), 6)
+
+    StageAwareSampler = _load_stage_aware_sampler()
+    sampler = StageAwareSampler(
+        ingestion_records,
+        stage_weights=stage_weights,
+        seed=max(0, int(hashlib.sha256(str(dataset_id).encode("utf-8")).hexdigest()[:8], 16)),
+        num_samples=len(ingestion_records),
+    )
+    sampled_indices = sampler.sample_indices()
+    train_lines = [ingestion_records[idx]["text"] for idx in sampled_indices]
+    sampling_summary = {
+        "sampler": "StageAwareSampler",
+        "provenance": provenance_str,
+        "knowledge_quality_status": kq.get("status"),
+        "provenance_coverage_pct": kq.get("provenance_coverage_pct"),
+        "contradiction_groups_excluded": kq.get("contradiction_groups", 0),
+        "stage_counts": sampler.stage_counts,
+        "normalized_weights": sampler.normalized_weights,
+        "sampled_count": len(sampled_indices),
+        "sampled_distribution": sampler.measure_stage_distribution(sampled_indices),
+    }
 
     bigrams: dict[str, dict[str, int]] = collections.defaultdict(lambda: collections.defaultdict(int))
     trigrams: dict[str, dict[str, int]] = collections.defaultdict(lambda: collections.defaultdict(int))
@@ -4953,7 +5151,7 @@ def train_checkpoint_from_dataset(conn: sqlite3.Connection, dataset_id: str, use
             ),
         )
     row = dict(conn.execute("SELECT * FROM checkpoints WHERE id=?", (ckpt_id,)).fetchone())
-    return {"ok": True, "checkpoint": row}
+    return {"ok": True, "checkpoint": row, "sampling": sampling_summary}
 
 
 def _collect_upstream_workflow_refs(conn: sqlite3.Connection, group_ids: list[str]) -> dict[str, dict]:
@@ -5576,6 +5774,7 @@ def handle_run_workflow(payload: dict) -> dict:
                 summary = res["error"]
             else:
                 ck = res["checkpoint"]
+                sampling_info = res.get("sampling") or {}
                 post_eval = handle_run_evaluation(
                     {
                         "user_id": approved_by or user_id,
@@ -5602,7 +5801,10 @@ def handle_run_workflow(payload: dict) -> dict:
                     {
                         "stage": "checkpoint_train",
                         "status": "PASS",
-                        "detail": f"Saved immutable Checkpoint v{ck['version']} (perplexity {ck['perplexity']})",
+                        "detail": (
+                            f"Saved immutable Checkpoint v{ck['version']} via StageAwareSampler "
+                            f"(samples={sampling_info.get('sampled_count', 0)}, perplexity {ck['perplexity']})"
+                        ),
                     },
                     {
                         "stage": "checkpoint_eval_gate",
@@ -5610,7 +5812,13 @@ def handle_run_workflow(payload: dict) -> dict:
                         "detail": f"Post-eval {ev.get('overall_status', 'RECORDED')} (test_acc={ev.get('test_accuracy')}, ppl={ev.get('perplexity')})",
                     },
                 ]
-                output_obj = {"checkpoint_id": ck["id"], "version": ck["version"], "perplexity": ck["perplexity"], "post_eval_status": ev.get("overall_status")}
+                output_obj = {
+                    "checkpoint_id": ck["id"],
+                    "version": ck["version"],
+                    "perplexity": ck["perplexity"],
+                    "post_eval_status": ev.get("overall_status"),
+                    "sampling": sampling_info,
+                }
                 summary = (
                     f"Trained & evaluated immutable Checkpoint v{ck['version']}: "
                     f"train_loss={ck['train_loss']}, val_loss={ck['val_loss']}, "
@@ -6359,11 +6567,20 @@ def summarize_conversation(messages: list[dict]) -> dict:
 
         if "plan" in trace and isinstance(trace["plan"], dict):
             pl = trace["plan"]
-            sm = pl.get("summary", {})
-            add_bullet(
-                f"แผนงาน DAG (`{str(pl.get('goal', ''))[:40]}`): "
-                f"{sm.get('total_steps', 0)} ขั้นตอน (ถูกบล็อก {sm.get('blocked_steps', 0)}, รออนุมัติ {sm.get('approval_gated_steps', 0)})"
-            )
+            pl_goal = str(pl.get("goal", "")).strip()
+            pl_steps = pl.get("steps") or []
+            if (
+                pl.get("plan_valid") is not False
+                and pl.get("is_actionable_goal") is not False
+                and pl.get("plan_status") not in ("NEEDS_CLARIFICATION", "BLOCKED")
+                and pl_goal
+                and pl_steps
+            ):
+                sm = pl.get("summary", {})
+                add_bullet(
+                    f"แผนงาน DAG (`{pl_goal[:40]}`): "
+                    f"{sm.get('total_steps', len(pl_steps))} ขั้นตอน (ถูกบล็อก {sm.get('blocked_steps', 0)}, รออนุมัติ {sm.get('approval_gated_steps', 0)})"
+                )
 
         if "causal_logic" in trace and isinstance(trace["causal_logic"], dict):
             cl = trace["causal_logic"]

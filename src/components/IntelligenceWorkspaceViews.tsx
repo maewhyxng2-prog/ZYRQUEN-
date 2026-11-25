@@ -31,6 +31,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiError } from '../lib/api';
+import { isMalformedOrEmptyTraceText, sanitizeTraceDisplayText } from '../lib/clipboard';
 import { externalToolAdapter, type ToolId } from '../lib/tools';
 import type {
   AppScreen,
@@ -87,9 +88,20 @@ function renderStatusInline(status: string) {
           <span>{status}</span>
         </span>
       );
+    case 'PLANNED':
+    case 'READY':
+      return (
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)]">
+          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>{status}</span>
+        </span>
+      );
+    case 'RUNNING':
+    case 'EXECUTING':
     case 'PENDING_APPROVAL':
     case 'AWAITING_APPROVAL':
     case 'AWAITING_EVIDENCE':
+    case 'NEEDS_CLARIFICATION':
     case 'NOT_LEARNED':
     case 'UNKNOWN':
     case 'UNCERTAIN':
@@ -441,7 +453,10 @@ export function MyTasksView({
   async function handleCreateTask(e: React.FormEvent) {
     e.preventDefault();
     const goal = newTaskGoal.trim();
-    if (!goal) return;
+    if (!goal || isMalformedOrEmptyTraceText(goal)) {
+      setError('กรุณาระบุเป้าหมายงานที่ชัดเจนและสมบูรณ์ก่อนสั่งดำเนินงาน');
+      return;
+    }
     setLaunching(true);
     setError(null);
     try {
@@ -515,12 +530,19 @@ export function MyTasksView({
   }
 
   const filteredTraces = useMemo(() => {
+    const validTraces = traces.filter((t) => {
+      const cleanPrompt = sanitizeTraceDisplayText(t.prompt);
+      const cleanPreview = sanitizeTraceDisplayText(t.response_preview);
+      if (!cleanPrompt && !cleanPreview) return false;
+      if (isMalformedOrEmptyTraceText(t.prompt) && t.status === 'UNKNOWN') return false;
+      return true;
+    });
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return traces;
-    return traces.filter(
+    if (!q) return validTraces;
+    return validTraces.filter(
       (t) =>
-        t.prompt.toLowerCase().includes(q) ||
-        (t.response_preview || '').toLowerCase().includes(q) ||
+        sanitizeTraceDisplayText(t.prompt).toLowerCase().includes(q) ||
+        sanitizeTraceDisplayText(t.response_preview || '').toLowerCase().includes(q) ||
         t.status.toLowerCase().includes(q)
     );
   }, [searchQuery, traces]);
@@ -795,6 +817,8 @@ export function MyTasksView({
                 } catch {
                   parsed = {};
                 }
+                const cleanPrompt = sanitizeTraceDisplayText(tr.prompt) || 'คำสั่งไม่สมบูรณ์ (ถูกคัดกรอง)';
+                const cleanPreview = sanitizeTraceDisplayText(tr.response_preview);
                 return (
                   <div key={tr.id} className="space-y-2 p-4 sm:p-5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -813,9 +837,9 @@ export function MyTasksView({
                         <CopyButton
                           getText={() =>
                             [
-                              `งาน: ${tr.prompt}`,
+                              `งาน: ${cleanPrompt}`,
                               `สถานะ: ${tr.status}`,
-                              `ผลลัพธ์:\n${toPlainAssistantCopyText(tr.response_preview || '')}`,
+                              `ผลลัพธ์:\n${toPlainAssistantCopyText(cleanPreview)}`,
                             ].join('\n\n')
                           }
                           ariaLabel="คัดลอกผลลัพธ์งาน"
@@ -832,13 +856,13 @@ export function MyTasksView({
                         )}
                       </div>
                     </div>
-                    <p className="text-sm font-semibold text-[var(--color-text)]">{tr.prompt}</p>
-                    {tr.response_preview && (
+                    <p className="text-sm font-semibold text-[var(--color-text)]">{cleanPrompt}</p>
+                    {cleanPreview && (
                       <p className="line-clamp-3 whitespace-pre-wrap text-xs leading-relaxed text-[var(--color-text-secondary)]">
-                        {toPlainAssistantCopyText(tr.response_preview)}
+                        {toPlainAssistantCopyText(cleanPreview)}
                       </p>
                     )}
-                    {parsed.bottleneck_task && (
+                    {parsed.bottleneck_task && !isMalformedOrEmptyTraceText(parsed.bottleneck_task.task) && (
                       <p className="font-mono text-[11px] text-[var(--color-text-muted)] tabular-nums">
                         ขั้นตอนที่ใช้เวลานานที่สุด: {parsed.bottleneck_task.task} ({parsed.bottleneck_task.duration_ms} ms)
                       </p>
@@ -1001,6 +1025,13 @@ export function CreateArtifactView({
       const cleanSpec = spec.trim();
       if (!cleanTitle && !cleanSpec && !attachment) {
         setError('กรุณาระบุหัวข้อหรือรายละเอียดของงานที่ต้องการสร้าง');
+        return;
+      }
+      if (
+        (cleanTitle && isMalformedOrEmptyTraceText(cleanTitle)) ||
+        (cleanSpec && isMalformedOrEmptyTraceText(cleanSpec))
+      ) {
+        setError('หัวข้อหรือรายละเอียดไม่สมบูรณ์หรือมีอักขระผิดรูปแบบ กรุณาระบุเป้าหมายให้ชัดเจนก่อนสร้างงาน');
         return;
       }
 
@@ -1802,7 +1833,13 @@ export function ArtifactsView({ token, onOpenConversation, onNavigate }: Artifac
       setFiles(toolsRes?.workspace_files || []);
       setMissions((missionsRes?.missions || []).filter((m) => Boolean(m.report_markdown?.trim())));
       setTraces(
-        (tracesRes?.reasoning_traces || []).filter((t) => Boolean(t.response_preview?.trim()))
+        (tracesRes?.reasoning_traces || []).filter((t) => {
+          const cleanPreview = sanitizeTraceDisplayText(t.response_preview);
+          const cleanPrompt = sanitizeTraceDisplayText(t.prompt);
+          if (!cleanPreview || !cleanPrompt) return false;
+          if (t.status === 'NEEDS_CLARIFICATION' || t.status === 'UNKNOWN') return false;
+          return !isMalformedOrEmptyTraceText(t.prompt);
+        })
       );
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'ไม่สามารถโหลดคลังผลงานได้');
@@ -1865,12 +1902,15 @@ export function ArtifactsView({ token, onOpenConversation, onNavigate }: Artifac
       : [];
   const visibleTraces =
     filter === 'all' || filter === 'outputs'
-      ? traces.filter(
-          (t) =>
+      ? traces.filter((t) => {
+          const cleanPrompt = sanitizeTraceDisplayText(t.prompt);
+          const cleanPreview = sanitizeTraceDisplayText(t.response_preview);
+          return (
             !q ||
-            t.prompt.toLowerCase().includes(q) ||
-            t.response_preview.toLowerCase().includes(q)
-        )
+            cleanPrompt.toLowerCase().includes(q) ||
+            cleanPreview.toLowerCase().includes(q)
+          );
+        })
       : [];
 
   const totalCount = files.length + missions.length + traces.length;
@@ -2017,34 +2057,38 @@ export function ArtifactsView({ token, onOpenConversation, onNavigate }: Artifac
                 </button>
               ))}
 
-              {visibleTraces.map((tr) => (
-                <button
-                  key={`trace-${tr.id}`}
-                  type="button"
-                  onClick={() =>
-                    setSelected({
-                      kind: 'output',
-                      title: tr.prompt,
-                      subtitle: `ผลลัพธ์งาน · ${tr.status} · ${formatDateThai(tr.created_at)}`,
-                      content: toPlainAssistantCopyText(tr.response_preview),
-                      filename: `output-${tr.id.slice(0, 8)}.md`,
-                      conversationId: tr.conversation_id,
-                    })
-                  }
-                  className="flex w-full items-center justify-between gap-3 p-4 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-                >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <FileText className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />
-                    <div className="min-w-0">
-                      <p className="truncate text-xs font-semibold text-[var(--color-text)]">{tr.prompt}</p>
-                      <p className="mt-0.5 text-[11px] text-[var(--color-text-secondary)] tabular-nums">
-                        ผลลัพธ์งาน · {tr.status} · {formatDateThai(tr.created_at)}
-                      </p>
+              {visibleTraces.map((tr) => {
+                const cleanPrompt = sanitizeTraceDisplayText(tr.prompt) || 'ผลลัพธ์งาน';
+                const cleanPreview = sanitizeTraceDisplayText(tr.response_preview);
+                return (
+                  <button
+                    key={`trace-${tr.id}`}
+                    type="button"
+                    onClick={() =>
+                      setSelected({
+                        kind: 'output',
+                        title: cleanPrompt,
+                        subtitle: `ผลลัพธ์งาน · ${tr.status} · ${formatDateThai(tr.created_at)}`,
+                        content: toPlainAssistantCopyText(cleanPreview),
+                        filename: `output-${tr.id.slice(0, 8)}.md`,
+                        conversationId: tr.conversation_id,
+                      })
+                    }
+                    className="flex w-full items-center justify-between gap-3 p-4 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
+                      <FileText className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />
+                      <div className="min-w-0">
+                        <p className="truncate text-xs font-semibold text-[var(--color-text)]">{cleanPrompt}</p>
+                        <p className="mt-0.5 text-[11px] text-[var(--color-text-secondary)] tabular-nums">
+                          ผลลัพธ์งาน · {tr.status} · {formatDateThai(tr.created_at)}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                  <ChevronRight className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
-                </button>
-              ))}
+                    <ChevronRight className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
+                  </button>
+                );
+              })}
             </>
           )}
         </div>

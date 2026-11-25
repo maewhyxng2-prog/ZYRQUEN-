@@ -3387,6 +3387,272 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     fireEvent.click(stopBtn);
     expect(onCancelSending).toHaveBeenCalledTimes(1);
   });
+
+  it('Reasoning Trace UI & Validation: กรองข้อความผิดรูปแบบ เช่น รายละเอียดและข้อกำหนด: ะะี และแสดงเฉพาะแผนที่ตรวจสอบแล้วพร้อมสถานะจริง', async () => {
+    const {
+      isMalformedOrEmptyTraceText,
+      sanitizeTraceDisplayText,
+      validateTracePlan,
+      filterValidTraceSteps,
+    } = await import('../lib/clipboard');
+    const { WorkspaceView } = await import('../components/WorkspaceView');
+    const { MemoryWorkflowsView } = await import('../components/MemoryWorkflowsView');
+    const { CreateArtifactView, ArtifactsView } = await import('../components/IntelligenceWorkspaceViews');
+
+    // 1. Unit checks for sanitization & plan validation
+    expect(isMalformedOrEmptyTraceText('รายละเอียดและข้อกำหนด: ะะี')).toBe(true);
+    expect(isMalformedOrEmptyTraceText('วางแผนและพัฒนาซอร์สโค้ด\n\nรายละเอียดและข้อกำหนด:\nะะี')).toBe(true);
+    expect(sanitizeTraceDisplayText('วางแผนและพัฒนาซอร์สโค้ด\n\nรายละเอียดและข้อกำหนด:\nะะี')).toBe('');
+    expect(sanitizeTraceDisplayText('หัวข้อที่ถูกต้อง\nรายละเอียดและข้อกำหนด: ะะี')).toBe('หัวข้อที่ถูกต้อง');
+    expect(
+      filterValidTraceSteps(['1. ขั้นตอนปกติ', 'รายละเอียดและข้อกำหนด: ะะี', 's1 · x [undefined]: ok'])
+    ).toEqual(['1. ขั้นตอนปกติ']);
+
+    expect(
+      validateTracePlan({
+        goal: 'รายละเอียดและข้อกำหนด: ะะี',
+        plan_status: 'NEEDS_CLARIFICATION',
+        plan_valid: false,
+        is_actionable_goal: false,
+        steps: [
+          { step_id: 's1', title: 'placeholder', status: 'BLOCKED', detail: 'ะะี' },
+        ],
+      }).valid
+    ).toBe(false);
+
+    const validPlanCheck = validateTracePlan({
+      goal: 'ตรวจสอบโมดูล planner_intelligence.py',
+      plan_status: 'PLANNED',
+      plan_valid: true,
+      is_actionable_goal: true,
+      status_transitions: [
+        { from_status: 'DRAFT', to_status: 'PLANNED' },
+        { step_id: 'step_inspect', from_status: 'DRAFT', to_status: 'READY' },
+      ],
+      steps: [
+        {
+          step_id: 'step_inspect',
+          title: 'สำรวจโครงสร้างโมดูล',
+          status: 'READY',
+          depends_on: [],
+          requires_approval: false,
+          detail: 'ตรวจอ่านฟังก์ชันวิเคราะห์เป้าหมาย',
+        },
+        {
+          step_id: 'step_verify',
+          title: 'ทดสอบการตรวจสอบย้อนหลัง',
+          status: 'BLOCKED',
+          depends_on: ['step_inspect'],
+          requires_approval: false,
+          detail: 'รอขั้นตอนสำรวจเสร็จสมบูรณ์',
+        },
+      ],
+    });
+    expect(validPlanCheck.valid).toBe(true);
+    expect(validPlanCheck.steps.length).toBe(2);
+
+    // 2. WorkspaceView renders validated plan card cleanly and filters corrupt user spec & invalid plan
+    const wv = render(
+      <WorkspaceView
+        token="tok-trace"
+        conversations={[{ id: 'proj-t', title: 'Audit', mode: 'plan', created_at: '', updated_at: '', message_count: 3 }]}
+        activeConversationId="proj-t"
+        activeTitle="Audit"
+        messages={[
+          {
+            id: 'm-bad-user',
+            conversation_id: 'proj-t',
+            role: 'user',
+            content: 'วางแผนและพัฒนาซอร์สโค้ด\n\nรายละเอียดและข้อกำหนด:\nะะี',
+            mode: 'plan',
+            trace_json: null,
+            status: 'USER',
+            created_at: '2026-11-25T00:00:00Z',
+          },
+          {
+            id: 'm-bad-plan',
+            conversation_id: 'proj-t',
+            role: 'assistant',
+            content: 'ต้องการข้อมูลเพิ่มเติมก่อนวางแผน (NEEDS_CLARIFICATION)',
+            mode: 'plan',
+            trace_json: JSON.stringify({
+              engine_path: ['native_planner'],
+              plan: {
+                goal: 'รายละเอียดและข้อกำหนด: ะะี',
+                plan_status: 'NEEDS_CLARIFICATION',
+                plan_valid: false,
+                steps: [{ step_id: 's1', title: 'TBD', status: 'BLOCKED', detail: 'ะะี' }],
+              },
+            }),
+            status: 'NEEDS_CLARIFICATION',
+            created_at: '2026-11-25T00:00:01Z',
+          },
+          {
+            id: 'm-good-plan',
+            conversation_id: 'proj-t',
+            role: 'assistant',
+            content: '**แผนปฏิบัติการเชิงโครงสร้าง**',
+            mode: 'plan',
+            trace_json: JSON.stringify({
+              engine_path: ['native_planner'],
+              plan: {
+                goal: 'ตรวจสอบโมดูล planner_intelligence.py',
+                plan_status: 'PLANNED',
+                plan_valid: true,
+                is_actionable_goal: true,
+                status_transitions: [
+                  { from_status: 'DRAFT', to_status: 'PLANNED' },
+                  { step_id: 'step_inspect', from_status: 'DRAFT', to_status: 'READY' },
+                ],
+                steps: [
+                  {
+                    step_id: 'step_inspect',
+                    title: 'สำรวจโครงสร้างโมดูล',
+                    status: 'READY',
+                    depends_on: [],
+                    detail: 'ตรวจอ่านฟังก์ชันวิเคราะห์เป้าหมาย',
+                  },
+                ],
+              },
+            }),
+            status: 'PLANNED',
+            created_at: '2026-11-25T00:00:02Z',
+          },
+        ]}
+        loadingThread={false}
+        sending={false}
+        error={null}
+        defaultMode="plan"
+        onSelectConversation={vi.fn()}
+        onNewConversation={vi.fn()}
+        onDeleteConversation={vi.fn()}
+        onSendMessage={vi.fn(async () => {})}
+      />
+    );
+
+    expect(screen.queryByText(/ะะี/)).not.toBeInTheDocument();
+    expect(screen.getByText('คำสั่งไม่สมบูรณ์ (ถูกคัดกรอง)')).toBeInTheDocument();
+    expect(screen.getByText('วางแผนแล้ว · พร้อมตรวจสอบ')).toBeInTheDocument();
+    expect(screen.getByText('แผนงานที่ตรวจสอบแล้ว')).toBeInTheDocument();
+    expect(screen.getByText('ตรวจสอบโมดูล planner_intelligence.py')).toBeInTheDocument();
+    expect(screen.getByText('READY')).toBeInTheDocument();
+    expect(screen.getByText('DRAFT → PLANNED')).toBeInTheDocument();
+    expect(screen.queryByText('Developer Trace')).not.toBeInTheDocument();
+    wv.unmount();
+
+    // 3. MemoryWorkflowsView filters malformed Reasoning Trace entries & [undefined] placeholder plans
+    mockFetch({
+      'GET /api/knowledge': () => new Response(JSON.stringify({ triples: [] }), { status: 200 }),
+      'GET /api/workflows': () =>
+        new Response(
+          JSON.stringify({
+            groups: [],
+            runs: [],
+            reasoning_traces: [
+              {
+                id: 'tr-bad',
+                user_id: 'u1',
+                conversation_id: null,
+                prompt: 'รายละเอียดและข้อกำหนด: ะะี',
+                mode: 'plan',
+                response_preview: 'รายละเอียดและข้อกำหนด: ะะี',
+                model_version: 'zyrquen-native-v1',
+                engine_path_json: JSON.stringify(['native_planner']),
+                trace_json: JSON.stringify({
+                  plan: {
+                    goal: 'รายละเอียดและข้อกำหนด: ะะี',
+                    plan_status: 'NEEDS_CLARIFICATION',
+                    plan_valid: false,
+                    steps: [{ step_id: 's0', title: 'Bad Step', status: undefined, detail: 'ะะี' }],
+                  },
+                  task_timings: [{ task: '', duration_ms: 1.0, matched: false, status: 'UNKNOWN' }],
+                }),
+                external_models_used: 0,
+                status: 'UNKNOWN',
+                latency_ms: 2.1,
+                created_at: '2026-11-25T00:00:00Z',
+              },
+            ],
+          }),
+          { status: 200 }
+        ),
+      'GET /api/autonomous/missions': () => new Response(JSON.stringify({ missions: [] }), { status: 200 }),
+    });
+
+    const mw = render(
+      <MemoryWorkflowsView
+        token="tok-wf"
+        user={{ id: 'u1', email: 'u1@test.local', display_name: 'Tester', role: 'user', created_at: '' }}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /ระบบเวิร์กโฟลว์/ }));
+    const filteredLabels = await screen.findAllByText('คำสั่งไม่สมบูรณ์หรือผิดรูปแบบ (ถูกคัดกรอง)');
+    expect(filteredLabels.length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText(/ะะี/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Bad Step/)).not.toBeInTheDocument();
+    mw.unmount();
+
+    // 4. CreateArtifactView blocks malformed input before calling onStartTask
+    const onStartTask = vi.fn(async () => {});
+    const cv = render(<CreateArtifactView token="tok-create" onStartTask={onStartTask} onNavigate={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('ข้อกำหนดและรายละเอียดที่ต้องการ'), {
+      target: { value: 'ะะี' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /เริ่มสร้างงาน/ }));
+    expect(await screen.findByText(/หัวข้อหรือรายละเอียดไม่สมบูรณ์หรือมีอักขระผิดรูปแบบ/)).toBeInTheDocument();
+    expect(onStartTask).not.toHaveBeenCalled();
+    cv.unmount();
+
+    // 5. ArtifactsView omits UNKNOWN/NEEDS_CLARIFICATION corrupt traces while keeping verified ones
+    mockFetch({
+      'GET /api/developer/tools': () => new Response(JSON.stringify({ workspace_files: [] }), { status: 200 }),
+      'GET /api/autonomous/missions': () => new Response(JSON.stringify({ missions: [] }), { status: 200 }),
+      'GET /api/workflows/reasoning-traces': () =>
+        new Response(
+          JSON.stringify({
+            reasoning_traces: [
+              {
+                id: 'art-bad',
+                user_id: 'u1',
+                conversation_id: null,
+                prompt: 'รายละเอียดและข้อกำหนด: ะะี',
+                mode: 'plan',
+                response_preview: 'รายละเอียดและข้อกำหนด: ะะี',
+                model_version: 'v1',
+                engine_path_json: '[]',
+                trace_json: '{}',
+                external_models_used: 0,
+                status: 'UNKNOWN',
+                latency_ms: 1,
+                created_at: '2026-11-25T00:00:00Z',
+              },
+              {
+                id: 'art-good',
+                user_id: 'u1',
+                conversation_id: null,
+                prompt: 'สรุปผลการตรวจสอบโครงสร้าง',
+                mode: 'auto',
+                response_preview: 'ผลตรวจสอบผ่านเกณฑ์ครบถ้วน',
+                model_version: 'v1',
+                engine_path_json: '[]',
+                trace_json: '{}',
+                external_models_used: 0,
+                status: 'VERIFIED',
+                latency_ms: 4,
+                created_at: '2026-11-25T00:00:05Z',
+              },
+            ],
+          }),
+          { status: 200 }
+        ),
+    });
+
+    const av = render(<ArtifactsView token="tok-art" onOpenConversation={vi.fn()} onNavigate={vi.fn()} />);
+    expect(await screen.findByText('สรุปผลการตรวจสอบโครงสร้าง')).toBeInTheDocument();
+    expect(screen.queryByText(/ะะี/)).not.toBeInTheDocument();
+    av.unmount();
+  });
 });
 
 
