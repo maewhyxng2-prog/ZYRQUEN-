@@ -92,7 +92,6 @@ export function HomeView({
   onRetry,
 }: HomeViewProps) {
   const [prompt, setPrompt] = useState('');
-  const [mode, setMode] = useState<ReasoningMode>('auto');
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -101,7 +100,7 @@ export function HomeView({
       onNavigate('workspace');
       return;
     }
-    onStartPrompt(trimmed, mode);
+    onStartPrompt(trimmed, 'auto');
     setPrompt('');
   }
 
@@ -177,90 +176,42 @@ export function HomeView({
         </div>
       </section>
 
-      {/* Primary Autonomous Command Entry Point */}
-      <section className="mb-8 rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 sm:p-6">
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <label htmlFor="home-ai-input" className="text-sm font-medium text-[var(--color-text)]">
-              สั่งงานแกนปัญญา ZYRQUEN Ω∞
-            </label>
-            <div
-              role="group"
-              aria-label="โหมดการประมวลผล"
-              className="flex flex-wrap items-center gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1"
-            >
-              {(
-                [
-                  { id: 'auto', label: 'อัตโนมัติ' },
-                  { id: 'math', label: 'คณิต AST' },
-                  { id: 'knowledge', label: 'กราฟความรู้' },
-                  { id: 'plan', label: 'แผนงาน DAG' },
-                  { id: 'model', label: 'Checkpoint' },
-                ] as const
-              ).map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => setMode(m.id)}
-                  className={`min-h-[36px] rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
-                    mode === m.id
-                      ? 'bg-[var(--color-primary)] text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
-                  }`}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
+      {/* Task-first workspace entry point */}
+      <section className="mb-8 space-y-4">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-accent)]">WORKSPACE</p>
+            <h3 className="mt-1 text-xl font-semibold text-[var(--color-text)] sm:text-2xl">คุณต้องการทำงานอะไร?</h3>
+            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">เริ่มโปรเจกต์ใหม่ วิเคราะห์โจทย์ หรือดำเนินงานต่อจากสิ่งที่ทำค้างไว้</p>
           </div>
+          <button type="button" onClick={() => onNavigate('workspace')} className="min-h-[40px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 text-sm font-medium text-[var(--color-text)] hover:border-[var(--color-accent)]">
+            เปิดพื้นที่ทำงาน <ArrowRight className="ml-1 inline h-4 w-4" />
+          </button>
+        </div>
 
-          <textarea
-            id="home-ai-input"
-            rows={3}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e);
-              }
-            }}
-            placeholder="พิมพ์คำสั่ง โจทย์คณิตศาสตร์ แผนงาน DAG หรือสอนความรู้เข้าแกนสมอง..."
-            className="w-full resize-none rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
-          />
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            { label: 'พัฒนาซอฟต์แวร์', detail: 'สร้างหรือแก้ไขโค้ดและโปรเจกต์', prompt: 'ช่วยตรวจสอบโครงสร้างโปรเจกต์และวางแผนพัฒนาซอฟต์แวร์', icon: 'code' },
+            { label: 'วิเคราะห์ข้อมูล', detail: 'ตรวจสอบข้อมูลและสรุปผล', prompt: 'ช่วยวิเคราะห์ข้อมูลที่ฉันให้ พร้อมแสดงวิธีตรวจสอบผล', icon: 'chart' },
+            { label: 'แก้โจทย์และปัญหา', detail: 'วิเคราะห์สาเหตุและหาทางแก้', prompt: 'ช่วยวิเคราะห์โจทย์นี้ แยกขั้นตอนและตรวจสอบคำตอบ', icon: 'solve' },
+            { label: 'วางแผนโครงการ', detail: 'แตกงานเป็นขั้นตอนและติดตามผล', prompt: 'ช่วยวางแผนโครงการ แยกงานย่อยและสิ่งที่ต้องตรวจสอบ', icon: 'plan' },
+          ].map((item) => (
+            <button key={item.label} type="button" onClick={() => onStartPrompt(item.prompt, 'auto')} className="group flex min-h-[112px] flex-col items-start rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 text-left transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]">
+              <span className="text-sm font-semibold text-[var(--color-text)]">{item.label}</span>
+              <span className="mt-1 text-xs leading-relaxed text-[var(--color-text-secondary)]">{item.detail}</span>
+              <span className="mt-auto pt-3 text-xs font-medium text-[var(--color-accent)]">เริ่มงาน <ArrowRight className="ml-1 inline h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" /></span>
+            </button>
+          ))}
+        </div>
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-wrap gap-2">
-              {STARTER_PROMPTS.map((starter) => (
-                <button
-                  key={starter.label}
-                  type="button"
-                  onClick={() => onStartPrompt(starter.prompt, starter.mode)}
-                  className="min-h-[36px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
-                >
-                  {starter.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={handleLaunchAutonomousLoop}
-                className="flex h-10 items-center justify-center gap-2 rounded-xl border border-[var(--zyrquen-indigo)] bg-[var(--zyrquen-indigo)]/20 px-3.5 text-xs font-semibold text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
-              >
-                <Sparkles className="h-4 w-4" />
-                <span>{prompt.trim() ? 'รันวงจร 7 ขั้น' : 'ความจำ & DAG'}</span>
-              </button>
-
-              <button
-                type="submit"
-                className="flex h-10 items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] px-5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary-hover)] whitespace-nowrap"
-              >
-                <span>{prompt.trim() ? 'ส่งคำสั่ง' : 'เปิดเวิร์กสเปซ'}</span>
-                <ArrowRight className="h-4 w-4" />
-              </button>
-            </div>
+        <form onSubmit={handleSubmit} className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4 sm:p-5">
+          <label htmlFor="home-ai-input" className="text-sm font-semibold text-[var(--color-text)]">กำหนดเป้าหมายของงาน</label>
+          <textarea id="home-ai-input" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(e); } }} placeholder="อธิบายสิ่งที่ต้องการสร้าง วิเคราะห์ หรือแก้ไข..." className="mt-3 w-full resize-y rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none" />
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-[var(--color-text-muted)]">ZYRQUEN จะรับเป้าหมายและเริ่มกระบวนการทำงานตามความสามารถที่ระบบรองรับ</p>
+            <button type="submit" className="flex min-h-[42px] items-center justify-center gap-2 rounded-xl bg-[var(--color-primary)] px-5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary-hover)]">
+              เริ่มดำเนินงาน <ArrowRight className="h-4 w-4" />
+            </button>
           </div>
         </form>
       </section>
@@ -288,7 +239,7 @@ export function HomeView({
             <section>
               <div className="mb-3 flex items-center justify-between">
                 <h3 className="text-base font-semibold text-[var(--color-text)]">
-                  ปฏิบัติการอัตโนมัติล่าสุด
+                  งานที่ดำเนินการล่าสุด
                 </h3>
                 <button
                   type="button"
@@ -324,14 +275,14 @@ export function HomeView({
           <section>
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-base font-semibold text-[var(--color-text)]">
-                บทสนทนาและสั่งงานล่าสุด
+                งานล่าสุด
               </h3>
               <button
                 type="button"
                 onClick={() => onNavigate('workspace')}
                 className="min-h-[36px] px-2 text-xs font-medium text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] whitespace-nowrap"
               >
-                ดูเวิร์กสเปซ
+                ดูงานทั้งหมด
               </button>
             </div>
 
@@ -341,14 +292,14 @@ export function HomeView({
               ) : recent.length === 0 ? (
                 <div className="flex flex-col items-start gap-3 p-6">
                   <p className="text-sm text-[var(--color-text-secondary)]">
-                    ยังไม่มีประวัติบทสนทนา พิมพ์คำสั่งด้านบนหรือเลือกตัวอย่างเริ่มต้นเพื่อเริ่มใช้งาน
+                    ยังไม่มีงานก่อนหน้า เริ่มกำหนดเป้าหมายงานแรกได้จากด้านบน
                   </p>
                   <button
                     type="button"
                     onClick={() => onNavigate('workspace')}
                     className="min-h-[38px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 text-xs font-medium text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
                   >
-                    เปิดเวิร์กสเปซเปล่า
+                    เปิดพื้นที่ทำงาน
                   </button>
                 </div>
               ) : (
