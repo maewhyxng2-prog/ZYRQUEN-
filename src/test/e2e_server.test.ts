@@ -78,6 +78,17 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
       Authorization: `Bearer ${setupJson.token}`,
     };
 
+    const artifactSaveRes = await fetch(`${baseUrl}/api/developer/workspace-files`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ filename: 'e2e-report.md', content: '# E2E Artifact\\nVerified workspace output' }),
+    });
+    expect(artifactSaveRes.status).toBe(201);
+    const artifactListRes = await fetch(`${baseUrl}/api/developer/tools`, { headers: authHeaders });
+    expect(artifactListRes.status).toBe(200);
+    const artifactListJson = (await artifactListRes.json()) as { workspace_files: Array<{ name: string }> };
+    expect(artifactListJson.workspace_files.some((file) => file.name === 'e2e-report.md')).toBe(true);
+
     // Workspace projects use authenticated, owner-scoped persistent API storage.
     const projectCreateRes = await fetch(`${baseUrl}/api/projects`, {
       method: 'POST',
@@ -332,6 +343,13 @@ describe('Full-Stack Real E2E: Express + SQLite + Python Native Core (Zero Fetch
     expect(meRes.status).toBe(200);
     const meJson = (await meRes.json()) as { user: { role: string } };
     expect(meJson.user.role).toBe('user');
+
+    const memberArtifactsRes = await fetch(`${baseUrl}/api/developer/tools`, {
+      headers: { Authorization: `Bearer ${regJson.token}` },
+    });
+    expect(memberArtifactsRes.status).toBe(200);
+    const memberArtifacts = (await memberArtifactsRes.json()) as { workspace_files: Array<{ name: string }> };
+    expect(memberArtifacts.workspace_files.some((file) => file.name === 'e2e-report.md')).toBe(false);
 
     const adminOverviewRes = await fetch(`${baseUrl}/api/admin/overview`, {
       headers: { Authorization: `Bearer ${regJson.token}` },
