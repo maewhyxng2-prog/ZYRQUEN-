@@ -7,7 +7,7 @@ import { ArtifactsView } from './components/ArtifactsView';
 import { AuthGate } from './components/AuthGate';
 import { CommandPalette } from './components/CommandPalette';
 import { HomeView } from './components/HomeView';
-import { MemoryWorkflowsView } from './components/MemoryWorkflowsView';
+import { TasksView } from './components/TasksView';
 import { SettingsView } from './components/SettingsView';
 import { WorkspaceView } from './components/WorkspaceView';
 import { apiRequest, ApiError, streamConversationMessage } from './lib/api';
@@ -41,7 +41,7 @@ function readRouteFromUrl(): {
   const screen: AppScreen =
     view === 'workspace' || view === 'memory' || view === 'settings' || view === 'projects' || view === 'analysis' || view === 'artifacts' ? view : 'home';
   const settingsTab: SettingsTab =
-    tab === 'developer' || tab === 'admin' ? tab : 'account';
+    tab === 'developer' || tab === 'admin' || tab === 'knowledge' ? tab : 'account';
 
   return { screen, conversationId: cid || null, settingsTab };
 }
@@ -1020,7 +1020,7 @@ export default function App() {
 
           {screen === 'projects' && <ProjectsView token={token} />}
 
-          {screen === 'memory' && <MemoryWorkflowsView token={token} user={user} />}
+          {screen === 'memory' && <TasksView token={token} />}
 
           {screen === 'artifacts' && <ArtifactsView token={token} />}
 
