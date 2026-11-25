@@ -12,6 +12,7 @@ import { AuthGate } from '../components/AuthGate';
 import { MemoryWorkflowsView } from '../components/MemoryWorkflowsView';
 import { ProjectsView } from '../components/ProjectsView';
 import { TasksView } from '../components/TasksView';
+import { WorkspaceView } from '../components/WorkspaceView';
 import { SettingsView } from '../components/SettingsView';
 import { SpacetimeFabric } from '../components/SpacetimeFabric';
 import { TemporalIntelligenceCore } from '../components/TemporalIntelligenceCore';
@@ -34,7 +35,33 @@ function mockFetch(handlers: Record<string, (init?: RequestInit) => Response | P
   }) as unknown as typeof fetch;
 }
 
-describe('ZYRQUEN ประสบการณ์แอปพลิเคชันภาษาไทยเป็นหลัก', () => {
+describe('ZYRQUEN ประสบการณ์แอปพลิเคชันภาษาไทยเป็นหลัก', () => {  it('คัดลอกข้อความตอบกลับของ ZYRQUEN ได้จริงและแสดงสถานะสำเร็จ', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    render(
+      <WorkspaceView
+        token="test-token"
+        conversations={[]}
+        activeConversationId="c1"
+        activeTitle="งานทดสอบ"
+        messages={[{ id: 'm1', conversation_id: 'c1', role: 'assistant', content: 'สวัสดีครับ\\nผลลัพธ์พร้อมใช้งาน', mode: 'auto', trace_json: null, status: 'VERIFIED', created_at: '2026-11-25T00:00:00Z' }]}
+        loadingThread={false}
+        sending={false}
+        error={null}
+        autoExpandTrace={false}
+        defaultMode="auto"
+        onSelectConversation={() => {}}
+        onNewConversation={() => {}}
+        onDeleteConversation={() => {}}
+        onSendMessage={async () => {}}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'คัดลอกข้อความ' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('สวัสดีครับ\\nผลลัพธ์พร้อมใช้งาน'));
+    expect(await screen.findByRole('button', { name: 'คัดลอกแล้ว' })).toBeInTheDocument();
+  });
+
+
   it('แสดงงานจาก Native Mission API และเริ่มดำเนินงานผ่าน API', async () => {
     const mission = { id: 'm1', goal: 'ตรวจสอบโค้ด', status: 'COMPLETED', created_at: '2026-11-25T00:00:00Z', updated_at: '2026-11-25T00:00:00Z', report_markdown: 'ผลตรวจสอบผ่าน' };
     mockFetch({
