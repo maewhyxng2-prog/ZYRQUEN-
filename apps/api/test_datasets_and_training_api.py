@@ -163,6 +163,9 @@ def test_training_readiness_and_runs_list(api_client, monkeypatch):
     assert "worker_ready" in body
     assert body["tier2_approval_required"] is True
     assert body["is_training_admin"] is True
+    assert body["approval_ready"] is False
+    assert body["approved_training_approvals"] == 0
+    assert body["status"] != "ready"
     assert len(body["reasons"]) >= 1
 
     runs_resp = client.get("/training/runs")
@@ -347,3 +350,53 @@ def test_training_readiness_enforces_v11_four_split_and_leakage_detection(api_cl
     assert res_clean["tokenizer"]["valid"] is True
     assert res_clean["preflight"]["passed"] is True
     assert res_clean["preflight"]["resource_limits_checked"] is True
+
+
+
+def test_training_readiness_counts_only_valid_signed_approvals(api_client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    client, _, _, _ = api_client
+    approval = {
+        "id": "approval-1",
+        "run_id": "run-1",
+        "step_key": "execute_training",
+        "action_type": "training.execute",
+        "scope": "dataset:nagi_v11",
+        "status": "approved",
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+        "signature_hmac": "valid-signature",
+    }
+
+    class FakeStore:
+        def list_approvals(self, *, status, limit):
+            return [approval] if status == "approved" else []
+
+        def get_approval(self, approval_id):
+            return approval if approval_id == approval["id"] else None
+
+    class FakeGovernance:
+        store = FakeStore()
+
+        @staticmethod
+        def _compute_signature(**kwargs):
+            return "valid-signature"
+
+    class FakeEngine:
+        governance = FakeGovernance()
+
+    monkeypatch.setattr(
+        training_router, "get_workflow_engine", lambda: FakeEngine()
+    )
+
+    valid = client.get("/training/readiness")
+    assert valid.status_code == 200
+    assert valid.json()["approved_training_approvals"] == 1
+    assert valid.json()["approval_ready"] is True
+
+    approval["signature_hmac"] = "tampered-signature"
+    invalid = client.get("/training/readiness")
+    assert invalid.status_code == 200
+    assert invalid.json()["approved_training_approvals"] == 0
+    assert invalid.json()["approval_ready"] is False
+    assert invalid.json()["status"] != "ready"
