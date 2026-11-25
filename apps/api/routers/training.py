@@ -139,67 +139,55 @@ def start_training(
     current_user: User = Depends(require_training_admin),
     db: Session = Depends(get_db),
 ):
+    # Tier-2 approval is mandatory for every dispatch path, including when
+    # dataset/tokenizer configuration is incomplete. Fail closed before any
+    # job can be queued; preparation failures must not consume the approval.
+    approval_id = (request.approval_id or "").strip()
+    if not approval_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tier-2 workflow approval_id is required to execute native training.",
+        )
+
+    engine = get_workflow_engine()
     try:
-        # Preserve HTTP 503 when dataset/tokenizer paths are not yet configured;
-        # once configured, enforce Tier-2 HMAC workflow approval before execution.
-        if (
-            jobs._orchestrator.dataset_dir is not None
-            and jobs._orchestrator.tokenizer_path is not None
-        ):
-            approval_id = (request.approval_id or "").strip()
-            if not approval_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Tier-2 workflow approval_id is required to execute native training.",
-                )
-            engine = get_workflow_engine()
-            try:
-                _verify_training_approval_readonly(engine, approval_id)
-            except ApprovalViolationError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Tier-2 training approval rejected: {exc}",
-                ) from exc
+        _verify_training_approval_readonly(engine, approval_id)
+    except ApprovalViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Tier-2 training approval rejected: {exc}",
+        ) from exc
 
-            if jobs.is_busy():
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="A training job is already active.",
-                )
-            training_cfg = request.training.model_dump()
-            model_cfg = request.model.model_dump()
-            prepared = jobs._orchestrator.prepare(
-                dataset_version=request.dataset_version,
-                training_values=training_cfg,
-                model_values=model_cfg,
+    try:
+        if jobs.is_busy():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A training job is already active.",
             )
-
-            try:
-                return jobs.submit_prepared(
-                    db,
-                    owner_id=current_user.id,
-                    dataset_version=request.dataset_version,
-                    training_config=training_cfg,
-                    model_config=model_cfg,
-                    prepared=prepared,
-                    before_enqueue=lambda: engine.governance.verify_and_consume_by_id(
-                        approval_id,
-                        expected_action_type="training.execute",
-                    ),
-                )
-            except ApprovalViolationError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Tier-2 training approval rejected: {exc}",
-                ) from exc
-
-        return jobs.submit(
+        training_cfg = request.training.model_dump()
+        model_cfg = request.model.model_dump()
+        prepared = jobs._orchestrator.prepare(
+            dataset_version=request.dataset_version,
+            training_values=training_cfg,
+            model_values=model_cfg,
+        )
+        return jobs.submit_prepared(
             db,
             owner_id=current_user.id,
             dataset_version=request.dataset_version,
-            training_config=request.training.model_dump(),
-            model_config=request.model.model_dump(),
+            training_config=training_cfg,
+            model_config=model_cfg,
+            prepared=prepared,
+            before_enqueue=lambda: engine.governance.verify_and_consume_by_id(
+                approval_id,
+                expected_action_type="training.execute",
+            ),
         )
+    except ApprovalViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Tier-2 training approval rejected: {exc}",
+        ) from exc
     except TrainingJobBusy as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
