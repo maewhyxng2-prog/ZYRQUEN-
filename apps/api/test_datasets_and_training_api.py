@@ -279,6 +279,32 @@ def test_training_start_enforces_tier2_approval_when_artifacts_configured(api_cl
         isolated_engine.shutdown(wait=True)
 
 
+
+def test_training_start_requires_tier2_approval_when_artifacts_are_unconfigured(api_client, monkeypatch):
+    client, _, _, _ = api_client
+    monkeypatch.setattr(training_router.jobs._orchestrator, "dataset_dir", None)
+    monkeypatch.setattr(training_router.jobs._orchestrator, "tokenizer_path", None)
+
+    def unexpected_prepare(**kwargs):
+        raise AssertionError("Training preparation must not run before approval verification.")
+
+    monkeypatch.setattr(training_router.jobs._orchestrator, "prepare", unexpected_prepare)
+
+    missing = client.post(
+        "/training/runs",
+        json={"dataset_version": "0.1.0"},
+    )
+    assert missing.status_code == 403
+    assert "approval_id is required" in missing.json()["detail"]
+
+    forged = client.post(
+        "/training/runs",
+        json={"dataset_version": "0.1.0", "approval_id": "forged-unconfigured-id"},
+    )
+    assert forged.status_code == 403
+    assert "Tier-2 training approval rejected" in forged.json()["detail"]
+
+
 def _build_v11_dataset(target_dir: Path, *, leak: bool = False) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
     splits = {
