@@ -124,7 +124,7 @@ export function AppShell({
             </span>
           </button>
 
-          <nav aria-label="เมนูหลัก" className="flex items-center gap-6">
+          <nav aria-label="เมนูหลัก" className="flex items-center gap-3">
             {NAV_ITEMS.map((item) => {
               const active = activeScreen === item.id;
               return (
