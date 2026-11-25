@@ -785,6 +785,33 @@ class ToolCenterRegistry:
                 r3["ok"] and r3["output"].get("valid") is False,
                 "Code contract rejects path traversal ../escape.py",
             )
+            r4 = self.execute(
+                "development.workspace_file",
+                {"action": "write", "filename": "_probe_ws.txt", "content": "probe-ok"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r5 = self.execute(
+                "development.workspace_file",
+                {"action": "read", "filename": "_probe_ws.txt"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            r6 = self.execute(
+                "development.workspace_file",
+                {"action": "read", "filename": "../outside.txt"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "dev_workspace_file_roundtrip_and_guard",
+                bool(r4["ok"] and r5["ok"] and r5["output"].get("content") == "probe-ok" and not r6["ok"]),
+                "Workspace sandbox file write/read succeeds and path traversal fails closed",
+            )
+            if data_dir is not None:
+                probe_path = Path(data_dir) / "workspace_files" / "_probe_ws.txt"
+                if probe_path.exists():
+                    probe_path.unlink(missing_ok=True)
 
         elif tid == "data":
             r1 = self.execute(

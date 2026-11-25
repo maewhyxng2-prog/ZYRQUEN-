@@ -383,6 +383,196 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
         self.assertEqual(bench["metrics"]["regression_rate"], 0.0)
         self.assertFalse(bench["external_models_used"])
 
+    def test_all_34_capabilities_orchestrated_e2e(self) -> None:
+        all_ids = self.registry.list_capability_ids()
+        self.assertEqual(len(all_ids), 34)
+
+        # Seed a real dataset and KG relation in the isolated test DB
+        ingest = zc.handle_ingest_dataset({
+            "name": "e2e_qa_ds",
+            "format": "csv",
+            "content": (
+                "subject,relation,object\n"
+                "sqlite,uses_journal,wal\n"
+                "zyrquen,enforces_policy,native_only\n"
+                "orchestrator,schedules,dag_waves\n"
+                "sandbox,isolates,network_and_env\n"
+                "audit,records,tool_invocations\n"
+                "verification,enforces,strict_gate\n"
+            ),
+            "user_id": "admin-1",
+        })
+        self.assertTrue(ingest["ok"])
+        dataset_id = ingest["dataset"]["id"]
+
+        steps_ready_auto: list[dict] = [
+            {"step_id": "s01", "capability_id": "development.code_analysis", "input": {"language": "python", "source": "def ok(x):\n    return x + 1\n"}, "depends_on": []},
+            {"step_id": "s02", "capability_id": "development.contract_validate", "input": {"kind": "output", "payload": {"task_id": "t1", "language": "python", "files": [{"path": "ok.py", "content": "x = 1"}]}}, "depends_on": []},
+            {"step_id": "s03_w", "capability_id": "development.workspace_file", "input": {"action": "write", "filename": "e2e_note.md", "content": "# Note\nVerified"}, "depends_on": []},
+            {"step_id": "s03_r", "capability_id": "development.workspace_file", "input": {"action": "read", "filename": "e2e_note.md"}, "depends_on": ["s03_w"]},
+            {"step_id": "s04", "capability_id": "development.git_inspect", "input": {"limit": 2}, "depends_on": []},
+            {"step_id": "s05", "capability_id": "data.leakage_check", "input": {"train": ["alpha one"], "validation": ["beta two"], "test": ["gamma three"]}, "depends_on": []},
+            {"step_id": "s06", "capability_id": "data.profile_structured", "input": {"format": "csv", "content": "k,v\na,1\nb,2\n"}, "depends_on": []},
+            {"step_id": "s07", "capability_id": "data.transform", "input": {"format": "csv", "content": "k,v\na,1\na,1\n", "deduplicate": True, "trim_whitespace": True}, "depends_on": []},
+            {"step_id": "s08", "capability_id": "data.db_inspect", "input": {"table_limit": 10}, "depends_on": []},
+            {"step_id": "s09", "capability_id": "data.calc_ast", "input": {"expression": "6 * 7"}, "depends_on": []},
+            {"step_id": "s10", "capability_id": "research.knowledge_retrieve", "input": {"query": "ZYRQUEN"}, "depends_on": []},
+            {"step_id": "s11", "capability_id": "research.url_validate", "input": {"url": "https://en.wikipedia.org/wiki/SQLite"}, "depends_on": []},
+            {
+                "step_id": "s12",
+                "capability_id": "research.evidence_corroborate",
+                "input": {
+                    "topic": "SQLite WAL",
+                    "sources": [
+                        {"url": "https://www.sqlite.org/wal.html", "provider": "sqlite.org", "claim": "WAL supports concurrent readers."},
+                        {"url": "https://en.wikipedia.org/wiki/SQLite", "provider": "wikipedia", "claim": "WAL supports concurrent readers."},
+                    ],
+                },
+                "depends_on": [],
+            },
+            {"step_id": "s13", "capability_id": "testing.toolkit_self_test", "input": {"toolkit_id": "data"}, "depends_on": []},
+            {"step_id": "s14", "capability_id": "testing.dataset_verify", "input": {"dataset_id": dataset_id}, "depends_on": []},
+            {"step_id": "s15", "capability_id": "testing.contract_assertion", "input": {"cases": [{"name": "ok", "op": "eq", "actual": 42, "expected": 42}]}, "depends_on": ["s09"]},
+            {"step_id": "s16", "capability_id": "testing.sandbox_run", "input": {"source": "print(21 * 2)"}, "depends_on": []},
+            {"step_id": "s17", "capability_id": "testing.engineering_benchmark", "input": {}, "depends_on": []},
+            {"step_id": "s18", "capability_id": "automation.workflow_execute", "input": {"group_id": "system_ops"}, "depends_on": []},
+            {"step_id": "s19", "capability_id": "automation.task_compose", "input": {"goal": "วิเคราะห์ข้อมูลและตรวจสอบความปลอดภัย"}, "depends_on": []},
+            {"step_id": "s20", "capability_id": "automation.workflow_status", "input": {"limit": 5}, "depends_on": ["s18"]},
+            {"step_id": "s21", "capability_id": "document.markdown_outline", "input": {"content": "# Header\n\n## Sub\nText\n"}, "depends_on": []},
+            {
+                "step_id": "s22",
+                "capability_id": "document.conversation_summary",
+                "input": {"messages": [{"role": "user", "content": "calc 6*7", "status": "VERIFIED"}]},
+                "depends_on": [],
+            },
+            {
+                "step_id": "s23",
+                "capability_id": "document.spec_generate",
+                "input": {
+                    "title": "E2E Verified Spec",
+                    "objective": "Verify artifact disk QA check",
+                    "constraints": ["Zero external LLMs"],
+                    "save_to_workspace": True,
+                    "filename": "e2e_spec.md",
+                },
+                "depends_on": [],
+            },
+            {"step_id": "s24", "capability_id": "api_integration.contract_validate", "input": {"method": "GET", "endpoint": "/api/health"}, "depends_on": []},
+            {"step_id": "s25", "capability_id": "api_integration.internal_health", "input": {}, "depends_on": []},
+            {"step_id": "s26", "capability_id": "security.native_policy_audit", "input": {"source": "import json\nx = json.dumps({'ok': True})\n"}, "depends_on": []},
+            {"step_id": "s27", "capability_id": "security.dependency_audit", "input": {}, "depends_on": []},
+            {"step_id": "s28", "capability_id": "security.secret_and_path_scan", "input": {"path": "safe_file.py", "content": "status = 'VERIFIED'"}, "depends_on": []},
+            {"step_id": "s29", "capability_id": "security.governance_audit", "input": {"limit": 5}, "depends_on": []},
+        ]
+
+        plan_res = execute_orchestrated_plan(
+            self.registry,
+            "E2E verification of all 29 READY non-P5 capabilities",
+            steps_ready_auto,
+            conn=self.conn,
+            data_dir=self.data_dir,
+            user_id="admin-1",
+            user_role="admin",
+            enable_parallel=False,
+        )
+        self.assertTrue(plan_res["ok"], f"Plan failed: {plan_res}")
+        self.assertEqual(plan_res["delivery_verdict"], "SUCCESS")
+        self.assertEqual(plan_res["qa_summary"]["steps_failed"], 0)
+        by_sid = {s["step_id"]: s for s in plan_res["steps"]}
+        self.assertEqual(by_sid["s03_r"]["output"].get("content"), "# Note\nVerified")
+        self.assertEqual(by_sid["s23"]["qa"]["verdict"], "SUCCESS")
+
+        # Verify P5 Approval-Gated capabilities pause honestly for user role
+        for cap_id, payload in (
+            ("research.web_search", {"query": "SQLite"}),
+            ("research.doc_fetch", {"url": "https://en.wikipedia.org/wiki/SQLite"}),
+            ("api_integration.webhook_dispatch", {"url": "https://en.wikipedia.org/wiki/Webhook", "body": {"ok": True}, "dry_run": True}),
+        ):
+            p5_res = execute_orchestrated_plan(
+                self.registry,
+                f"P5 gate check: {cap_id}",
+                [{"step_id": "p5", "capability_id": cap_id, "input": payload, "depends_on": []}],
+                conn=self.conn,
+                data_dir=self.data_dir,
+                user_id="user-1",
+                user_role="user",
+            )
+            self.assertEqual(p5_res["delivery_verdict"], "PENDING_APPROVAL")
+
+        # Verify IN_DEVELOPMENT capabilities fail closed inside Orchestrator
+        for dev_cap, dev_in in (
+            ("development.build_validate", {"specification": {}, "manifest": {}}),
+            ("document.binary_office_parser", {"format": "pdf", "filename": "doc.pdf"}),
+        ):
+            in_dev_res = execute_orchestrated_plan(
+                self.registry,
+                f"In-dev fail closed: {dev_cap}",
+                [{"step_id": "indev", "capability_id": dev_cap, "input": dev_in, "depends_on": []}],
+                conn=self.conn,
+                data_dir=self.data_dir,
+                user_id="admin-1",
+                user_role="admin",
+            )
+            self.assertFalse(in_dev_res["ok"])
+            self.assertEqual(in_dev_res["steps"][0]["qa"]["verdict"], "UNVERIFIED")
+
+        # Confirm every single one of the 34 registered capabilities was tested above
+        exercised = {s["capability_id"] for s in steps_ready_auto} | {
+            "research.web_search",
+            "research.doc_fetch",
+            "api_integration.webhook_dispatch",
+            "development.build_validate",
+            "document.binary_office_parser",
+        }
+        self.assertEqual(exercised, set(all_ids))
+
+    def test_chat_autonomous_goal_orchestrator_end_to_end(self) -> None:
+        # 1. Python code generation goal passes through execute_orchestrated_plan + sandbox verification
+        py_goal = zc._try_execute_chat_autonomous_goal(
+            self.conn,
+            "สร้างโมดูลบริการ API endpoint สำหรับตรวจสอบคำขอ",
+            user_id="u-chat",
+        )
+        self.assertIsNotNone(py_goal)
+        assert py_goal is not None
+        self.assertEqual(py_goal["status"], "VERIFIED")
+        self.assertTrue(py_goal["deliverable"]["verified"])
+        self.assertEqual(py_goal["deliverable"]["language"], "python")
+        self.assertIn("tool_center_orchestrator", py_goal["engine_path"])
+        run_ids = py_goal["orchestration"]["run_ids"]
+        self.assertGreaterEqual(len(run_ids), 2)
+        run_row = self.conn.execute(
+            "SELECT status FROM orchestration_runs WHERE id=?",
+            (run_ids[-1],),
+        ).fetchone()
+        self.assertIsNotNone(run_row)
+        self.assertEqual(run_row["status"], "SUCCESS")
+
+        # 2. TypeScript code generation goal passes contract + security + assertion verification
+        ts_goal = zc._try_execute_chat_autonomous_goal(
+            self.conn,
+            "Create TypeScript service module for workspace analytics",
+            user_id="u-chat",
+        )
+        self.assertIsNotNone(ts_goal)
+        assert ts_goal is not None
+        self.assertEqual(ts_goal["status"], "VERIFIED")
+        self.assertEqual(ts_goal["deliverable"]["language"], "typescript")
+        self.assertTrue(ts_goal["deliverable"]["verified"])
+
+        # 3. Document goal passes spec_generate + markdown_outline + secret_scan verification
+        doc_goal = zc._try_execute_chat_autonomous_goal(
+            self.conn,
+            "สร้างเอกสารสรุปสถาปัตยกรรมและรายการตรวจสอบความพร้อมระบบ",
+            attachment="id,score\n1,95\n1,95\n",
+            user_id="u-chat",
+        )
+        self.assertIsNotNone(doc_goal)
+        assert doc_goal is not None
+        self.assertEqual(doc_goal["status"], "VERIFIED")
+        self.assertEqual(doc_goal["deliverable"]["filename"], "zyrquen-architecture-readiness.md")
+        self.assertTrue(doc_goal["deliverable"]["verified"])
+
 
 if __name__ == "__main__":
     unittest.main()

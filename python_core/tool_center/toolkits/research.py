@@ -107,8 +107,11 @@ def _handle_evidence_corroborate(payload: dict[str, Any], _ctx: dict[str, Any]) 
 
 
 def _handle_web_search(payload: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    conn = ctx.get("conn")
+    if conn is None:
+        return {"ok": False, "status": "BLOCKED", "error": "Database connection unavailable.", "output": {}}
     res = te.invoke_tool_governed(
-        ctx["conn"],
+        conn,
         ctx["data_dir"],
         "web_search",
         {"query": str(payload.get("query") or "").strip()},
@@ -126,7 +129,7 @@ def _handle_web_search(payload: dict[str, Any], ctx: dict[str, Any]) -> dict[str
         "output": {
             "tool_invocation": res.get("invocation"),
             "analysis": res.get("analysis"),
-            "tool_output": res.get("output"),
+            "tool_output": res.get("raw_output") or res.get("output"),
         },
         "summary": str((res.get("analysis") or {}).get("summary") or f"web_search status: {res.get('status')}"),
         "error": res.get("error"),
@@ -134,8 +137,11 @@ def _handle_web_search(payload: dict[str, Any], ctx: dict[str, Any]) -> dict[str
 
 
 def _handle_doc_fetch(payload: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    conn = ctx.get("conn")
+    if conn is None:
+        return {"ok": False, "status": "BLOCKED", "error": "Database connection unavailable.", "output": {}}
     res = te.invoke_tool_governed(
-        ctx["conn"],
+        conn,
         ctx["data_dir"],
         "doc_fetch",
         {"url": str(payload.get("url") or "").strip()},
@@ -153,7 +159,7 @@ def _handle_doc_fetch(payload: dict[str, Any], ctx: dict[str, Any]) -> dict[str,
         "output": {
             "tool_invocation": res.get("invocation"),
             "analysis": res.get("analysis"),
-            "tool_output": res.get("output"),
+            "tool_output": res.get("raw_output") or res.get("output"),
         },
         "summary": str((res.get("analysis") or {}).get("summary") or f"doc_fetch status: {res.get('status')}"),
         "error": res.get("error"),

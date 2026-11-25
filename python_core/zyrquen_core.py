@@ -2612,7 +2612,6 @@ def _try_execute_chat_autonomous_goal(
         return None
 
     t0 = time.perf_counter()
-    # Ensure REPO_ROOT is importable for tool_center.toolkits.development
     repo_root_str = str(Path(__file__).resolve().parent.parent)
     if repo_root_str not in sys.path:
         sys.path.insert(0, repo_root_str)
@@ -2631,16 +2630,16 @@ def _try_execute_chat_autonomous_goal(
         }
     ]
 
-    # Resolve relevant capabilities from internal Tool Center behind the scenes
-    t_tc = time.perf_counter()
-    selected_caps: list[str] = []
-    try:
-        from tool_center import get_tool_center_registry
+    from tool_center import execute_orchestrated_plan, get_tool_center_registry
 
-        tc_reg = get_tool_center_registry()
+    tc_reg = get_tool_center_registry()
+
+    # Stage 1: Toolkit Resolution (internal Registry + Task Memory)
+    t_tc = time.perf_counter()
+    try:
         tc_plan = tc_reg.compose_for_goal(cleaned, user_role="user", conn=conn)
         selected_caps = [
-            f"{c['capability_id']}" for c in (tc_plan.get("selected_capabilities") or [])[:5]
+            f"{c['capability_id']}" for c in (tc_plan.get("selected_capabilities") or [])[:6]
         ]
     except Exception:
         selected_caps = []
@@ -2654,44 +2653,95 @@ def _try_execute_chat_autonomous_goal(
         }
     )
 
-    # Inspect live workspace architecture
-    t_repo = time.perf_counter()
-    repo_info: dict = {}
-    try:
-        from tool_center.toolkits import development as dev_tk
-
-        repo_res = dev_tk._inspect_repository_target(".")
-        if repo_res.get("ok"):
-            repo_info = repo_res.get("output") or {}
-    except Exception:
-        repo_info = {}
-    timings.append(
+    # Stage 2: Execute Wave 1 inspection via real Orchestrator & Execution Engine
+    t_w1 = time.perf_counter()
+    wave1_steps: list[dict] = [
         {
-            "task": "workspace_inspection",
-            "duration_ms": round((time.perf_counter() - t_repo) * 1000, 3),
-            "matched": bool(repo_info),
-            "status": "VERIFIED" if repo_info else "SKIPPED",
-        }
-    )
+            "step_id": "inspect_repo",
+            "capability_id": "development.code_analysis",
+            "input": {"target_path": "."},
+            "depends_on": [],
+        },
+        {
+            "step_id": "inspect_db",
+            "capability_id": "data.db_inspect",
+            "input": {"table_limit": 20},
+            "depends_on": [],
+        },
+    ]
 
-    # Analyze attached context if provided
-    attach_summary_lines: list[str] = []
+    ds_rep = analyze_structured_dataset_content(attachment) if attachment else {"ok": False}
     if attachment:
-        ds_rep = analyze_structured_dataset_content(attachment)
         if ds_rep.get("ok"):
-            attach_summary_lines.append(
-                f"ข้อมูลที่แนบ: {ds_rep.get('format')} ({ds_rep.get('rows', 0)} แถว, คอลัมน์ {', '.join(ds_rep.get('columns', [])[:8])})"
+            wave1_steps.append(
+                {
+                    "step_id": "inspect_attachment_data",
+                    "capability_id": "data.profile_structured",
+                    "input": {
+                        "format": str(ds_rep.get("format") or "csv").lower(),
+                        "content": attachment[:15000],
+                    },
+                    "depends_on": [],
+                }
             )
         else:
-            code_rep = inspect_workspace_code_content(attachment)
-            if code_rep.get("ok"):
+            wave1_steps.append(
+                {
+                    "step_id": "inspect_attachment_code",
+                    "capability_id": "development.code_analysis",
+                    "input": {"source": attachment[:15000]},
+                    "depends_on": [],
+                }
+            )
+
+    wave1_res = execute_orchestrated_plan(
+        tc_reg,
+        f"inspect:{cleaned[:180]}",
+        wave1_steps,
+        conn=conn,
+        data_dir=DATA_DIR,
+        user_id=user_id or "system",
+        user_role="user",
+        enable_parallel=True,
+    )
+    wave1_by_id = {s["step_id"]: s for s in (wave1_res.get("steps") or [])}
+    repo_info = (wave1_by_id.get("inspect_repo") or {}).get("output") or {}
+    db_info = (wave1_by_id.get("inspect_db") or {}).get("output") or {}
+
+    attach_summary_lines: list[str] = []
+    if attachment:
+        if ds_rep.get("ok"):
+            prof_out = (wave1_by_id.get("inspect_attachment_data") or {}).get("output") or {}
+            cols = prof_out.get("columns") or ds_rep.get("columns") or []
+            row_count = prof_out.get("row_count", ds_rep.get("rows", 0))
+            dup_count = prof_out.get("duplicate_rows", 0)
+            attach_summary_lines.append(
+                f"ข้อมูลที่แนบ: {ds_rep.get('format')} ({row_count} แถว, ซ้ำ {dup_count} แถว, คอลัมน์ {', '.join(cols[:8])})"
+            )
+        else:
+            code_out = (wave1_by_id.get("inspect_attachment_code") or {}).get("output") or {}
+            code_lang = code_out.get("language") or "text"
+            val_status = (code_out.get("validation") or {}).get("status") or "checked"
+            attach_summary_lines.append(
+                f"โค้ด/ข้อความที่แนบ ({code_lang}): สถานะตรวจสอบ `{val_status}`"
+            )
+            for defect in (code_out.get("defects") or [])[:5]:
                 attach_summary_lines.append(
-                    f"โค้ดที่แนบ ({code_rep.get('language')}): {code_rep.get('summary', 'ตรวจสอบแล้ว')}"
+                    f"- บรรทัด {defect.get('line', '?')}: {defect.get('message')}"
                 )
-                for defect in (code_rep.get("defects") or [])[:5]:
-                    attach_summary_lines.append(
-                        f"- บรรทัด {defect.get('line', '?')}: {defect.get('message')}"
-                    )
+
+    run_ids = [wave1_res["run_id"]] if wave1_res.get("run_id") else []
+    caps_executed = [s["capability_id"] for s in (wave1_res.get("steps") or [])]
+
+    timings.append(
+        {
+            "task": "orchestrator_inspect",
+            "duration_ms": round((time.perf_counter() - t_w1) * 1000, 3),
+            "matched": bool(wave1_res.get("ok")),
+            "status": str(wave1_res.get("delivery_verdict") or "FAILED"),
+            "detail": f"run={wave1_res.get('run_id', '')[:8]}",
+        }
+    )
 
     low = cleaned.lower()
     is_doc_goal = any(
@@ -2714,13 +2764,12 @@ def _try_execute_chat_autonomous_goal(
     counts = repo_info.get("file_counts") or {}
     top_dirs = repo_info.get("top_directories") or []
     sample_mods = repo_info.get("sample_python_modules") or []
+    db_tables_count = len(db_info.get("tables") or [])
 
     t_exec = time.perf_counter()
     engine_path = ["native_planner", "tool_center", "tool_center_orchestrator"]
 
     if is_doc_goal:
-        from tool_center.toolkits import document as doc_tk
-
         sections = [
             {
                 "heading": "1. โครงสร้างระบบจริงใน Workspace",
@@ -2740,6 +2789,7 @@ def _try_execute_chat_autonomous_goal(
             {
                 "heading": "3. สถานะความพร้อมจากฐานข้อมูลจริง",
                 "body": (
+                    f"- ตาราง SQLite ที่ตรวจพบ: `{db_tables_count}` ตาราง\n"
                     f"- ชุดข้อมูลผ่านเกณฑ์: `{snap.get('clean_datasets', 0)}` ชุด\n"
                     f"- รุ่นโมเดลภายใน (Checkpoints): `{snap.get('checkpoints', 0)}` รุ่น\n"
                     f"- ความจำกราฟความรู้: `{snap.get('triples', 0)}` รายการ\n"
@@ -2756,24 +2806,78 @@ def _try_execute_chat_autonomous_goal(
             )
 
         doc_title = cleaned[:72]
-        spec_res = doc_tk._handle_spec_generate(
-            {
-                "title": doc_title,
-                "objective": cleaned,
-                "constraints": [
-                    "อ้างอิงสถานะจริงจากฐานข้อมูลและซอร์สโค้ดใน Workspace เท่านั้น",
-                    "ประมวลผลภายในเครื่องทั้งหมด (Zero External LLMs)",
-                    "บังคับใช้การตรวจสอบสิทธิ์และ Approval Gate สำหรับการเปลี่ยนแปลงสำคัญ",
-                ],
-                "sections": sections,
-                "save_to_workspace": False,
-            },
-            {"data_dir": DATA_DIR, "conn": conn},
+        spec_wave = execute_orchestrated_plan(
+            tc_reg,
+            f"generate_spec:{cleaned[:160]}",
+            [
+                {
+                    "step_id": "generate_spec",
+                    "capability_id": "document.spec_generate",
+                    "input": {
+                        "title": doc_title,
+                        "objective": cleaned,
+                        "constraints": [
+                            "อ้างอิงสถานะจริงจากฐานข้อมูลและซอร์สโค้ดใน Workspace เท่านั้น",
+                            "ประมวลผลภายในเครื่องทั้งหมด (Zero External LLMs)",
+                            "บังคับใช้การตรวจสอบสิทธิ์และ Approval Gate สำหรับการเปลี่ยนแปลงสำคัญ",
+                        ],
+                        "sections": sections,
+                        "save_to_workspace": False,
+                    },
+                    "depends_on": [],
+                }
+            ],
+            conn=conn,
+            data_dir=DATA_DIR,
+            user_id=user_id or "system",
+            user_role="user",
+            enable_parallel=False,
         )
-        doc_out = spec_res.get("output") or {}
+        if spec_wave.get("run_id"):
+            run_ids.append(spec_wave["run_id"])
+        caps_executed.extend(s["capability_id"] for s in (spec_wave.get("steps") or []))
+
+        spec_step = next(iter(spec_wave.get("steps") or []), {})
+        doc_out = spec_step.get("output") or {}
         doc_md = str(doc_out.get("markdown") or "").strip()
-        outline_res = doc_tk._handle_markdown_outline({"content": doc_md}, {})
-        outline_out = outline_res.get("output") or {}
+
+        outline_wave = execute_orchestrated_plan(
+            tc_reg,
+            f"verify_outline:{cleaned[:160]}",
+            [
+                {
+                    "step_id": "verify_outline",
+                    "capability_id": "document.markdown_outline",
+                    "input": {"content": doc_md},
+                    "depends_on": [],
+                },
+                {
+                    "step_id": "scan_doc_hygiene",
+                    "capability_id": "security.secret_and_path_scan",
+                    "input": {"path": "zyrquen-architecture-readiness.md", "content": doc_md},
+                    "depends_on": [],
+                },
+            ],
+            conn=conn,
+            data_dir=DATA_DIR,
+            user_id=user_id or "system",
+            user_role="user",
+            enable_parallel=True,
+        )
+        if outline_wave.get("run_id"):
+            run_ids.append(outline_wave["run_id"])
+        caps_executed.extend(s["capability_id"] for s in (outline_wave.get("steps") or []))
+        outline_by_id = {s["step_id"]: s for s in (outline_wave.get("steps") or [])}
+        outline_out = (outline_by_id.get("verify_outline") or {}).get("output") or {}
+        hygiene_out = (outline_by_id.get("scan_doc_hygiene") or {}).get("output") or {}
+
+        doc_verified = bool(
+            spec_wave.get("ok")
+            and spec_wave.get("delivery_verdict") == "SUCCESS"
+            and outline_wave.get("ok")
+            and outline_wave.get("delivery_verdict") == "SUCCESS"
+            and hygiene_out.get("clean", True)
+        )
 
         readiness_table = "\n".join(
             [
@@ -2782,7 +2886,7 @@ def _try_execute_chat_autonomous_goal(
                 f"| โครงสร้าง Backend & Core | READY | พบโมดูล Python {counts.get('python', 0)} ไฟล์ |",
                 f"| โครงสร้าง Frontend Workspace | READY | พบไฟล์ TypeScript/React {counts.get('typescript', 0)} ไฟล์ |",
                 f"| ชุดทดสอบอัตโนมัติ | READY | พบไฟล์ทดสอบ {counts.get('tests', 0)} ไฟล์ |",
-                f"| หน่วยความจำและฐานข้อมูล | {'READY' if snap.get('triples', 0) > 0 else 'NEEDS_DATA'} | ความจำ {snap.get('triples', 0)} รายการ, ชุดข้อมูล {snap.get('clean_datasets', 0)} ชุด |",
+                f"| หน่วยความจำและฐานข้อมูล | {'READY' if snap.get('triples', 0) > 0 or db_tables_count > 0 else 'NEEDS_DATA'} | {db_tables_count} ตาราง, ความจำ {snap.get('triples', 0)} รายการ, ชุดข้อมูล {snap.get('clean_datasets', 0)} ชุด |",
                 f"| การกำกับดูแลและการอนุมัติ | {'PENDING_REVIEW' if snap.get('pending_approvals', 0) > 0 else 'CLEAR'} | คิวรออนุมัติ {snap.get('pending_approvals', 0)} รายการ |",
             ]
         )
@@ -2792,14 +2896,14 @@ def _try_execute_chat_autonomous_goal(
             f"## ตารางตรวจสอบความพร้อมระบบ\n\n"
             f"{readiness_table}\n\n"
             f"> ตรวจสอบโครงสร้างเอกสารแล้ว: {outline_out.get('heading_count', 0)} หัวข้อ · "
-            f"{outline_out.get('line_count', 0)} บรรทัด · ยืนยันผลลัพธ์จากข้อมูลจริงใน Workspace"
+            f"{outline_out.get('line_count', 0)} บรรทัด · สถานะ QA: `{'VERIFIED' if doc_verified else 'FAILED'}`"
         )
         timings.append(
             {
                 "task": "document_synthesis_verify",
                 "duration_ms": round((time.perf_counter() - t_exec) * 1000, 3),
-                "matched": True,
-                "status": "VERIFIED",
+                "matched": doc_verified,
+                "status": "VERIFIED" if doc_verified else "FAILED",
                 "detail": f"headings={outline_out.get('heading_count', 0)}",
             }
         )
@@ -2811,92 +2915,325 @@ def _try_execute_chat_autonomous_goal(
             "language": "markdown",
             "sha256": doc_out.get("content_sha256")
             or hashlib.sha256(full_content.encode("utf-8")).hexdigest(),
-            "verified": True,
+            "verified": doc_verified,
             "content": full_content,
         }
         return {
             "content": full_content,
-            "status": "VERIFIED",
+            "status": "VERIFIED" if doc_verified else "FAILED",
             "engine_path": engine_path,
             "plan": plan_res,
             "deliverable": deliverable,
+            "orchestration": {
+                "run_ids": run_ids,
+                "delivery_verdict": "SUCCESS" if doc_verified else "FAILED",
+                "capabilities_executed": list(dict.fromkeys(caps_executed)),
+            },
             "task_timings": timings,
         }
 
-    # Code / API / System implementation command
+    # Code / API / Data / System implementation command
     wants_ts = any(k in low for k in ("typescript", "tsx", "react", "express", "node", "frontend", "ui"))
-    lang = "typescript" if wants_ts else "python"
-    slug = re.sub(r"[^a-z0-9_]+", "_", low).strip("_")[:28] or "service_module"
-    if not slug or slug[0].isdigit():
-        slug = f"task_{slug}"
+    is_api_domain = any(k in low for k in ("api", "endpoint", "rest", "route", "webhook", "service", "บริการ"))
+    is_data_domain = any(k in low for k in ("csv", "json", "data", "dataset", "etl", "ข้อมูล", "สถิติ"))
 
-    if lang == "typescript":
+    raw_slug = re.sub(r"[^a-z0-9_]+", "_", low).strip("_")[:28]
+    if not raw_slug:
+        raw_slug = "api_service_module" if is_api_domain else ("data_pipeline_module" if is_data_domain else "workflow_module")
+    slug = f"task_{raw_slug}" if raw_slug[0].isdigit() else raw_slug
+    pascal_name = "".join(part.capitalize() for part in slug.split("_") if part) or "WorkflowModule"
+
+    if wants_ts:
+        lang = "typescript"
+        filename = f"{slug}.ts"
         generated_code = (
-            f"export interface {slug.title().replace('_', '')}Input {{\n"
+            f"export interface {pascal_name}Input {{\n"
             f"  goal: string;\n"
-            f"  payload?: Record<string, unknown>;\n"
+            f"  items?: Array<Record<string, unknown>>;\n"
             f"}}\n\n"
-            f"export interface {slug.title().replace('_', '')}Result {{\n"
+            f"export interface {pascal_name}Result {{\n"
             f"  ok: boolean;\n"
             f"  status: 'VERIFIED' | 'BLOCKED';\n"
+            f"  processedCount: number;\n"
             f"  summary: string;\n"
             f"}}\n\n"
-            f"export function executeTask(input: {slug.title().replace('_', '')}Input): {slug.title().replace('_', '')}Result {{\n"
+            f"export function execute{pascal_name}(input: {pascal_name}Input): {pascal_name}Result {{\n"
             f"  const goal = input.goal.trim();\n"
             f"  if (!goal) {{\n"
-            f"    return {{ ok: false, status: 'BLOCKED', summary: 'ต้องระบุเป้าหมายก่อนดำเนินการ' }};\n"
+            f"    return {{\n"
+            f"      ok: false,\n"
+            f"      status: 'BLOCKED',\n"
+            f"      processedCount: 0,\n"
+            f"      summary: 'Goal must be non-empty before execution',\n"
+            f"    }};\n"
             f"  }}\n"
+            f"  const validItems = (input.items ?? []).filter((item) => item !== null && typeof item === 'object');\n"
             f"  return {{\n"
             f"    ok: true,\n"
             f"    status: 'VERIFIED',\n"
-            f"    summary: `ดำเนินการตามเป้าหมาย: ${{goal}}`,\n"
+            f"    processedCount: validItems.length,\n"
+            f"    summary: `Executed ${{goal}} (${{validItems.length}} validated items)`,\n"
             f"  }};\n"
             f"}}\n"
         )
-        validation_summary = "โครงสร้าง TypeScript พร้อม Input Contract และการตรวจสอบเงื่อนไขขอบเขต"
-        filename = f"{slug}.ts"
+        verify_steps: list[dict] = [
+            {
+                "step_id": "contract_check",
+                "capability_id": "development.contract_validate",
+                "input": {
+                    "kind": "output",
+                    "payload": {
+                        "task_id": slug,
+                        "language": "typescript",
+                        "files": [{"path": filename, "content": generated_code}],
+                    },
+                },
+                "depends_on": [],
+            },
+            {
+                "step_id": "ts_verify",
+                "capability_id": "development.code_analysis",
+                "input": {"language": "typescript", "source": generated_code},
+                "depends_on": [],
+            },
+            {
+                "step_id": "secret_scan",
+                "capability_id": "security.secret_and_path_scan",
+                "input": {"path": filename, "content": generated_code},
+                "depends_on": [],
+            },
+            {
+                "step_id": "contract_assert",
+                "capability_id": "testing.contract_assertion",
+                "input": {
+                    "cases": [
+                        {"name": "has_export", "op": "contains", "actual": generated_code, "expected": f"export function execute{pascal_name}"},
+                        {"name": "balanced_braces", "op": "eq", "actual": generated_code.count("{"), "expected": generated_code.count("}")},
+                    ]
+                },
+                "depends_on": ["contract_check"],
+            },
+        ]
     else:
-        safe_doc_goal = cleaned[:64].replace('"', "").replace("'", "")
-        generated_code = (
-            f"from __future__ import annotations\n\n"
-            f"from dataclasses import dataclass\n"
-            f"from typing import Any\n\n\n"
-            f"@dataclass(frozen=True)\n"
-            f"class ExecutionResult:\n"
-            f"    ok: bool\n"
-            f"    status: str\n"
-            f"    summary: str\n"
-            f"    data: dict[str, Any]\n\n\n"
-            f"def run_verified_task(goal: str, context: dict[str, Any] | None = None) -> ExecutionResult:\n"
-            f'    """Execute validated workflow logic for: {safe_doc_goal}"""\n'
-            f"    clean_goal = str(goal or '').strip()\n"
-            f"    if not clean_goal:\n"
-            f"        return ExecutionResult(ok=False, status='BLOCKED', summary='Goal is required', data={{}})\n"
-            f"    ctx = dict(context or {{}})\n"
-            f"    return ExecutionResult(\n"
-            f"        ok=True,\n"
-            f"        status='VERIFIED',\n"
-            f"        summary=f'Verified execution for: {{clean_goal}}',\n"
-            f"        data={{'goal': clean_goal, 'context_keys': sorted(ctx.keys())}},\n"
-            f"    )\n"
-        )
-        from tool_center.toolkits import development as dev_tk
-
-        code_check = dev_tk._handle_code_analysis(
-            {"language": "python", "source": generated_code}, {}
-        )
-        validation_summary = str(
-            code_check.get("summary") or "ตรวจสอบไวยากรณ์ AST แล้ว (Syntax Valid)"
-        )
+        lang = "python"
         filename = f"{slug}.py"
+        safe_doc_goal = cleaned[:72].replace('"', "").replace("'", "").replace("\n", " ")
+        if is_data_domain:
+            generated_code = (
+                f"from __future__ import annotations\n\n"
+                f"import hashlib\n"
+                f"import json\n"
+                f"from dataclasses import dataclass\n"
+                f"from typing import Any\n\n\n"
+                f"@dataclass(frozen=True)\n"
+                f"class DataValidationReport:\n"
+                f"    ok: bool\n"
+                f"    status: str\n"
+                f"    record_count: int\n"
+                f"    duplicate_count: int\n"
+                f"    digest_sha256: str\n\n\n"
+                f"def validate_records(records: list[dict[str, Any]]) -> DataValidationReport:\n"
+                f'    """Deterministic record validation & SHA-256 manifest for: {safe_doc_goal}"""\n'
+                f"    if not isinstance(records, list) or not records:\n"
+                f"        return DataValidationReport(ok=False, status='BLOCKED', record_count=0, duplicate_count=0, digest_sha256='')\n"
+                f"    seen: set[str] = set()\n"
+                f"    duplicates = 0\n"
+                f"    canonical_rows: list[str] = []\n"
+                f"    for row in records:\n"
+                f"        encoded = json.dumps(row, sort_keys=True, ensure_ascii=False)\n"
+                f"        if encoded in seen:\n"
+                f"            duplicates += 1\n"
+                f"        seen.add(encoded)\n"
+                f"        canonical_rows.append(encoded)\n"
+                f"    digest = hashlib.sha256('\\n'.join(canonical_rows).encode('utf-8')).hexdigest()\n"
+                f"    return DataValidationReport(\n"
+                f"        ok=True,\n"
+                f"        status='VERIFIED',\n"
+                f"        record_count=len(records),\n"
+                f"        duplicate_count=duplicates,\n"
+                f"        digest_sha256=digest,\n"
+                f"    )\n"
+            )
+            sandbox_test_harness = (
+                f"{generated_code}\n"
+                f"rep_ok = validate_records([{{'id': 1, 'v': 'a'}}, {{'id': 1, 'v': 'a'}}])\n"
+                f"rep_empty = validate_records([])\n"
+                f"assert rep_ok.ok and rep_ok.record_count == 2 and rep_ok.duplicate_count == 1 and len(rep_ok.digest_sha256) == 64\n"
+                f"assert not rep_empty.ok and rep_empty.status == 'BLOCKED'\n"
+                f"print('SANDBOX_PASS')\n"
+            )
+        elif is_api_domain:
+            generated_code = (
+                f"from __future__ import annotations\n\n"
+                f"from dataclasses import dataclass\n"
+                f"from typing import Any\n\n\n"
+                f"@dataclass(frozen=True)\n"
+                f"class ApiContractCheck:\n"
+                f"    ok: bool\n"
+                f"    status: str\n"
+                f"    missing_fields: tuple[str, ...]\n"
+                f"    summary: str\n\n\n"
+                f"def validate_api_request(method: str, endpoint: str, payload: dict[str, Any], required_fields: tuple[str, ...]) -> ApiContractCheck:\n"
+                f'    """Validate REST request contract for: {safe_doc_goal}"""\n'
+                f"    clean_method = str(method or '').strip().upper()\n"
+                f"    clean_ep = str(endpoint or '').strip()\n"
+                f"    if clean_method not in {{'GET', 'POST', 'PUT', 'PATCH', 'DELETE'}} or not clean_ep.startswith('/api/'):\n"
+                f"        return ApiContractCheck(ok=False, status='BLOCKED', missing_fields=(), summary='Invalid HTTP method or /api/ path')\n"
+                f"    missing = tuple(f for f in required_fields if payload.get(f) is None or (isinstance(payload.get(f), str) and not str(payload.get(f)).strip()))\n"
+                f"    if missing:\n"
+                f"        return ApiContractCheck(ok=False, status='BLOCKED', missing_fields=missing, summary=f'Missing fields: {{\", \".join(missing)}}')\n"
+                f"    return ApiContractCheck(ok=True, status='VERIFIED', missing_fields=(), summary=f'Contract valid for {{clean_method}} {{clean_ep}}')\n"
+            )
+            sandbox_test_harness = (
+                f"{generated_code}\n"
+                f"ok_chk = validate_api_request('POST', '/api/tasks', {{'goal': 'verify'}}, ('goal',))\n"
+                f"bad_chk = validate_api_request('POST', '/bad', {{}}, ('goal',))\n"
+                f"assert ok_chk.ok and ok_chk.status == 'VERIFIED'\n"
+                f"assert not bad_chk.ok and bad_chk.status == 'BLOCKED'\n"
+                f"print('SANDBOX_PASS')\n"
+            )
+        else:
+            generated_code = (
+                f"from __future__ import annotations\n\n"
+                f"from dataclasses import dataclass\n"
+                f"from typing import Any\n\n\n"
+                f"@dataclass(frozen=True)\n"
+                f"class ExecutionResult:\n"
+                f"    ok: bool\n"
+                f"    status: str\n"
+                f"    summary: str\n"
+                f"    data: dict[str, Any]\n\n\n"
+                f"def run_verified_task(goal: str, context: dict[str, Any] | None = None) -> ExecutionResult:\n"
+                f'    """Execute validated workflow logic for: {safe_doc_goal}"""\n'
+                f"    clean_goal = str(goal or '').strip()\n"
+                f"    if not clean_goal:\n"
+                f"        return ExecutionResult(ok=False, status='BLOCKED', summary='Goal is required', data={{}})\n"
+                f"    ctx = dict(context or {{}})\n"
+                f"    return ExecutionResult(\n"
+                f"        ok=True,\n"
+                f"        status='VERIFIED',\n"
+                f"        summary=f'Verified execution for: {{clean_goal}}',\n"
+                f"        data={{'goal': clean_goal, 'context_keys': sorted(ctx.keys())}},\n"
+                f"    )\n"
+            )
+            sandbox_test_harness = (
+                f"{generated_code}\n"
+                f"ok_res = run_verified_task('verify_goal', {{'step': 1}})\n"
+                f"bad_res = run_verified_task('   ')\n"
+                f"assert ok_res.ok and ok_res.status == 'VERIFIED' and ok_res.data['context_keys'] == ['step']\n"
+                f"assert not bad_res.ok and bad_res.status == 'BLOCKED'\n"
+                f"print('SANDBOX_PASS')\n"
+            )
+
+        verify_steps = [
+            {
+                "step_id": "contract_check",
+                "capability_id": "development.contract_validate",
+                "input": {
+                    "kind": "output",
+                    "payload": {
+                        "task_id": slug,
+                        "language": "python",
+                        "files": [{"path": filename, "content": generated_code}],
+                    },
+                },
+                "depends_on": [],
+            },
+            {
+                "step_id": "ast_verify",
+                "capability_id": "development.code_analysis",
+                "input": {"language": "python", "source": generated_code},
+                "depends_on": [],
+            },
+            {
+                "step_id": "policy_audit",
+                "capability_id": "security.native_policy_audit",
+                "input": {"source": generated_code},
+                "depends_on": [],
+            },
+            {
+                "step_id": "secret_scan",
+                "capability_id": "security.secret_and_path_scan",
+                "input": {"path": filename, "content": generated_code},
+                "depends_on": [],
+            },
+            {
+                "step_id": "sandbox_verify",
+                "capability_id": "testing.sandbox_run",
+                "input": {"source": sandbox_test_harness, "timeout_s": 3.0},
+                "depends_on": ["ast_verify", "policy_audit"],
+            },
+        ]
+
+    verify_wave = execute_orchestrated_plan(
+        tc_reg,
+        f"verify_code:{cleaned[:160]}",
+        verify_steps,
+        conn=conn,
+        data_dir=DATA_DIR,
+        user_id=user_id or "system",
+        user_role="user",
+        enable_parallel=True,
+    )
+    if verify_wave.get("run_id"):
+        run_ids.append(verify_wave["run_id"])
+    caps_executed.extend(s["capability_id"] for s in (verify_wave.get("steps") or []))
+
+    verify_by_id = {s["step_id"]: s for s in (verify_wave.get("steps") or [])}
+    contract_out = (verify_by_id.get("contract_check") or {}).get("output") or {}
+    policy_out = (verify_by_id.get("policy_audit") or {}).get("output") or {}
+    secret_out = (verify_by_id.get("secret_scan") or {}).get("output") or {}
+    sandbox_out = (verify_by_id.get("sandbox_verify") or {}).get("output") or {}
+    assert_out = (verify_by_id.get("contract_assert") or {}).get("output") or {}
+
+    if lang == "python":
+        ast_out = (verify_by_id.get("ast_verify") or {}).get("output") or {}
+        sandbox_passed = (
+            verify_by_id.get("sandbox_verify", {}).get("status") == "SUCCESS"
+            and "SANDBOX_PASS" in str(sandbox_out.get("stdout") or "")
+        )
+        code_verified = bool(
+            verify_wave.get("ok")
+            and verify_wave.get("delivery_verdict") == "SUCCESS"
+            and contract_out.get("valid", False)
+            and ast_out.get("validation", {}).get("status") == "valid"
+            and policy_out.get("policy_compliant", False)
+            and secret_out.get("clean", False)
+            and sandbox_passed
+        )
+        validation_summary = (
+            f"ผ่านการตรวจสอบ AST + Sandbox Assertion + Security Policy (run `{verify_wave.get('run_id', '')[:8]}`)"
+            if code_verified
+            else "การตรวจสอบโค้ดหรือ Sandbox ไม่ผ่านเกณฑ์"
+        )
+    else:
+        ts_step = verify_by_id.get("ts_verify") or {}
+        ts_out = ts_step.get("output") or {}
+        ts_ok = ts_step.get("status") == "SUCCESS" and (
+            ts_out.get("validation", {}).get("status") == "valid"
+            or (ts_out.get("mode") == "source_lexical_analysis" and int(ts_out.get("line_count") or 0) > 0)
+        )
+        code_verified = bool(
+            verify_wave.get("ok")
+            and verify_wave.get("delivery_verdict") == "SUCCESS"
+            and contract_out.get("valid", False)
+            and ts_ok
+            and secret_out.get("clean", False)
+            and assert_out.get("verdict") == "PASS"
+        )
+        validation_summary = (
+            f"ผ่านการตรวจสอบ Code Contract + Static Analysis + Assertion ({assert_out.get('passed', 0)}/{assert_out.get('total', 0)})"
+            if code_verified
+            else "การตรวจสอบสัญญาโครงสร้างโค้ด TypeScript ไม่ผ่านเกณฑ์"
+        )
 
     timings.append(
         {
             "task": "code_generation_verify",
             "duration_ms": round((time.perf_counter() - t_exec) * 1000, 3),
-            "matched": True,
-            "status": "VERIFIED",
-            "detail": lang,
+            "matched": code_verified,
+            "status": "VERIFIED" if code_verified else "FAILED",
+            "detail": f"{lang}:run={verify_wave.get('run_id', '')[:8]}",
         }
     )
     engine_path.extend(["code_static_validation", "verification_gate"])
@@ -2912,11 +3249,11 @@ def _try_execute_chat_autonomous_goal(
         else ""
     )
     content = (
-        f"**ดำเนินการวิเคราะห์ วางแผน และสร้างผลงานเรียบร้อยแล้ว**\n"
+        f"**{'ดำเนินการวิเคราะห์ วางแผน และสร้างผลงานที่ผ่านการตรวจสอบแล้ว' if code_verified else 'ไม่สามารถรับรองผลงานได้ (Verification Failed)'}**\n"
         f"เป้าหมาย: `{cleaned}`\n\n"
         f"**ขั้นตอนดำเนินงาน:**\n{step_md}"
         f"{attach_block}\n\n"
-        f"**ซอร์สโค้ดที่สร้างและตรวจสอบแล้ว ({filename}):**\n"
+        f"**ซอร์สโค้ด ({filename}):**\n"
         f"```{lang}\n{generated_code.rstrip()}\n```\n\n"
         f"> การตรวจสอบผลลัพธ์: {validation_summary} · โครงการปัจจุบันมีโมดูล Python {counts.get('python', 0)} ไฟล์ และ TypeScript {counts.get('typescript', 0)} ไฟล์"
     )
@@ -2926,15 +3263,20 @@ def _try_execute_chat_autonomous_goal(
         "filename": filename,
         "language": lang,
         "sha256": hashlib.sha256(generated_code.encode("utf-8")).hexdigest(),
-        "verified": True,
+        "verified": code_verified,
         "content": generated_code,
     }
     return {
         "content": content,
-        "status": "VERIFIED",
+        "status": "VERIFIED" if code_verified else "FAILED",
         "engine_path": engine_path,
         "plan": plan_res,
         "deliverable": deliverable,
+        "orchestration": {
+            "run_ids": run_ids,
+            "delivery_verdict": "SUCCESS" if code_verified else "FAILED",
+            "capabilities_executed": list(dict.fromkeys(caps_executed)),
+        },
         "task_timings": timings,
     }
 
@@ -3267,6 +3609,8 @@ def handle_infer(payload: dict) -> dict:
                 trace["plan"] = auto_res["plan"]
             if auto_res.get("deliverable"):
                 trace["deliverable"] = auto_res["deliverable"]
+            if auto_res.get("orchestration"):
+                trace["orchestration"] = auto_res["orchestration"]
             _finalize_trace()
             conn.close()
             return {

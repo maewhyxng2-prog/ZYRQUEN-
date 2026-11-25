@@ -69,8 +69,8 @@ export function CopyButton({
 
   const sizeClass =
     size === 'xs'
-      ? 'min-h-[32px] min-w-[36px] px-2 py-1 text-[11px]'
-      : 'min-h-[36px] min-w-[44px] px-2.5 py-1 text-xs';
+      ? 'min-h-[44px] min-w-[44px] sm:min-h-[32px] sm:min-w-[36px] px-2.5 py-1 text-[11px]'
+      : 'min-h-[44px] min-w-[44px] sm:min-h-[36px] px-3 py-1 text-xs';
 
   const resolvedAriaLabel = ariaLabel || label;
   const resolvedTitle = title || resolvedAriaLabel;

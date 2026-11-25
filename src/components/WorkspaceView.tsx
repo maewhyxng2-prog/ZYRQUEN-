@@ -1,19 +1,16 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowDown,
-  Calculator,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clock,
-  Cpu,
   Download,
+  Eye,
+  EyeOff,
   FileCode2,
-  FileText,
   FolderKanban,
-  FolderSearch,
-  Globe,
   History,
   ListChecks,
   Mic,
@@ -26,7 +23,6 @@ import {
   X,
 } from 'lucide-react';
 import { ApiError, apiRequest } from '../lib/api';
-import { detectPendingToolActivity, type ToolId } from '../lib/tools';
 import type {
   ConversationSmartSummary,
   ConversationSummary,
@@ -91,6 +87,9 @@ interface SpeechRecognitionLike {
 
 type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
 
+const MAX_ATTACHMENT_CHARS = 8000;
+const ALLOWED_TEXT_EXT_RE = /\.(txt|md|json|csv|py|ts|tsx|js|jsx|xml|yaml|yml|sql|html|css|log)$/i;
+
 function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') return null;
   const win = window as unknown as {
@@ -123,6 +122,42 @@ function splitUserAttachmentNotice(rawContent: string): {
     body: body === 'Attached snippet' ? 'ส่งไฟล์แนบเพื่อวิเคราะห์' : body,
     attachmentChars: Number.isFinite(chars) ? chars : null,
   };
+}
+
+function detectPendingToolActivity(prompt: string, mode: ReasoningMode): string {
+  const trimmed = prompt.trim();
+  const lower = trimmed.toLowerCase();
+
+  if (
+    /^(?:ค้นคว้า|เปรียบเทียบ|ค้นหาเว็บ|ค้นเว็บ|สืบค้น|(?:research|investigate|compare|web_search|search_web)\b)/i.test(
+      trimmed
+    ) ||
+    /สืบค้นข้อมูล|ค้นหาข้อมูล|search\s+the\s+web/i.test(trimmed)
+  ) {
+    return 'กำลังสืบค้นข้อมูลและตรวจสอบหลักฐาน...';
+  }
+  if (/^(?:อ่านเอกสาร|ดึงเว็บ|(?:doc_fetch|fetch_doc|fetch)\b)/i.test(trimmed)) {
+    return 'กำลังอ่านเอกสารจาก URL สาธารณะ...';
+  }
+  if (
+    /^(?:ตรวจสอบโค้ด|ตรวจไฟล์|วิเคราะห์ไฟล์|อ่านไฟล์|เขียนไฟล์|บันทึกไฟล์|(?:inspect_file|analyze_dataset|read_file|write_file)\b)/i.test(
+      trimmed
+    )
+  ) {
+    return 'กำลังตรวจสอบไฟล์และวิเคราะห์โครงสร้าง...';
+  }
+  if (mode === 'math' || /(?:คำนวณ|สมการ|ค่าเฉลี่ย|สถิติ|sqrt\(|solve\b)/i.test(lower)) {
+    return 'กำลังคำนวณเชิงสัญลักษณ์และตรวจสอบผลลัพธ์...';
+  }
+  if (
+    mode === 'plan' ||
+    /^(?:ช่วย)?(?:สร้าง|ออกแบบ|พัฒนา|แก้ไข|ปรับปรุง|เขียนโค้ด|วางแผน|(?:build|create|implement|design|generate|write|refactor|fix)\b)/i.test(
+      trimmed
+    )
+  ) {
+    return 'กำลังวิเคราะห์ วางแผน และประสานงานสร้างผลงาน...';
+  }
+  return 'กำลังดำเนินงาน...';
 }
 
 function downloadArtifactFile(filename: string, content: string, mime = 'text/plain;charset=utf-8') {
@@ -184,8 +219,15 @@ export function WorkspaceView({
   onRetryLast,
 }: WorkspaceViewProps) {
   const [input, setInput] = useState('');
-  const [attachment, setAttachment] = useState<{ name: string; content: string } | null>(null);
+  const [attachment, setAttachment] = useState<{
+    name: string;
+    content: string;
+    truncated: boolean;
+  } | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState('');
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [smartSummary, setSmartSummary] = useState<ConversationSmartSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -195,10 +237,8 @@ export function WorkspaceView({
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [approvalBusyId, setApprovalBusyId] = useState<string | null>(null);
   const [approvalFeedback, setApprovalFeedback] = useState<Record<string, string>>({});
-  const [activeToolStatus, setActiveToolStatus] = useState<{
-    toolId: ToolId | 'native_core';
-    label: string;
-  } | null>(null);
+  const [expandedArtifacts, setExpandedArtifacts] = useState<Record<string, boolean>>({});
+  const [pendingStatusText, setPendingStatusText] = useState('กำลังดำเนินงาน...');
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
@@ -214,6 +254,17 @@ export function WorkspaceView({
       recognitionRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!historyOpen) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setHistoryOpen(false);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [historyOpen]);
 
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -244,6 +295,12 @@ export function WorkspaceView({
     };
   }, [activeConversationId, messages.length, summaryOpen, token]);
 
+  const filteredConversations = useMemo(() => {
+    const q = historyFilter.trim().toLowerCase();
+    if (!q) return conversations;
+    return conversations.filter((c) => c.title.toLowerCase().includes(q));
+  }, [conversations, historyFilter]);
+
   function handleStreamScroll() {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -270,27 +327,20 @@ export function WorkspaceView({
     }
     const contentToSend = trimmed;
     const attachmentContent = attachment?.content;
-    setActiveToolStatus(detectPendingToolActivity(contentToSend, defaultMode));
+    setPendingStatusText(detectPendingToolActivity(contentToSend, defaultMode));
     setInput('');
     setAttachment(null);
+    setAttachmentError(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-    try {
-      await onSendMessage(contentToSend, defaultMode, attachmentContent, defaultModelVariant);
-    } finally {
-      setActiveToolStatus(null);
-    }
+    await onSendMessage(contentToSend, defaultMode, attachmentContent, defaultModelVariant);
   }
 
   async function handleStarterPrompt(text: string, mode: ReasoningMode) {
     if (sending) return;
-    setActiveToolStatus(detectPendingToolActivity(text, mode));
-    try {
-      await onSendMessage(text, mode, undefined, defaultModelVariant);
-    } finally {
-      setActiveToolStatus(null);
-    }
+    setPendingStatusText(detectPendingToolActivity(text, mode));
+    await onSendMessage(text, mode, undefined, defaultModelVariant);
   }
 
   async function handleApprovalDecision(
@@ -348,21 +398,50 @@ export function WorkspaceView({
     }
   }
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  function loadSelectedFile(file: File) {
+    setAttachmentError(null);
+    if (!ALLOWED_TEXT_EXT_RE.test(file.name) && file.type && !file.type.startsWith('text/')) {
+      setAttachmentError('รองรับเฉพาะไฟล์ข้อความ โค้ด หรือข้อมูลโครงสร้าง (.txt, .md, .json, .csv, .py, .ts)');
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const text = typeof reader.result === 'string' ? reader.result : '';
-      setAttachment({ name: file.name, content: text.slice(0, 8000) });
+      if (!text.trim()) {
+        setAttachmentError(`ไฟล์ "${file.name}" ไม่มีเนื้อหาข้อความ`);
+        return;
+      }
+      setAttachment({
+        name: file.name,
+        content: text.slice(0, MAX_ATTACHMENT_CHARS),
+        truncated: text.length > MAX_ATTACHMENT_CHARS,
+      });
+    };
+    reader.onerror = () => {
+      setAttachmentError(`ไม่สามารถอ่านไฟล์ "${file.name}" ได้`);
     };
     reader.readAsText(file);
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    loadSelectedFile(file);
     e.target.value = '';
+  }
+
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setDragActive(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (file) {
+      loadSelectedFile(file);
+    }
   }
 
   function handleTextareaResize(el: HTMLTextAreaElement) {
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 176)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 168)}px`;
   }
 
   function startSpeechRecognition(targetLang: 'th-TH' | 'en-US') {
@@ -450,17 +529,17 @@ export function WorkspaceView({
 
   return (
     <div className="relative flex h-[calc(100dvh-52px)] min-h-0 flex-1 flex-col overflow-hidden bg-[var(--color-bg)] text-[var(--color-text)] md:h-[calc(100dvh-60px)]">
-      {/* Minimal Workspace Toolbar */}
+      {/* Compact Workspace Header */}
       <header className="flex min-h-[48px] shrink-0 items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 sm:px-6">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <button
             type="button"
             onClick={() => setHistoryOpen(true)}
             aria-label="เปิดประวัติโปรเจกต์"
-            className="flex min-h-[40px] shrink-0 items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
+            className="flex min-h-[44px] sm:min-h-[36px] shrink-0 items-center gap-2 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] whitespace-nowrap"
           >
             <History className="h-4 w-4 text-[var(--color-accent)]" aria-hidden="true" />
-            <span>รายการงาน</span>
+            <span>ประวัติ</span>
             <span className="text-[var(--color-text-muted)] tabular-nums">
               ({conversations.length})
             </span>
@@ -470,7 +549,7 @@ export function WorkspaceView({
           </span>
           <p
             title={activeTitle}
-            className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--color-text-secondary)] sm:max-w-[320px]"
+            className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--color-text-secondary)] sm:max-w-[340px]"
           >
             {activeTitle}
           </p>
@@ -482,7 +561,7 @@ export function WorkspaceView({
               type="button"
               onClick={() => setSummaryOpen((prev) => !prev)}
               aria-expanded={summaryOpen}
-              className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
+              className="flex min-h-[44px] sm:min-h-[36px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)] whitespace-nowrap"
             >
               <ListChecks className="h-4 w-4 text-[var(--color-accent)]" aria-hidden="true" />
               <span className="hidden sm:inline">สรุปผลลัพธ์</span>
@@ -496,7 +575,7 @@ export function WorkspaceView({
           <button
             type="button"
             onClick={onNewConversation}
-            className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
+            className="flex min-h-[44px] sm:min-h-[36px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
             <span>เริ่มงานใหม่</span>
@@ -572,9 +651,13 @@ export function WorkspaceView({
             <div
               role="status"
               aria-live="polite"
-              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 text-sm text-[var(--color-text-secondary)]"
+              className="space-y-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 text-sm text-[var(--color-text-secondary)]"
             >
-              กำลังโหลดประวัติการทำงาน...
+              <p className="text-xs font-medium">กำลังโหลดประวัติการทำงาน...</p>
+              <div className="space-y-2 motion-reduce:animate-none animate-pulse" aria-hidden="true">
+                <div className="h-3 w-3/4 rounded bg-[var(--color-border)]" />
+                <div className="h-3 w-1/2 rounded bg-[var(--color-border)]" />
+              </div>
             </div>
           ) : messages.length === 0 ? (
             <div className="zyrq-glow relative my-2 overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-5 sm:my-6 sm:p-8">
@@ -584,7 +667,7 @@ export function WorkspaceView({
                   <TemporalIntelligenceCore
                     variant="compact"
                     size={84}
-                    active={sending || streamingContent !== null}
+                    active={sending || Boolean(streamingContent)}
                   />
                   <div>
                     <h2 className="text-lg font-bold tracking-tight text-[var(--color-text)] sm:text-xl">
@@ -640,6 +723,7 @@ export function WorkspaceView({
               const statusMeta = !isUser ? getStatusMeta(msg.status) : null;
               const userParsed = isUser ? splitUserAttachmentNotice(msg.content) : null;
               const deliverable = trace?.deliverable;
+              const isArtifactExpanded = Boolean(expandedArtifacts[msg.id]);
               const needsApproval =
                 !isUser &&
                 (msg.status === 'PENDING_APPROVAL' || msg.status === 'AWAITING_APPROVAL');
@@ -660,7 +744,7 @@ export function WorkspaceView({
                     className={`select-text rounded-2xl px-4 py-3.5 ${
                       isUser
                         ? 'max-w-[90%] bg-[var(--color-primary)] text-white sm:max-w-[78%]'
-                        : 'w-full max-w-[98%] border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text)] sm:max-w-[90%]'
+                        : 'w-full max-w-[98%] border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text)] sm:max-w-[92%]'
                     }`}
                   >
                     {!isUser && (
@@ -713,47 +797,84 @@ export function WorkspaceView({
 
                     {/* Artifact / Deliverable Card when produced */}
                     {deliverable && deliverable.title && (
-                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5">
-                        <div className="flex min-w-0 items-center gap-2.5">
-                          <FileCode2
-                            className="h-4 w-4 shrink-0 text-[var(--color-accent)]"
-                            aria-hidden="true"
-                          />
-                          <div className="min-w-0">
-                            <p className="truncate text-xs font-semibold text-[var(--color-text)]">
-                              {deliverable.title}
-                            </p>
-                            <p className="truncate font-mono text-[11px] text-[var(--color-text-muted)]">
-                              {deliverable.filename || deliverable.kind}
-                              {deliverable.sha256 ? ` · ${deliverable.sha256.slice(0, 10)}` : ''}
-                            </p>
-                          </div>
-                        </div>
-                        {deliverable.content && (
-                          <div className="flex items-center gap-1.5">
-                            <CopyButton
-                              getText={() => deliverable.content || ''}
-                              label="คัดลอกผลงาน"
-                              ariaLabel="คัดลอกเนื้อหาผลงาน"
-                              size="xs"
+                      <div className="mt-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-2.5">
+                            <FileCode2
+                              className="h-4 w-4 shrink-0 text-[var(--color-accent)]"
+                              aria-hidden="true"
                             />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                downloadArtifactFile(
-                                  deliverable.filename || `zyrquen-artifact-${msg.id.slice(0, 6)}.md`,
-                                  deliverable.content || '',
-                                  deliverable.language === 'markdown'
-                                    ? 'text/markdown;charset=utf-8'
-                                    : 'text/plain;charset=utf-8'
-                                )
-                              }
-                              aria-label="ดาวน์โหลดผลงาน"
-                              className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                            >
-                              <Download className="h-3 w-3" aria-hidden="true" />
-                              <span>ดาวน์โหลด</span>
-                            </button>
+                            <div className="min-w-0">
+                              <p className="truncate text-xs font-semibold text-[var(--color-text)]">
+                                {deliverable.title}
+                              </p>
+                              <p className="truncate font-mono text-[11px] text-[var(--color-text-muted)] tabular-nums">
+                                {deliverable.filename || deliverable.kind}
+                                {deliverable.sha256 ? ` · ${deliverable.sha256.slice(0, 10)}` : ''}
+                              </p>
+                            </div>
+                          </div>
+                          {deliverable.content && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                aria-expanded={isArtifactExpanded}
+                                onClick={() =>
+                                  setExpandedArtifacts((prev) => ({
+                                    ...prev,
+                                    [msg.id]: !prev[msg.id],
+                                  }))
+                                }
+                                className="inline-flex min-h-[44px] sm:min-h-[32px] items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] whitespace-nowrap"
+                              >
+                                {isArtifactExpanded ? (
+                                  <>
+                                    <EyeOff className="h-3 w-3" aria-hidden="true" />
+                                    <span>ซ่อนตัวอย่าง</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Eye className="h-3 w-3" aria-hidden="true" />
+                                    <span>ดูตัวอย่าง</span>
+                                  </>
+                                )}
+                              </button>
+                              <CopyButton
+                                getText={() => deliverable.content || ''}
+                                label="คัดลอกผลงาน"
+                                ariaLabel="คัดลอกเนื้อหาผลงาน"
+                                size="xs"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  downloadArtifactFile(
+                                    deliverable.filename || `zyrquen-artifact-${msg.id.slice(0, 6)}.md`,
+                                    deliverable.content || '',
+                                    deliverable.language === 'markdown'
+                                      ? 'text/markdown;charset=utf-8'
+                                      : 'text/plain;charset=utf-8'
+                                  )
+                                }
+                                aria-label="ดาวน์โหลดผลงาน"
+                                className="inline-flex min-h-[44px] sm:min-h-[32px] items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] whitespace-nowrap"
+                              >
+                                <Download className="h-3 w-3" aria-hidden="true" />
+                                <span>ดาวน์โหลด</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {isArtifactExpanded && deliverable.content && (
+                          <div className="mt-2.5 max-h-80 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-3 text-xs">
+                            {deliverable.language === 'markdown' || deliverable.kind === 'document' ? (
+                              <SafeMessageText content={deliverable.content} />
+                            ) : (
+                              <pre className="whitespace-pre font-mono text-xs leading-relaxed text-[var(--color-text)]">
+                                <code>{deliverable.content}</code>
+                              </pre>
+                            )}
                           </div>
                         )}
                       </div>
@@ -773,12 +894,12 @@ export function WorkspaceView({
                             <span className="text-[var(--color-text-secondary)]">
                               ขั้นตอนนี้อยู่ในคิวรออนุมัติ สามารถยืนยันเพื่อดำเนินการต่อได้ทันที
                             </span>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <button
                                 type="button"
                                 disabled={approvalBusyId === msg.id}
                                 onClick={() => void handleApprovalDecision(msg.id, 'approve', trace)}
-                                className="min-h-[34px] rounded-lg bg-[var(--color-primary)] px-3 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-50"
+                                className="min-h-[44px] sm:min-h-[36px] rounded-lg bg-[var(--color-primary)] px-3.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary-hover)] disabled:opacity-50 whitespace-nowrap"
                               >
                                 อนุมัติและทำต่อ
                               </button>
@@ -786,7 +907,7 @@ export function WorkspaceView({
                                 type="button"
                                 disabled={approvalBusyId === msg.id}
                                 onClick={() => void handleApprovalDecision(msg.id, 'reject', trace)}
-                                className="min-h-[34px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-text-secondary)] hover:border-[var(--color-danger)] hover:text-[var(--color-danger)] disabled:opacity-50"
+                                className="min-h-[44px] sm:min-h-[36px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 text-xs font-medium text-[var(--color-text-secondary)] hover:border-[var(--color-danger)] hover:text-[var(--color-danger)] disabled:opacity-50 whitespace-nowrap"
                               >
                                 ปฏิเสธ
                               </button>
@@ -802,7 +923,7 @@ export function WorkspaceView({
                   </div>
 
                   {!isUser && (
-                    <div className="mt-1.5 flex w-full max-w-[98%] flex-wrap items-center gap-2 px-1 sm:max-w-[90%]">
+                    <div className="mt-1.5 flex w-full max-w-[98%] flex-wrap items-center gap-2 px-1 sm:max-w-[92%]">
                       <CopyButton
                         getText={() => toPlainAssistantCopyText(msg.content)}
                         ariaLabel="คัดลอกข้อความตอบกลับ"
@@ -815,7 +936,7 @@ export function WorkspaceView({
                         onClick={() => handleExportMessage(msg)}
                         aria-label="ส่งออกผลลัพธ์เป็นไฟล์ Markdown"
                         title="ดาวน์โหลดเป็นไฟล์ .md"
-                        className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                        className="inline-flex min-h-[44px] sm:min-h-[36px] items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] whitespace-nowrap"
                       >
                         <Download className="h-3.5 w-3.5" aria-hidden="true" />
                         <span className="hidden sm:inline">ส่งออก .md</span>
@@ -829,25 +950,12 @@ export function WorkspaceView({
 
           {sending && (
             <div className="flex flex-col items-start gap-2.5" role="status" aria-live="polite">
-              <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-xs font-medium text-[var(--color-accent)]">
-                {activeToolStatus?.toolId === 'web_search' ? (
-                  <Globe className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
-                ) : activeToolStatus?.toolId === 'doc_fetch' ? (
-                  <FileText className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
-                ) : activeToolStatus?.toolId === 'workspace_file_read' ? (
-                  <FolderSearch className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
-                ) : activeToolStatus?.toolId === 'calc_ast' ? (
-                  <Calculator className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
-                ) : (
-                  <Cpu className="h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden="true" />
-                )}
-                <span>{activeToolStatus?.label || 'กำลังดำเนินการในพื้นที่ทำงาน...'}</span>
-                <span className="hidden text-[11px] font-normal text-[var(--color-text-muted)] sm:inline">
-                  · วิเคราะห์ · วางแผน · ดำเนินการ · ตรวจสอบผล
-                </span>
+              <div className="inline-flex items-center gap-2 rounded-xl px-1 py-1.5 text-xs font-medium text-[var(--color-text-secondary)]">
+                <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-[var(--color-accent)]" aria-hidden="true" />
+                <span>{pendingStatusText}</span>
               </div>
               {streamingContent && (
-                <div className="w-full max-w-[98%] rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-surface-raised)] px-4 py-3.5 text-[var(--color-text)] sm:max-w-[90%]">
+                <div className="w-full max-w-[98%] rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-surface-raised)] px-4 py-3.5 text-[var(--color-text)] sm:max-w-[92%]">
                   <div className="mb-1.5 text-xs font-semibold tracking-wide text-[var(--color-accent)]">
                     ZYRQUEN
                   </div>
@@ -874,7 +982,7 @@ export function WorkspaceView({
                   <button
                     type="button"
                     onClick={onRetryLast}
-                    className="min-h-[36px] shrink-0 rounded-lg border border-[var(--color-danger)]/35 bg-[var(--color-surface-raised)] px-3 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-surface-hover)]"
+                    className="min-h-[44px] sm:min-h-[36px] shrink-0 rounded-lg border border-[var(--color-danger)]/35 bg-[var(--color-surface-raised)] px-3.5 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-surface-hover)] whitespace-nowrap"
                   >
                     ลองใหม่
                   </button>
@@ -892,7 +1000,7 @@ export function WorkspaceView({
               type="button"
               onClick={() => scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' })}
               aria-label="เลื่อนลงล่างสุด"
-              className="pointer-events-auto inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]/95 px-3 py-1.5 text-xs font-medium text-[var(--color-text)] shadow-lg backdrop-blur-sm transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              className="pointer-events-auto inline-flex min-h-[44px] sm:min-h-[36px] items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]/95 px-3.5 py-1.5 text-xs font-medium text-[var(--color-text)] shadow-lg backdrop-blur-sm transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] whitespace-nowrap"
             >
               <ArrowDown className="h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden="true" />
               <span>เลื่อนลงล่างสุด</span>
@@ -902,7 +1010,19 @@ export function WorkspaceView({
       </div>
 
       {/* Bottom-Docked Clean Command Composer */}
-      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 pb-safe sm:px-6 sm:py-3">
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (!dragActive) setDragActive(true);
+        }}
+        onDragLeave={() => setDragActive(false)}
+        onDrop={handleDrop}
+        className={`shrink-0 border-t px-3 py-2 pb-safe transition-colors sm:px-6 sm:py-3 ${
+          dragActive
+            ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/5'
+            : 'border-[var(--color-border)] bg-[var(--color-surface)]'
+        }`}
+      >
         <form onSubmit={handleSubmit} className="mx-auto flex w-full max-w-3xl flex-col gap-2">
           {/* Context Row: Project Selector & Attachment Preview */}
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -922,9 +1042,9 @@ export function WorkspaceView({
                     onSelectConversation(val);
                   }
                 }}
-                className="max-w-[220px] truncate rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-xs font-medium text-[var(--color-text)] focus:border-[var(--color-focus)] focus:outline-none sm:max-w-[280px]"
+                className="min-h-[36px] max-w-[210px] truncate rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-xs font-medium text-[var(--color-text)] focus:border-[var(--color-focus)] focus:outline-none sm:max-w-[280px]"
               >
-                <option value="__new__">+ โปรเจกต์ / งานใหม่</option>
+                <option value="__new__">+ โปรเจกต์ใหม่</option>
                 {conversations.map((conv) => (
                   <option key={conv.id} value={conv.id}>
                     {conv.title}
@@ -936,20 +1056,35 @@ export function WorkspaceView({
             {attachment && (
               <div className="flex max-w-full items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1 text-xs text-[var(--color-accent)]">
                 <Paperclip className="h-3 w-3 shrink-0" aria-hidden="true" />
-                <span className="truncate">
-                  ไฟล์แนบ: {attachment.name} ({attachment.content.length.toLocaleString()} ตัวอักษร)
+                <span className="truncate tabular-nums">
+                  ไฟล์แนบ: {attachment.name} ({attachment.content.length.toLocaleString()} ตัวอักษร
+                  {attachment.truncated ? ' · ตัดแสดงส่วนแรก' : ''})
                 </span>
                 <button
                   type="button"
                   onClick={() => setAttachment(null)}
                   aria-label="ลบไฟล์แนบ"
-                  className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  className="flex min-h-[28px] min-w-[28px] items-center justify-center rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
             )}
           </div>
+
+          {attachmentError && (
+            <div role="status" className="flex items-center justify-between gap-2 text-xs text-[var(--color-danger)]">
+              <span>{attachmentError}</span>
+              <button
+                type="button"
+                onClick={() => setAttachmentError(null)}
+                aria-label="ปิดคำเตือนไฟล์แนบ"
+                className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
 
           {(speechError || listening) && (
             <div className="flex items-center justify-between gap-2 text-xs">
@@ -987,8 +1122,8 @@ export function WorkspaceView({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              aria-label="แนบไฟล์ข้อความ"
-              title="แนบไฟล์ข้อความ โค้ด หรือข้อมูล"
+              aria-label="แนบไฟล์ข้อความหรือโค้ด"
+              title="แนบไฟล์ข้อความหรือโค้ด (อ่านเนื้อหาได้สูงสุด 8,000 ตัวอักษร)"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
             >
               <Paperclip className="h-4 w-4" aria-hidden="true" />
@@ -1024,7 +1159,7 @@ export function WorkspaceView({
               }}
               placeholder="พิมพ์คำสั่งงาน หรืออธิบายสิ่งที่ต้องการสร้าง..."
               aria-label="ช่องพิมพ์คำสั่งงาน"
-              className="max-h-44 min-h-[44px] flex-1 resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
+              className="max-h-42 min-h-[44px] flex-1 resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5 text-[15px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
             />
 
             <button
@@ -1037,34 +1172,38 @@ export function WorkspaceView({
             </button>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-[var(--color-text-muted)]">
-            <span>Enter เพื่อส่งคำสั่ง · Shift+Enter ขึ้นบรรทัดใหม่</span>
+          <div className="hidden sm:flex items-center justify-between gap-2 px-1 text-[11px] text-[var(--color-text-muted)]">
+            <span>Enter เพื่อส่งคำสั่ง · Shift+Enter ขึ้นบรรทัดใหม่ · ลากไฟล์มาวางเพื่อแนบได้</span>
           </div>
         </form>
       </div>
 
       {/* Adaptive Project/Task History Sheet */}
       {historyOpen && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm md:items-stretch md:justify-start">
+        <div
+          onClick={() => setHistoryOpen(false)}
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm md:items-stretch md:justify-start"
+        >
           <div
+            onClick={(e) => e.stopPropagation()}
             className="flex max-h-[82dvh] w-full flex-col rounded-t-3xl border-t border-[var(--color-border)] bg-[var(--color-surface-raised)] md:h-full md:max-h-none md:w-80 md:rounded-none md:border-r md:border-t-0"
             role="dialog"
             aria-label="รายการโปรเจกต์และงาน"
           >
             <div className="mx-auto mt-3 h-1.5 w-10 rounded-full bg-[var(--color-border)] md:hidden" />
             <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4">
-              <h3 className="text-base font-semibold text-[var(--color-text)]">รายการงานและโปรเจกต์</h3>
+              <h3 className="text-base font-semibold text-[var(--color-text)]">รายการโปรเจกต์และงาน</h3>
               <button
                 type="button"
                 onClick={() => setHistoryOpen(false)}
                 aria-label="ปิดรายการงาน"
-                className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="p-3">
+            <div className="space-y-2 p-3">
               <button
                 type="button"
                 onClick={() => {
@@ -1076,13 +1215,24 @@ export function WorkspaceView({
                 <Plus className="h-4 w-4" />
                 <span>เริ่มงานใหม่</span>
               </button>
+
+              {conversations.length > 5 && (
+                <input
+                  type="search"
+                  value={historyFilter}
+                  onChange={(e) => setHistoryFilter(e.target.value)}
+                  placeholder="ค้นหาโปรเจกต์..."
+                  aria-label="ค้นหาโปรเจกต์"
+                  className="min-h-[40px] w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-focus)] focus:outline-none"
+                />
+              )}
             </div>
 
             <div className="flex-1 divide-y divide-[var(--color-border)] overflow-y-auto px-3 pb-6">
-              {conversations.length === 0 ? (
+              {filteredConversations.length === 0 ? (
                 <p className="p-4 text-sm text-[var(--color-text-secondary)]">ยังไม่มีงานที่บันทึกไว้</p>
               ) : (
-                conversations.map((conv) => (
+                filteredConversations.map((conv) => (
                   <div
                     key={conv.id}
                     className={`flex items-center justify-between gap-2 rounded-xl px-2 py-2 ${
@@ -1106,7 +1256,7 @@ export function WorkspaceView({
                       type="button"
                       onClick={() => onDeleteConversation(conv.id)}
                       aria-label={`ลบงาน ${conv.title}`}
-                      className="flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
+                      className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>

@@ -45,7 +45,11 @@ def _handle_task_compose(payload: dict[str, Any], ctx: dict[str, Any]) -> dict[s
     if not goal:
         return {"ok": False, "status": "FAILED", "error": "goal is required.", "output": {}}
     registry = ctx["registry"]
-    plan = registry.compose_for_goal(goal, user_role=ctx.get("user_role") or "user")
+    plan = registry.compose_for_goal(
+        goal,
+        user_role=ctx.get("user_role") or "user",
+        conn=ctx.get("conn"),
+    )
     return {
         "ok": True,
         "status": "COMPLETED",

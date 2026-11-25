@@ -116,6 +116,8 @@ def verify_capability_delivery(
     claimed_file = None
     if isinstance(output.get("file"), dict):
         claimed_file = output["file"].get("name") or output["file"].get("path")
+    elif isinstance(output.get("saved_file"), dict):
+        claimed_file = output["saved_file"].get("name") or output["saved_file"].get("path")
     elif output.get("saved_file"):
         claimed_file = output.get("saved_file")
     if claimed_file and data_dir is not None:

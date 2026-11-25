@@ -169,7 +169,7 @@ def _handle_webhook_dispatch(payload: dict[str, Any], ctx: dict[str, Any]) -> di
             "ok": False,
             "status": "FAILED",
             "error": f"Webhook delivery failed: {exc}",
-            "output": {"dispatched": False, "url": url_check["url"]},
+            "output": {"dispatched": False, "url": url},
         }
 
 

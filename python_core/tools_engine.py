@@ -575,6 +575,17 @@ def _sanitize_rel_filename(name: str) -> str | None:
     return cleaned
 
 
+def safe_workspace_path(data_dir: Path, filename: str) -> Path | None:
+    safe_name = _sanitize_rel_filename(str(filename or ""))
+    if not safe_name:
+        return None
+    ws_dir = (Path(data_dir) / "workspace_files").resolve()
+    target = (ws_dir / safe_name).resolve()
+    if not target.is_relative_to(ws_dir) or target.is_symlink():
+        return None
+    return target
+
+
 def analyze_structured_dataset_content(raw_text: str, filename_hint: str = "") -> dict:
     """Deterministic local structured dataset inspection for CSV/JSON content (zero external models)."""
     text = (raw_text or "").strip()

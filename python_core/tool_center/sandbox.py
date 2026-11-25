@@ -152,28 +152,27 @@ def run_python_sandbox(
     with tempfile.TemporaryDirectory(prefix="zyrquen_sandbox_") as tmp_dir:
         tmp_path = Path(tmp_dir)
         harness = tmp_path / "sandbox_entry.py"
-        # Pass optional JSON input safely via a constant literal inside harness
+        # Pass optional JSON input safely via a constant literal inside harness;
+        # hoist any `from __future__ import ...` lines to the very top so Python allows them.
         encoded_input = json.dumps(input_data or {}, ensure_ascii=False)
+        future_lines: list[str] = []
+        body_lines: list[str] = []
+        for raw_ln in source.splitlines():
+            stripped = raw_ln.strip()
+            if stripped.startswith("from __future__ import "):
+                if stripped not in future_lines:
+                    future_lines.append(stripped)
+            else:
+                body_lines.append(raw_ln)
+
+        prefix = ("\n".join(future_lines) + "\n") if future_lines else ""
         harness_code = (
-            "import json\n"
-            f"SANDBOX_INPUT = json.loads({encoded_input!r})\n"
-            "def main():\n"
-            + "\n".join(f"    {line}" for line in source.splitlines())
-            + "\n\n"
-            "if __name__ == '__main__':\n"
-            "    res = main()\n"
-            "    if res is not None:\n"
-            "        print(json.dumps({'return_value': res}, ensure_ascii=False))\n"
+            prefix
+            + "import json\n"
+            + f"SANDBOX_INPUT = json.loads({encoded_input!r})\n"
+            + "\n".join(body_lines)
+            + "\n"
         )
-        # Note: if caller defines top-level code without `return`, run directly without wrapping
-        use_direct = "return " not in source
-        if use_direct:
-            harness_code = (
-                "import json\n"
-                f"SANDBOX_INPUT = json.loads({encoded_input!r})\n"
-                + source
-                + "\n"
-            )
         harness.write_text(harness_code, encoding="utf-8")
 
         clean_env = {
