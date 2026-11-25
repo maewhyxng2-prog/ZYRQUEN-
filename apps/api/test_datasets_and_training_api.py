@@ -426,6 +426,7 @@ def test_training_readiness_enforces_v11_four_split_and_leakage_detection(api_cl
     res_clean = client.get("/training/readiness").json()
     assert res_clean["four_split_present"] is True
     assert res_clean["dataset_verified"] is True
+    assert res_clean["dataset"]["version"] == "nagi_v11"
     assert res_clean["dataset"]["leakage_check"]["passed"] is True
     assert res_clean["tokenizer"]["valid"] is True
     assert res_clean["preflight"]["passed"] is True
