@@ -33,7 +33,6 @@ interface CommandPaletteProps {
   conversations: ConversationSummary[];
   onClose: () => void;
   onNavigate: (screen: AppScreen, settingsTab?: SettingsTab) => void;
-  onNewConversation: () => void;
   onOpenConversation: (conversationId: string) => void;
 }
 
@@ -43,7 +42,6 @@ export function CommandPalette({
   conversations,
   onClose,
   onNavigate,
-  onNewConversation,
   onOpenConversation,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
@@ -64,11 +62,11 @@ export function CommandPalette({
     const base: PaletteAction[] = [
       {
         id: 'new-conversation',
-        label: 'เริ่มงานใหม่ (New Task)',
+        label: 'สร้างงานใหม่ (New Task)',
         hint: 'Alt+N',
         keywords: 'new task create project workspace เริ่มงาน สร้างงาน',
         icon: MessageSquarePlus,
-        onSelect: () => onNewConversation(),
+        onSelect: () => onNavigate('create'),
       },
       {
         id: 'nav-home',
@@ -167,7 +165,7 @@ export function CommandPalette({
     }
 
     return base;
-  }, [conversations, onNavigate, onNewConversation, onOpenConversation, user.role]);
+  }, [conversations, onNavigate, onOpenConversation, user.role]);
 
   const fuse = useMemo(
     () =>
