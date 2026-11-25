@@ -436,13 +436,15 @@ def test_training_readiness_enforces_v11_four_split_and_leakage_detection(api_cl
 def test_training_readiness_counts_only_valid_signed_approvals(api_client, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    client, _, _, _ = api_client
+    client, _, _, tmp_path = api_client
+    ds = _build_valid_dataset(tmp_path / "approval-dataset", version="0.1.0")
+    monkeypatch.setenv("ZYRQUEN_DATASET_DIR", str(ds))
     approval = {
         "id": "approval-1",
         "run_id": "run-1",
         "step_key": "execute_training",
         "action_type": "training.execute",
-        "scope": "dataset:nagi_v11",
+        "scope": "dataset:0.1.0",
         "status": "approved",
         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
         "signature_hmac": "valid-signature",
