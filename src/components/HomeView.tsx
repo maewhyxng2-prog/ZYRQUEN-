@@ -60,10 +60,8 @@ export function HomeView({
     setPrompt('');
   }
 
-
   const recent: ConversationSummary[] = (homeSummary?.recent_conversations || []).slice(0, 5);
   const recentMissions: AutonomousMissionItem[] = (homeSummary?.recent_missions || []).slice(0, 3);
-  const counts = homeSummary?.counts;
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:py-8">
@@ -77,7 +75,7 @@ export function HomeView({
           <p className="mt-2 text-sm leading-relaxed text-[var(--color-text-secondary)]">พื้นที่ทำงานสำหรับสร้างโปรเจกต์ วิเคราะห์ข้อมูล แก้ปัญหา และจัดการผลงานในที่เดียว</p>
           <div className="mt-5 flex flex-wrap gap-2 text-xs text-[var(--color-text-secondary)]">
             <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)]/80 px-3 py-1.5">โปรเจกต์ {homeSummary ? 'พร้อมจัดการ' : 'กำลังโหลดข้อมูล'}</span>
-            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)]/80 px-3 py-1.5">งานล่าสุด {recent.length + recentMissions.length}</span>
+            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)]/80 px-3 py-1.5">กิจกรรมล่าสุด {recent.length + recentMissions.length}</span>
           </div>
         </div>
       </section>
@@ -194,7 +192,7 @@ export function HomeView({
 
             <div className="divide-y divide-[var(--color-border)] overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-raised)]">
               {loading && !homeSummary ? (
-                <div className="p-6 text-sm text-[var(--color-text-secondary)]">กำลังโหลดรายการเซสชัน...</div>
+                <div className="p-6 text-sm text-[var(--color-text-secondary)]">กำลังโหลดกิจกรรมล่าสุด...</div>
               ) : recent.length === 0 ? (
                 <div className="flex flex-col items-start gap-3 p-6">
                   <p className="text-sm text-[var(--color-text-secondary)]">
@@ -222,11 +220,7 @@ export function HomeView({
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium text-[var(--color-text)]">{conv.title}</p>
                       <p className="mt-0.5 text-xs text-[var(--color-text-secondary)] tabular-nums">
-                        <span>{conv.mode}</span>
-                        <span aria-hidden="true"> · </span>
-                        <span>{conv.message_count} ข้อความ</span>
-                        <span aria-hidden="true"> · </span>
-                        <span>{formatRelativeTime(conv.updated_at)}</span>
+                        <span>อัปเดต {formatRelativeTime(conv.updated_at)}</span>
                       </p>
                     </div>
                     <ChevronRight className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
