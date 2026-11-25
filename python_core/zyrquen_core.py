@@ -2589,10 +2589,44 @@ _CHAT_AUTONOMOUS_GOAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CHAT_ENG_INSPECT_GOAL_RE = re.compile(
+    r"^(?:ช่วย)?(?:"
+    r"(?:ค้นหา(?:สัญลักษณ์|ฟังก์ชัน|คลาส|จุดใช้งาน|ไฟล์ทดสอบ|ตำแหน่งในโค้ด)|สำรวจ\s*(?:dependencies|แพ็กเกจ|ไฟล์ทดสอบ|โครงสร้างโค้ด|การตั้งค่า)|ตรวจสอบ\s*(?:diff|git\s*diff|ความแตกต่างของโค้ด|dependencies|ไฟล์ทดสอบ|การตั้งค่า\s*build|build\s*config|quality\s*config))"
+    r"|(?:(?:search|find)\s+(?:symbol|function|class|reference)\b|(?:inspect|check|audit)\s+(?:git\s+)?(?:diff|dependencies|tests?|build\s+config|configs?)\b)"
+    r")",
+    re.IGNORECASE,
+)
+
 _CHAT_FACTUAL_EXCLUSION_RE = re.compile(
     r"(?:คืออะไร|ทำงานอย่างไร|เกิดขึ้นได้อย่างไร|ต่างกันอย่างไร|what\s+is|how\s+does|explain\b|\?$)",
     re.IGNORECASE,
 )
+
+_SYMBOL_STOPWORDS = frozenset({
+    "symbol", "symbols", "search", "find", "function", "functions", "class", "classes",
+    "reference", "references", "inspect", "audit", "check", "diff", "git", "code",
+    "file", "files", "test", "tests", "config", "configs", "build", "quality",
+    "dependencies", "dependency", "package", "packages", "project", "repo", "repository",
+    "workspace", "zyrquen", "create", "implement", "design", "generate", "write",
+    "refactor", "fix", "python", "typescript", "javascript", "tsx", "jsx",
+    "and", "or", "the", "for", "with", "from", "into", "that", "this", "where", "all",
+})
+
+
+def _extract_symbol_query_from_goal(goal: str) -> str | None:
+    quoted = re.search(r"[`'\"]([A-Za-z_][A-Za-z0-9_.\-]{1,120})[`'\"]", goal)
+    if quoted:
+        return quoted.group(1)
+    for token in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,120}\b", goal):
+        low_tok = token.lower()
+        if low_tok in _SYMBOL_STOPWORDS:
+            continue
+        if "_" in token or any(ch.isupper() for ch in token[1:]):
+            return token
+    for token in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,120}\b", goal):
+        if token.lower() not in _SYMBOL_STOPWORDS:
+            return token
+    return None
 
 
 def _try_execute_chat_autonomous_goal(
@@ -2603,7 +2637,9 @@ def _try_execute_chat_autonomous_goal(
     user_id: str = "",
 ) -> dict | None:
     cleaned = prompt.strip()
-    if not cleaned or not _CHAT_AUTONOMOUS_GOAL_RE.match(cleaned):
+    is_create_goal = bool(cleaned and _CHAT_AUTONOMOUS_GOAL_RE.match(cleaned))
+    is_inspect_goal = bool(cleaned and _CHAT_ENG_INSPECT_GOAL_RE.match(cleaned))
+    if not cleaned or (not is_create_goal and not is_inspect_goal):
         return None
     if _CHAT_FACTUAL_EXCLUSION_RE.search(cleaned):
         return None
@@ -2639,7 +2675,7 @@ def _try_execute_chat_autonomous_goal(
     try:
         tc_plan = tc_reg.compose_for_goal(cleaned, user_role="user", conn=conn)
         selected_caps = [
-            f"{c['capability_id']}" for c in (tc_plan.get("selected_capabilities") or [])[:6]
+            f"{c['capability_id']}" for c in (tc_plan.get("selected_capabilities") or [])[:10]
         ]
     except Exception:
         selected_caps = []
@@ -2669,6 +2705,94 @@ def _try_execute_chat_autonomous_goal(
             "depends_on": [],
         },
     ]
+
+    low = cleaned.lower()
+    is_doc_goal = any(
+        k in low
+        for k in (
+            "เอกสาร",
+            "สรุป",
+            "สถาปัตยกรรม",
+            "ตรวจสอบความพร้อม",
+            "checklist",
+            "document",
+            "spec",
+            "report",
+            "architecture",
+            "markdown",
+            "readme",
+        )
+    )
+    wants_dep_inventory = (
+        is_doc_goal
+        or "development.dependency_inventory" in selected_caps
+        or any(k in low for k in ("dependency", "dependencies", "package", "npm", "pip", "แพ็กเกจ"))
+    )
+    wants_test_discovery = (
+        is_doc_goal
+        or "development.test_discovery" in selected_caps
+        or any(k in low for k in ("ไฟล์ทดสอบ", "test discovery", "discover test", "tests", "pytest", "vitest"))
+    )
+    wants_config_audit = (
+        is_doc_goal
+        or "development.config_audit" in selected_caps
+        or any(k in low for k in ("build config", "quality config", "config", "ตั้งค่า", "ci", "lint"))
+    )
+    symbol_query = _extract_symbol_query_from_goal(cleaned)
+    wants_symbol_search = bool(symbol_query) and (
+        "development.symbol_search" in selected_caps
+        or any(k in low for k in ("symbol", "สัญลักษณ์", "จุดใช้งาน", "ค้นหาฟังก์ชัน", "ค้นหาคลาส", "search symbol", "find symbol"))
+    )
+    wants_diff_inspect = (
+        "development.diff_inspect" in selected_caps
+        or any(k in low for k in ("diff", "ความแตกต่างของโค้ด", "ตรวจ diff", "git diff", "patch"))
+    )
+
+    if wants_dep_inventory:
+        wave1_steps.append(
+            {
+                "step_id": "inspect_dependencies",
+                "capability_id": "development.dependency_inventory",
+                "input": {"target_path": "."},
+                "depends_on": [],
+            }
+        )
+    if wants_test_discovery:
+        wave1_steps.append(
+            {
+                "step_id": "discover_tests",
+                "capability_id": "development.test_discovery",
+                "input": {"target_path": "."},
+                "depends_on": [],
+            }
+        )
+    if wants_config_audit:
+        wave1_steps.append(
+            {
+                "step_id": "audit_configs",
+                "capability_id": "development.config_audit",
+                "input": {"target_path": "."},
+                "depends_on": [],
+            }
+        )
+    if wants_symbol_search and symbol_query:
+        wave1_steps.append(
+            {
+                "step_id": "search_symbol",
+                "capability_id": "development.symbol_search",
+                "input": {"query": symbol_query, "target_path": "."},
+                "depends_on": [],
+            }
+        )
+    if wants_diff_inspect:
+        wave1_steps.append(
+            {
+                "step_id": "inspect_diff",
+                "capability_id": "development.diff_inspect",
+                "input": {"target_path": "."},
+                "depends_on": [],
+            }
+        )
 
     ds_rep = analyze_structured_dataset_content(attachment) if attachment else {"ok": False}
     if attachment:
@@ -2707,6 +2831,11 @@ def _try_execute_chat_autonomous_goal(
     wave1_by_id = {s["step_id"]: s for s in (wave1_res.get("steps") or [])}
     repo_info = (wave1_by_id.get("inspect_repo") or {}).get("output") or {}
     db_info = (wave1_by_id.get("inspect_db") or {}).get("output") or {}
+    dep_info = (wave1_by_id.get("inspect_dependencies") or {}).get("output") or {}
+    test_disc_info = (wave1_by_id.get("discover_tests") or {}).get("output") or {}
+    config_audit_info = (wave1_by_id.get("audit_configs") or {}).get("output") or {}
+    symbol_info = (wave1_by_id.get("search_symbol") or {}).get("output") or {}
+    diff_info = (wave1_by_id.get("inspect_diff") or {}).get("output") or {}
 
     attach_summary_lines: list[str] = []
     if attachment:
@@ -2743,23 +2872,6 @@ def _try_execute_chat_autonomous_goal(
         }
     )
 
-    low = cleaned.lower()
-    is_doc_goal = any(
-        k in low
-        for k in (
-            "เอกสาร",
-            "สรุป",
-            "สถาปัตยกรรม",
-            "ตรวจสอบความพร้อม",
-            "checklist",
-            "document",
-            "spec",
-            "report",
-            "architecture",
-            "markdown",
-            "readme",
-        )
-    )
     snap = (plan_res.get("summary") or {}).get("state_snapshot") or {}
     counts = repo_info.get("file_counts") or {}
     top_dirs = repo_info.get("top_directories") or []
@@ -2770,12 +2882,16 @@ def _try_execute_chat_autonomous_goal(
     engine_path = ["native_planner", "tool_center", "tool_center_orchestrator"]
 
     if is_doc_goal:
+        manifest_count = int(dep_info.get("manifest_count") or 0)
+        discovered_test_count = int(test_disc_info.get("count") or counts.get("tests", 0))
+        config_count = int(config_audit_info.get("count") or 0)
         sections = [
             {
                 "heading": "1. โครงสร้างระบบจริงใน Workspace",
                 "body": (
                     f"- ไดเรกทอรีหลัก: {', '.join(f'`{d}`' for d in top_dirs[:10]) or '`src`, `python_core`, `apps`'}\n"
-                    f"- จำนวนไฟล์ตรวจพบ: Python `{counts.get('python', 0)}` ไฟล์ · TypeScript/React `{counts.get('typescript', 0)}` ไฟล์ · ไฟล์ทดสอบ `{counts.get('tests', 0)}` ไฟล์\n"
+                    f"- จำนวนไฟล์ตรวจพบ: Python `{counts.get('python', 0)}` ไฟล์ · TypeScript/React `{counts.get('typescript', 0)}` ไฟล์ · ไฟล์ทดสอบ `{discovered_test_count}` ไฟล์\n"
+                    f"- ไฟล์กำหนด Dependencies: `{manifest_count}` รายการ · ไฟล์ตั้งค่า Build/Quality: `{config_count}` รายการ\n"
                     f"- โมดูลแกนหลักตัวอย่าง: {', '.join(f'`{m}`' for m in sample_mods[:6]) or '`python_core/zyrquen_core.py`'}"
                 ),
             },
@@ -2927,6 +3043,146 @@ def _try_execute_chat_autonomous_goal(
             "orchestration": {
                 "run_ids": run_ids,
                 "delivery_verdict": "SUCCESS" if doc_verified else "FAILED",
+                "capabilities_executed": list(dict.fromkeys(caps_executed)),
+            },
+            "task_timings": timings,
+        }
+
+    # Engineering Inspection / Audit Goal (Execute -> Verify -> Deliver)
+    if is_inspect_goal and not is_create_goal:
+        inspect_sections: list[str] = [
+            f"**ผลการสำรวจและตรวจสอบวิศวกรรมซอฟต์แวร์ (Read-Only Verified)**",
+            f"เป้าหมาย: `{cleaned}`",
+            "",
+            "### 1. สรุปภาพรวม Repository",
+            f"- โมดูล Python `{counts.get('python', 0)}` ไฟล์ · TypeScript/React `{counts.get('typescript', 0)}` ไฟล์ · ไฟล์ทดสอบ `{test_disc_info.get('count', counts.get('tests', 0))}` ไฟล์",
+        ]
+        if dep_info:
+            manifest_names = sorted((dep_info.get("manifests") or {}).keys())
+            inspect_sections.extend([
+                "",
+                "### 2. รายการ Dependencies (`development.dependency_inventory`)",
+                f"- พบไฟล์กำหนด Dependencies `{dep_info.get('manifest_count', 0)}` รายการ (ไม่ติดตั้งแพ็กเกจ): {', '.join(f'`{m}`' for m in manifest_names) or 'ไม่มี'}",
+            ])
+        if test_disc_info:
+            sample_tests = (test_disc_info.get("test_files") or [])[:12]
+            inspect_sections.extend([
+                "",
+                "### 3. ไฟล์ทดสอบที่ค้นพบ (`development.test_discovery`)",
+                f"- พบไฟล์ทดสอบ `{test_disc_info.get('count', 0)}` ไฟล์ (ยังไม่ได้รันทดสอบ)",
+                *(f"- `{tf}`" for tf in sample_tests),
+            ])
+        if config_audit_info:
+            cfgs = config_audit_info.get("present_configs") or []
+            inspect_sections.extend([
+                "",
+                "### 4. การตั้งค่า Build & Quality (`development.config_audit`)",
+                f"- พบไฟล์ตั้งค่า `{config_audit_info.get('count', 0)}` รายการ: {', '.join(f'`{c}`' for c in cfgs) or 'ไม่มี'}",
+            ])
+        if symbol_info:
+            matches = (symbol_info.get("matches") or [])[:15]
+            inspect_sections.extend([
+                "",
+                f"### 5. ผลการค้นหาสัญลักษณ์ `{symbol_info.get('query', '')}`",
+                f"- พบ `{symbol_info.get('count', 0)}` จุด จากการสแกน `{symbol_info.get('files_scanned', 0)}` ไฟล์ (ไม่รันโค้ด)",
+                *(f"- `{m['path']}:{m['line']}` — `{m['text'][:120]}`" for m in matches),
+            ])
+        if diff_info:
+            diff_text = str(diff_info.get("diff") or "").strip()
+            changed_lines = int(diff_info.get("changed_line_count") or 0)
+            inspect_sections.extend([
+                "",
+                "### 6. ผลตรวจสอบ Git Diff",
+                f"- เป้าหมาย `{diff_info.get('target', '.')}` · บรรทัดที่เปลี่ยนแปลง `{changed_lines}` บรรทัด · Git พร้อมใช้งาน: `{diff_info.get('git_available', bool(diff_text))}`",
+            ])
+            if diff_text:
+                inspect_sections.append(f"```diff\n{diff_text[:3000]}\n```")
+            elif diff_info.get("reason"):
+                inspect_sections.append(f"- หมายเหตุ: {diff_info['reason']}")
+
+        inspect_report = "\n".join(inspect_sections)
+
+        verify_cases: list[dict[str, Any]] = [
+            {"name": "wave1_ok", "op": "eq", "actual": bool(wave1_res.get("ok")), "expected": True},
+            {"name": "report_nonempty", "op": "gt", "actual": len(inspect_report), "expected": 40},
+        ]
+        if dep_info:
+            verify_cases.append({"name": "no_pkg_install", "op": "eq", "actual": dep_info.get("install_performed"), "expected": False})
+        if test_disc_info:
+            verify_cases.append({"name": "no_test_exec", "op": "eq", "actual": test_disc_info.get("tests_executed"), "expected": False})
+        if symbol_info:
+            verify_cases.append({"name": "no_code_exec", "op": "eq", "actual": symbol_info.get("code_executed"), "expected": False})
+        if diff_info:
+            verify_cases.append({"name": "repo_unmodified", "op": "eq", "actual": diff_info.get("repository_modified"), "expected": False})
+
+        verify_wave = execute_orchestrated_plan(
+            tc_reg,
+            f"verify_inspect:{cleaned[:160]}",
+            [
+                {
+                    "step_id": "assert_readonly_evidence",
+                    "capability_id": "testing.contract_assertion",
+                    "input": {"cases": verify_cases},
+                    "depends_on": [],
+                },
+                {
+                    "step_id": "scan_inspect_report",
+                    "capability_id": "security.secret_and_path_scan",
+                    "input": {"path": "zyrquen-engineering-inspection.md", "content": inspect_report},
+                    "depends_on": [],
+                },
+            ],
+            conn=conn,
+            data_dir=DATA_DIR,
+            user_id=user_id or "system",
+            user_role="user",
+            enable_parallel=True,
+        )
+        if verify_wave.get("run_id"):
+            run_ids.append(verify_wave["run_id"])
+        caps_executed.extend(s["capability_id"] for s in (verify_wave.get("steps") or []))
+        v_by_id = {s["step_id"]: s for s in (verify_wave.get("steps") or [])}
+        assert_res = (v_by_id.get("assert_readonly_evidence") or {}).get("output") or {}
+        scan_res = (v_by_id.get("scan_inspect_report") or {}).get("output") or {}
+        inspect_verified = bool(
+            wave1_res.get("ok")
+            and verify_wave.get("ok")
+            and verify_wave.get("delivery_verdict") == "SUCCESS"
+            and assert_res.get("verdict") == "PASS"
+            and scan_res.get("clean", False)
+        )
+        timings.append(
+            {
+                "task": "engineering_inspection_verify",
+                "duration_ms": round((time.perf_counter() - t_exec) * 1000, 3),
+                "matched": inspect_verified,
+                "status": "VERIFIED" if inspect_verified else "FAILED",
+                "detail": f"assert={assert_res.get('passed', 0)}/{assert_res.get('total', 0)}",
+            }
+        )
+        engine_path.extend(["engineering_readonly_inspection", "verification_gate"])
+        full_report = (
+            f"{inspect_report}\n\n"
+            f"> ตรวจสอบหลักฐานแล้ว ({assert_res.get('passed', 0)}/{assert_res.get('total', 0)} เงื่อนไข) · สถานะ QA: `{'VERIFIED' if inspect_verified else 'FAILED'}`"
+        )
+        deliverable = {
+            "kind": "analysis",
+            "title": f"ผลตรวจสอบวิศวกรรมซอฟต์แวร์: {cleaned[:60]}",
+            "filename": "zyrquen-engineering-inspection.md",
+            "language": "markdown",
+            "sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
+            "verified": inspect_verified,
+            "content": full_report,
+        }
+        return {
+            "content": full_report,
+            "status": "VERIFIED" if inspect_verified else "FAILED",
+            "engine_path": engine_path,
+            "plan": plan_res,
+            "deliverable": deliverable,
+            "orchestration": {
+                "run_ids": run_ids,
+                "delivery_verdict": "SUCCESS" if inspect_verified else "FAILED",
                 "capabilities_executed": list(dict.fromkeys(caps_executed)),
             },
             "task_timings": timings,

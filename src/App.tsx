@@ -839,6 +839,13 @@ export default function App() {
     };
   }, []);
 
+  const handleCancelSending = useCallback(() => {
+    activeStreamControllerRef.current?.abort();
+    activeStreamControllerRef.current = null;
+    setSending(false);
+    setStreamingContent(null);
+  }, []);
+
   const handleNewConversation = useCallback(() => {
     activeStreamControllerRef.current?.abort();
     activeStreamControllerRef.current = null;
@@ -1222,6 +1229,7 @@ export default function App() {
                         )
                     : undefined
                 }
+                onCancelSending={handleCancelSending}
               />
             )}
 

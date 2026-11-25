@@ -92,6 +92,66 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
         self.assertFalse(rep["external_models_used"])
         self.assertEqual(rep["passed"], rep["total"])
 
+    def test_new_software_engineering_readonly_tools(self) -> None:
+        dependency = self.registry.execute(
+            "development.dependency_inventory", {"target_path": "."},
+            user_role="user", conn=self.conn, data_dir=self.data_dir,
+        )
+        self.assertTrue(dependency["ok"])
+        self.assertIn("manifests", dependency["output"])
+        self.assertFalse(dependency["output"]["install_performed"])
+
+        discovery = self.registry.execute(
+            "development.test_discovery", {"target_path": "."},
+            user_role="user", conn=self.conn, data_dir=self.data_dir,
+        )
+        self.assertTrue(discovery["ok"])
+        self.assertGreater(discovery["output"]["count"], 0)
+        self.assertFalse(discovery["output"]["tests_executed"])
+
+        config = self.registry.execute(
+            "development.config_audit", {"target_path": "."},
+            user_role="user", conn=self.conn, data_dir=self.data_dir,
+        )
+        self.assertTrue(config["ok"])
+        self.assertGreater(config["output"]["count"], 0)
+
+        blocked = self.registry.execute(
+            "development.test_discovery", {"target_path": "../../outside"},
+            user_role="user", conn=self.conn, data_dir=self.data_dir,
+        )
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["status"], "BLOCKED")
+
+        symbols = self.registry.execute(
+            "development.symbol_search", {"query": "register_development_toolkit", "target_path": "python_core/tool_center/toolkits"},
+            user_role="user", conn=self.conn, data_dir=self.data_dir,
+        )
+        self.assertTrue(symbols["ok"])
+        self.assertGreater(symbols["output"]["count"], 0)
+        self.assertFalse(symbols["output"]["code_executed"])
+
+        invalid_symbols = self.registry.execute(
+            "development.symbol_search", {"query": "", "target_path": "."},
+            user_role="user", conn=self.conn, data_dir=self.data_dir,
+        )
+        self.assertFalse(invalid_symbols["ok"])
+
+        diff = self.registry.execute(
+            "development.diff_inspect", {"target_path": "python_core/tool_center/toolkits/development.py"},
+            user_role="user", conn=self.conn, data_dir=self.data_dir,
+        )
+        self.assertTrue(diff["ok"])
+        self.assertIn("repository_modified", diff["output"])
+        self.assertFalse(diff["output"]["repository_modified"])
+
+        blocked_diff = self.registry.execute(
+            "development.diff_inspect", {"target_path": "../../outside"},
+            user_role="user", conn=self.conn, data_dir=self.data_dir,
+        )
+        self.assertFalse(blocked_diff["ok"])
+        self.assertEqual(blocked_diff["status"], "BLOCKED")
+
     def test_in_development_fail_closed_and_git_inspect_honest(self) -> None:
         build_res = self.registry.execute(
             "development.build_validate",
@@ -383,9 +443,9 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
         self.assertEqual(bench["metrics"]["regression_rate"], 0.0)
         self.assertFalse(bench["external_models_used"])
 
-    def test_all_34_capabilities_orchestrated_e2e(self) -> None:
+    def test_all_39_capabilities_orchestrated_e2e(self) -> None:
         all_ids = self.registry.list_capability_ids()
-        self.assertEqual(len(all_ids), 34)
+        self.assertEqual(len(all_ids), 39)
 
         # Seed a real dataset and KG relation in the isolated test DB
         ingest = zc.handle_ingest_dataset({
@@ -411,6 +471,11 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
             {"step_id": "s03_w", "capability_id": "development.workspace_file", "input": {"action": "write", "filename": "e2e_note.md", "content": "# Note\nVerified"}, "depends_on": []},
             {"step_id": "s03_r", "capability_id": "development.workspace_file", "input": {"action": "read", "filename": "e2e_note.md"}, "depends_on": ["s03_w"]},
             {"step_id": "s04", "capability_id": "development.git_inspect", "input": {"limit": 2}, "depends_on": []},
+            {"step_id": "s04_dep", "capability_id": "development.dependency_inventory", "input": {"target_path": "."}, "depends_on": []},
+            {"step_id": "s04_test", "capability_id": "development.test_discovery", "input": {"target_path": "."}, "depends_on": []},
+            {"step_id": "s04_cfg", "capability_id": "development.config_audit", "input": {"target_path": "."}, "depends_on": []},
+            {"step_id": "s04_sym", "capability_id": "development.symbol_search", "input": {"query": "register_development_toolkit", "target_path": "python_core/tool_center/toolkits"}, "depends_on": []},
+            {"step_id": "s04_diff", "capability_id": "development.diff_inspect", "input": {"target_path": "python_core/tool_center/toolkits/development.py"}, "depends_on": []},
             {"step_id": "s05", "capability_id": "data.leakage_check", "input": {"train": ["alpha one"], "validation": ["beta two"], "test": ["gamma three"]}, "depends_on": []},
             {"step_id": "s06", "capability_id": "data.profile_structured", "input": {"format": "csv", "content": "k,v\na,1\nb,2\n"}, "depends_on": []},
             {"step_id": "s07", "capability_id": "data.transform", "input": {"format": "csv", "content": "k,v\na,1\na,1\n", "deduplicate": True, "trim_whitespace": True}, "depends_on": []},
@@ -467,7 +532,7 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
 
         plan_res = execute_orchestrated_plan(
             self.registry,
-            "E2E verification of all 29 READY non-P5 capabilities",
+            "E2E verification of all 32 READY non-P5 capabilities",
             steps_ready_auto,
             conn=self.conn,
             data_dir=self.data_dir,
@@ -572,6 +637,35 @@ class ToolCenterAndSupportSystemsTests(unittest.TestCase):
         self.assertEqual(doc_goal["status"], "VERIFIED")
         self.assertEqual(doc_goal["deliverable"]["filename"], "zyrquen-architecture-readiness.md")
         self.assertTrue(doc_goal["deliverable"]["verified"])
+
+        # 4. Goal-driven symbol_search & diff_inspect auto-selection -> Execute -> Verify -> Deliver
+        sym_diff_goal = zc._try_execute_chat_autonomous_goal(
+            self.conn,
+            "ค้นหาสัญลักษณ์ register_development_toolkit และตรวจสอบ diff ของโค้ด",
+            user_id="u-chat",
+        )
+        self.assertIsNotNone(sym_diff_goal)
+        assert sym_diff_goal is not None
+        self.assertEqual(sym_diff_goal["status"], "VERIFIED")
+        self.assertTrue(sym_diff_goal["deliverable"]["verified"])
+        self.assertIn("development.symbol_search", sym_diff_goal["orchestration"]["capabilities_executed"])
+        self.assertIn("development.diff_inspect", sym_diff_goal["orchestration"]["capabilities_executed"])
+        self.assertIn("testing.contract_assertion", sym_diff_goal["orchestration"]["capabilities_executed"])
+        self.assertIn("register_development_toolkit", sym_diff_goal["content"])
+
+        # 5. Goal-driven dependency, test discovery, and config audit auto-selection -> Verify -> Deliver
+        audit_goal = zc._try_execute_chat_autonomous_goal(
+            self.conn,
+            "สำรวจ dependencies ค้นหาไฟล์ทดสอบ และตรวจสอบการตั้งค่า build config",
+            user_id="u-chat",
+        )
+        self.assertIsNotNone(audit_goal)
+        assert audit_goal is not None
+        self.assertEqual(audit_goal["status"], "VERIFIED")
+        self.assertTrue(audit_goal["deliverable"]["verified"])
+        self.assertIn("development.dependency_inventory", audit_goal["orchestration"]["capabilities_executed"])
+        self.assertIn("development.test_discovery", audit_goal["orchestration"]["capabilities_executed"])
+        self.assertIn("development.config_audit", audit_goal["orchestration"]["capabilities_executed"])
 
 
 if __name__ == "__main__":

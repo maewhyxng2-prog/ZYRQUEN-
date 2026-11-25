@@ -629,8 +629,8 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(await screen.findByLabelText('ช่องพิมพ์คำสั่งงาน')).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'แถบนำทางมือถือ' })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'เปิดประวัติโปรเจกต์' }));
-    expect(await screen.findByRole('dialog', { name: 'รายการโปรเจกต์และงาน' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'เปิดประวัติการสนทนา' }));
+    expect(await screen.findByRole('dialog', { name: 'ประวัติการสนทนา' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'ปิดรายการงาน' }));
 
     fireEvent.click(screen.getAllByRole('button', { name: 'ตั้งค่า' })[0]);
@@ -1157,7 +1157,7 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     });
 
     // เปิดรายการงานแล้วสลับไปห้อง c2 ทันทีก่อนที่ c1 จะตอบกลับ
-    fireEvent.click(await screen.findByRole('button', { name: 'เปิดประวัติโปรเจกต์' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'เปิดประวัติการสนทนา' }));
     const room2Buttons = await screen.findAllByText('ห้องที่สอง');
     fireEvent.click(room2Buttons[room2Buttons.length - 1]);
 
@@ -3335,12 +3335,12 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(screen.getByRole('button', { name: 'คัดลอกเนื้อหาผลงาน' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'ดาวน์โหลดผลงาน' })).toBeInTheDocument();
 
-    // 5. Project selector switches project and creates new project
-    const projectSelect = screen.getByLabelText('เลือกโปรเจกต์') as HTMLSelectElement;
-    expect(projectSelect.value).toBe('proj-1');
-    fireEvent.change(projectSelect, { target: { value: 'proj-2' } });
+    // 5. Conversation selector switches thread and creates new conversation
+    const conversationSelect = screen.getByLabelText('เลือกบทสนทนา') as HTMLSelectElement;
+    expect(conversationSelect.value).toBe('proj-1');
+    fireEvent.change(conversationSelect, { target: { value: 'proj-2' } });
     expect(onSelectConversation).toHaveBeenCalledWith('proj-2');
-    fireEvent.change(projectSelect, { target: { value: '__new__' } });
+    fireEvent.change(conversationSelect, { target: { value: '__new__' } });
     expect(onNewConversation).toHaveBeenCalledTimes(1);
 
     // 6. Inline Approval Gate submits real decision and refreshes thread
@@ -3348,6 +3348,44 @@ describe('ZYRQUEN ประสบการณ์แอปพลิเคชั�
     expect(await screen.findByText(/อนุมัติแล้ว \(COMPLETED\)/)).toBeInTheDocument();
     expect(decideCalled).toBe(true);
     expect(onRefreshConversation).toHaveBeenCalled();
+
+    // 7. User prompt copy & long-text character counter
+    const copyPromptBtn = screen.getByRole('button', { name: 'คัดลอกคำสั่ง' });
+    expect(copyPromptBtn).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'คัดลอกข้อความตอบกลับ' }).length).toBe(2);
+
+    const composer = screen.getByLabelText('ช่องพิมพ์คำสั่งงาน');
+    fireEvent.change(composer, { target: { value: 'ก'.repeat(320) } });
+    expect(screen.getByText('320 ตัวอักษร')).toBeInTheDocument();
+  });
+
+  it('WorkspaceView: แสดงปุ่มหยุดการทำงานเมื่อกำลังส่งคำสั่งและเรียก onCancelSending ได้จริง', async () => {
+    const { WorkspaceView } = await import('../components/WorkspaceView');
+    const onCancelSending = vi.fn();
+
+    render(
+      <WorkspaceView
+        token="tok-stop"
+        conversations={[]}
+        activeConversationId="proj-1"
+        activeTitle="ทดสอบหยุดคำสั่ง"
+        messages={[]}
+        loadingThread={false}
+        sending={true}
+        streamingContent="กำลังประมวลผลแผนงาน..."
+        error={null}
+        defaultMode="auto"
+        onSelectConversation={vi.fn()}
+        onNewConversation={vi.fn()}
+        onDeleteConversation={vi.fn()}
+        onSendMessage={vi.fn(async () => {})}
+        onCancelSending={onCancelSending}
+      />
+    );
+
+    const stopBtn = screen.getByRole('button', { name: 'หยุดการทำงาน' });
+    fireEvent.click(stopBtn);
+    expect(onCancelSending).toHaveBeenCalledTimes(1);
   });
 });
 

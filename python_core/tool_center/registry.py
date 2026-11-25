@@ -812,6 +812,61 @@ class ToolCenterRegistry:
                 probe_path = Path(data_dir) / "workspace_files" / "_probe_ws.txt"
                 if probe_path.exists():
                     probe_path.unlink(missing_ok=True)
+            r7 = self.execute(
+                "development.dependency_inventory",
+                {"target_path": "."},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "dev_dependency_inventory_readonly",
+                r7["ok"] and "manifests" in r7["output"] and r7["output"].get("install_performed") is False,
+                "Dependency inventory reads manifests without installing packages",
+            )
+            r8 = self.execute(
+                "development.test_discovery",
+                {"target_path": "."},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "dev_test_discovery_readonly",
+                r8["ok"] and isinstance(r8["output"].get("test_files"), list) and r8["output"].get("tests_executed") is False,
+                "Test discovery reports test files without executing them",
+            )
+            r9 = self.execute(
+                "development.config_audit",
+                {"target_path": "."},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "dev_config_audit_readonly",
+                r9["ok"] and isinstance(r9["output"].get("present_configs"), list) and r9["output"].get("files_modified") is False,
+                "Build and quality configuration inventory is read-only",
+            )
+            r10 = self.execute(
+                "development.symbol_search",
+                {"query": "register_development_toolkit", "target_path": "python_core/tool_center/toolkits"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "dev_symbol_search_readonly",
+                r10["ok"] and isinstance(r10["output"].get("matches"), list) and r10["output"].get("count", 0) >= 1 and r10["output"].get("code_executed") is False,
+                "Source symbol search reads code without importing or executing it",
+            )
+            r11 = self.execute(
+                "development.diff_inspect",
+                {"target_path": "python_core/tool_center/toolkits/development.py"},
+                user_role="admin",
+                data_dir=data_dir,
+            )
+            record(
+                "dev_diff_inspect_readonly",
+                r11["ok"] and r11["output"].get("repository_modified") is False and isinstance(r11["output"].get("diff"), str),
+                "Git diff inspection is read-only and bounded",
+            )
 
         elif tid == "data":
             r1 = self.execute(

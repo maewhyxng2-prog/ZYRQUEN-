@@ -178,13 +178,13 @@ export const SafeMessageText = React.memo(function SafeMessageText({ content }: 
   const blocks = parseMessageBlocks(sanitized);
 
   return (
-    <div className="space-y-2 text-[15px] leading-relaxed text-[var(--color-text)]">
+    <div className="min-w-0 space-y-2.5 break-words text-[15px] leading-relaxed text-[var(--color-text)]">
       {blocks.map((block, i) => {
         if (block.kind === 'spacer') {
           return <div key={i} className="h-1" />;
         }
         if (block.kind === 'divider') {
-          return <hr key={i} className="my-2 border-[var(--color-border)]" />;
+          return <hr key={i} className="my-2.5 border-[var(--color-border)]" />;
         }
         if (block.kind === 'code') {
           return (
@@ -192,19 +192,19 @@ export const SafeMessageText = React.memo(function SafeMessageText({ content }: 
               key={i}
               className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]"
             >
-              <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-raised)]/60 px-3 py-1.5">
-                <span className="font-mono text-[11px] font-medium text-[var(--color-text-secondary)]">
+              <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-raised)]/70 px-3 py-1.5">
+                <span className="truncate font-mono text-[11px] font-medium text-[var(--color-text-secondary)]">
                   {block.lang}
                 </span>
-                <div className="flex items-center gap-1.5">
+                <div className="flex shrink-0 items-center gap-1.5">
                   <button
                     type="button"
                     onClick={() => downloadCodeSnippet(block.lang, block.code)}
                     aria-label="ดาวน์โหลดไฟล์โค้ด"
                     title="ดาวน์โหลดไฟล์โค้ดนี้"
-                    className="inline-flex min-h-[28px] items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                    className="inline-flex min-h-[44px] sm:min-h-[32px] items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus)] whitespace-nowrap"
                   >
-                    <Download className="h-3 w-3" aria-hidden="true" />
+                    <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                     <span className="hidden sm:inline">บันทึกไฟล์</span>
                   </button>
                   <CopyButton
@@ -216,7 +216,7 @@ export const SafeMessageText = React.memo(function SafeMessageText({ content }: 
                   />
                 </div>
               </div>
-              <pre className="overflow-x-auto p-3 font-mono text-xs leading-relaxed text-[var(--color-text)]">
+              <pre className="overflow-x-auto p-3.5 font-mono text-xs leading-relaxed text-[var(--color-text)]">
                 <code>{block.code}</code>
               </pre>
             </div>
@@ -228,8 +228,8 @@ export const SafeMessageText = React.memo(function SafeMessageText({ content }: 
               key={i}
               className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]"
             >
-              <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-raised)]/60 px-3 py-1.5">
-                <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">
+              <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-raised)]/70 px-3 py-1.5">
+                <span className="text-[11px] font-medium text-[var(--color-text-secondary)] tabular-nums">
                   ตารางข้อมูล ({block.rows.length} แถว)
                 </span>
                 <CopyButton
