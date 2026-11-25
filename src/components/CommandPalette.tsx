@@ -91,7 +91,7 @@ export function CommandPalette({
         label: 'ไปที่ งานของฉัน (My Tasks)',
         hint: 'Alt+3',
         keywords: 'tasks missions execution งาน ภารกิจ',
-        icon: BrainCircuit,
+        icon: ListTodo,
         onSelect: () => onNavigate('memory'),
       },
       {
