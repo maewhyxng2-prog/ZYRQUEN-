@@ -89,8 +89,8 @@ export function HomeView({
           <h2 className="mt-2 text-2xl font-bold tracking-tight text-[var(--color-text)] sm:text-3xl">สวัสดี, {user.display_name}</h2>
           <p className="mt-2 text-sm leading-relaxed text-[var(--color-text-secondary)]">พื้นที่ทำงานสำหรับสร้างโปรเจกต์ วิเคราะห์ข้อมูล แก้ปัญหา และจัดการผลงานในที่เดียว</p>
           <div className="mt-5 flex flex-wrap gap-2 text-xs text-[var(--color-text-secondary)]">
-            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)]/80 px-3 py-1.5">โปรเจกต์ {homeSummary ? 'พร้อมจัดการ' : 'กำลังโหลดข้อมูล'}</span>
             <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)]/80 px-3 py-1.5">กิจกรรมล่าสุด {recent.length + recentMissions.length}</span>
+            <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)]/80 px-3 py-1.5">พื้นที่ทำงานพร้อมเริ่มต้น</span>
           </div>
         </div>
       </section>
