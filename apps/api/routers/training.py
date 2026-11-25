@@ -92,13 +92,11 @@ def require_training_admin(
     return current_user
 
 
-def _verify_training_approval_readonly(
-    engine, approval_id: str, *, expected_dataset_version: str | None = None
-) -> dict:
-    """Verify approval HMAC and bind it to the exact workflow step and dataset."""
-    approval = engine.governance.store.get_approval(approval_id)
-    if approval is None:
-        raise ApprovalViolationError(f"Approval request not found: {approval_id}")
+def _training_approval_context(
+    engine, approval: dict, *, expected_dataset_version: str | None = None
+) -> tuple[dict, str, str]:
+    """Validate that an approval belongs to a real workflow step and dataset."""
+    approval_id = str(approval.get("id") or "")
     if approval.get("action_type") != "training.execute":
         raise ApprovalViolationError(
             f"Approval {approval_id} action_type={approval.get('action_type')!r} "
@@ -130,6 +128,19 @@ def _verify_training_approval_readonly(
                 f"Approval {approval_id} is not bound to dataset version "
                 f"{expected_dataset_version!r}."
             )
+    return workflow_run, step_key, expected_scope
+
+
+def _verify_training_approval_readonly(
+    engine, approval_id: str, *, expected_dataset_version: str | None = None
+) -> dict:
+    """Verify Tier-2 approval status, expiry, workflow/dataset binding, and HMAC."""
+    approval = engine.governance.store.get_approval(approval_id)
+    if approval is None:
+        raise ApprovalViolationError(f"Approval request not found: {approval_id}")
+    _training_approval_context(
+        engine, approval, expected_dataset_version=expected_dataset_version
+    )
     if approval.get("status") != "approved":
         raise ApprovalViolationError(
             f"Approval {approval_id} is not in 'approved' state (status={approval.get('status')!r})."
@@ -305,14 +316,8 @@ def get_training_readiness(
         # Count only approvals that pass the same status, expiry, action binding,
         # and HMAC verification used immediately before training dispatch.
         active_dataset_version = str(ds_report.get("version") or "").strip()
-        expected_dataset_scope = (
-            f"dataset:{active_dataset_version}" if active_dataset_version else None
-        )
         for item in approved_list:
-            if (
-                item.get("action_type") != "training.execute"
-                or expected_dataset_scope is None
-            ):
+            if item.get("action_type") != "training.execute" or not active_dataset_version:
                 continue
             try:
                 _verify_training_approval_readonly(
@@ -325,15 +330,17 @@ def get_training_readiness(
             approved_training_approvals += 1
 
         now = datetime.now(timezone.utc)
-        pending_training_approvals = sum(
-            1
-            for item in pending_list
-            if item.get("action_type") == "training.execute"
-            and expected_dataset_scope is not None
-            and item.get("scope") == expected_dataset_scope
-            and item.get("step_key") == "execute_training"
-            and datetime.fromisoformat(item["expires_at"]) > now
-        )
+        for item in pending_list:
+            if item.get("action_type") != "training.execute" or not active_dataset_version:
+                continue
+            try:
+                _training_approval_context(
+                    engine, item, expected_dataset_version=active_dataset_version
+                )
+                if datetime.fromisoformat(str(item["expires_at"])) > now:
+                    pending_training_approvals += 1
+            except (ApprovalViolationError, OSError, ValueError, KeyError, TypeError):
+                continue
     except (OSError, ValueError, KeyError, TypeError):
         pass
 
